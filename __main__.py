@@ -1,3 +1,4 @@
+import os
 import argparse
 import asyncio
 import json
@@ -17,36 +18,70 @@ def configure_logging(level):
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--uri", default="tcp://0.0.0.0:10300", help="This Wyoming Server URI")
-    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
+
+    # General configuration
+    parser.add_argument(
+        "--uri",
+        default=os.getenv("WYOMING_URI","tcp://0.0.0.0:10300"),
+        help="This Wyoming Server URI"
+    )
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv("WYOMING_LOG_LEVEL", "INFO"),
+        help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    )
 
     # STT configuration
-    parser.add_argument("--stt-openai-key", required=True, help="OpenAI API key for speech-to-text")
-    parser.add_argument("--stt-openai-url", default="https://api.openai.com/v1", help="Custom OpenAI API base URL for STT")
+    parser.add_argument(
+        "--stt-openai-key",
+        required=False,
+        default=os.getenv("STT_OPENAI_KEY", None),
+        help="OpenAI API key for speech-to-text"
+    )
+    parser.add_argument(
+        "--stt-openai-url",
+        default=os.getenv("STT_OPENAI_URL", "https://api.openai.com/v1"),
+        help="Custom OpenAI API base URL for STT"
+    )
     parser.add_argument(
         "--stt-patterns", 
         type=json.loads,
-        default='["^whisper-", "transcribe", "stt", "speech.*text"]',
+        default=os.getenv("STT_PATTERNS", '["^whisper-", "transcribe", "stt", "speech.*text"]'),
         help="JSON list of regex patterns to identify STT models"
     )
 
     # TTS configuration
-    parser.add_argument("--tts-openai-key", required=True, help="OpenAI API key for text-to-speech") 
-    parser.add_argument("--tts-openai-url", default="https://api.openai.com/v1", help="Custom OpenAI API base URL for TTS")
+    parser.add_argument(
+        "--tts-openai-key",
+        required=False,
+        default=os.getenv("TTS_OPENAI_KEY", None),
+        help="OpenAI API key for text-to-speech"
+    ) 
+    parser.add_argument(
+        "--tts-openai-url",
+        default=os.getenv("TTS_OPENAI_URL", "https://api.openai.com/v1"),
+        help="Custom OpenAI API base URL for TTS"
+    )
     parser.add_argument(
         "--tts-patterns",
         type=json.loads,
-        default='["^tts-", "speech.*synthesis", "text.*speech"]',
+        default=os.getenv("TTS_PATTERNS", '["^tts-", "speech.*synthesis", "text.*speech"]'),
         help="JSON list of regex patterns to identify TTS models"
     )
     parser.add_argument(
         "--tts-voices",
-        type=json.loads,
-        default='["alloy", "echo", "fable", "onyx", "nova", "shimmer"]',
-        help="JSON list of available TTS voices"
+        nargs='+',  # Use nargs to accept multiple values
+        default=os.getenv("TTS_VOICES", ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']),
+        help="List of available TTS voices"
     )
 
     args = parser.parse_args()
+
+    if not args.stt_openai_key:
+        raise ValueError("STT OpenAI key must be provided either as a command-line argument or environment variable")
+
+    if not args.tts_openai_key:
+        raise ValueError("TTS OpenAI key must be provided either as a command-line argument or environment variable")
 
     configure_logging(args.log_level)
     

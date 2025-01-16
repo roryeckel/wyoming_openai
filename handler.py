@@ -224,8 +224,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                         AudioChunk(
                             audio=chunk,
                             rate=TTS_AUDIO_RATE,
-                            width=2,
-                            channels=1,
+                            width=AUDIO_WIDTH,
+                            channels=AUDIO_CHANNELS,
                             timestamp=int(timestamp)
                         ).event()
                     )
@@ -240,3 +240,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
+        
+    async def stop(self) -> None:
+        await super().stop()
+        self._stt_client.close()
+        self._tts_client.close()
