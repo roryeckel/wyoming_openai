@@ -71,7 +71,7 @@ async def main():
     parser.add_argument(
         "--tts-voices",
         nargs='+',  # Use nargs to accept multiple values
-        default=os.getenv("TTS_VOICES", ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']),
+        default=os.getenv("TTS_VOICES", 'alloy echo fable onyx nova shimmer').split(),
         help="List of available TTS voices"
     )
 
