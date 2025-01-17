@@ -199,7 +199,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             #     return False
 
             async with self._client_lock:
-                response = await self._tts_client.audio.speech.create(
+                response = await self._tts_client.audio.speech.with_streaming_response.create(
                     model=self._tts_model,
                     voice=requested_voice,
                     input=synthesize.text
