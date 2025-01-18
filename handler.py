@@ -3,7 +3,6 @@ import logging
 import wave
 from typing import List, Optional
 
-from openai import AsyncOpenAI
 from wyoming.info import Info, Describe, AsrProgram, Attribution, AsrModel, TtsProgram, TtsVoice
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
@@ -11,7 +10,7 @@ from wyoming.asr import Transcribe, Transcript
 from wyoming.tts import Synthesize
 from wyoming.server import AsyncEventHandler
 
-from .compatibility import TtsVoiceModel
+from .compatibility import TtsVoiceModel, CustomAsyncOpenAI
 from .utilities import NamedBytesIO
 from . import __version__
 
@@ -40,8 +39,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self._stt_client = AsyncOpenAI(api_key=stt_api_key or "", base_url=stt_base_url)
-        self._tts_client = AsyncOpenAI(api_key=tts_api_key or "", base_url=tts_base_url)
+        self._stt_client = CustomAsyncOpenAI(api_key=stt_api_key, base_url=stt_base_url)
+        self._tts_client = CustomAsyncOpenAI(api_key=tts_api_key, base_url=tts_base_url)
 
         self._client_lock = client_lock
         

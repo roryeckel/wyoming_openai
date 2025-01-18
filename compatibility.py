@@ -1,5 +1,22 @@
 from typing import List
+from typing_extensions import override
+
 from wyoming.info import AsrModel, TtsVoice, Attribution
+from openai import AsyncOpenAI
+
+class CustomAsyncOpenAI(AsyncOpenAI):
+    def __init__(self, *args, **kwargs):
+        if "api_key" not in kwargs or not kwargs["api_key"]:
+            kwargs["api_key"] = ""
+        super().__init__(*args, **kwargs)
+
+    @property
+    @override
+    def auth_headers(self) -> dict[str, str]:
+        super_headers = super().auth_headers
+        if not self.api_key: 
+            del super_headers["Authorization"]
+        return super_headers
 
 class TtsVoiceModel(TtsVoice):
     """
