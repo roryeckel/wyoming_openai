@@ -4,6 +4,8 @@ OpenAI-Compatible Proxy Client for the Wyoming Protocol
 
 **Author:** Rory Eckel
 
+Note: This project is not affiliated with OpenAI or the Wyoming project.
+
 ## Overview
 
 This project introduces an OpenAI-compatible proxy server that integrates seamlessly with the [Wyoming](https://github.com/rhasspy/wyoming) framework. It provides transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities using OpenAI-compatible APIs. By acting as a bridge between the Wyoming protocol and OpenAI's services, this proxy server enables efficient utilization of local ASR and TTS models. This is particularly advantageous for homelab users who aim to consolidate multiple protocols into a single server, thereby addressing resource constraints.
