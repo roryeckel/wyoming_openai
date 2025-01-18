@@ -55,6 +55,7 @@ The proxy server can be configured using several command line arguments to tailo
 python -m wyoming_openai \
     --uri tcp://0.0.0.0:10300 \
     --log-level INFO \
+    --languages en \
     --stt-openai-key YOUR_STT_API_KEY_HERE \
     --stt-openai-url https://api.openai.com/v1 \
     --stt-models whisper-1 \
@@ -74,6 +75,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 |-----------------------------------------|--------------------------------------------|-------------------------------------------------------------|
 | `--uri`                                 | `WYOMING_URI`                              | The URI for the Wyoming server to bind to.                  |
 | `--log-level`                           | `WYOMING_LOG_LEVEL`                        | Sets the logging level (e.g., INFO, DEBUG).                 |
+| `--languages`                           | `WYOMING_LANGUAGES`                        | Space-separated list of supported languages to avertise.    |
 | `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | The API key for accessing OpenAI's speech-to-text services. |
 | `--stt-openai-url`                      | `STT_OPENAI_URL`                           | The URL for OpenAI's STT endpoint.                          |
 | `--stt-models`                          | `STT_MODELS`                               | Space-separated list of models to use for the STT service.  |

@@ -30,6 +30,12 @@ async def main():
         default=os.getenv("WYOMING_LOG_LEVEL", "INFO"),
         help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
     )
+    parser.add_argument(
+        "--languages",
+        nargs="+",
+        default=os.getenv("WYOMING_LANGUAGES", "en").split(),
+        help="List of languages supported by BOTH STT AND TTS (example: en, fr)"
+    )
 
     # STT configuration
     parser.add_argument(
@@ -80,8 +86,8 @@ async def main():
     configure_logging(args.log_level)
     _LOGGER = logging.getLogger(__name__)
 
-    asr_models = create_asr_models(args.stt_models, args.stt_openai_url)
-    tts_voices = create_tts_voices(args.tts_models, args.tts_voices, args.tts_openai_url)
+    asr_models = create_asr_models(args.stt_models, args.stt_openai_url, args.languages)
+    tts_voices = create_tts_voices(args.tts_models, args.tts_voices, args.tts_openai_url, args.languages)
 
     if not asr_models:
         _LOGGER.warning("No ASR models specified")

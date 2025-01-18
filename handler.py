@@ -112,17 +112,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         _LOGGER.warning("Unhandled event type: %s", event.type)
         return False
     
-    async def _handle_transcribe(self, transcribe: Transcribe) -> None:
+    async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
-        return True
-        # if transcribe.language:
-        #     if transcribe.language not in self._languages:
-        #         _LOGGER.error(f"Language {transcribe.language} is not supported. The following languages are set in the configuration: {self._languages}")
-        #         return False
-        #     else:
-        #         self._language = transcribe.language
-        #         _LOGGER.debug("Language set to %s", transcribe.language)
-        #         return True
+        asr_model = self._get_asr_model(transcribe.name)
+        if asr_model:
+            if self._is_asr_language_supported(transcribe.language, asr_model):
+                return True
+            else:
+                self._log_unsupported_asr_language(transcribe.name, transcribe.language)
+        else:
+            self._log_unsupported_asr_model(transcribe.name)
+        return False
 
     async def _handle_audio_start(self) -> None:
         """Handle start of audio stream"""
@@ -181,25 +181,74 @@ class OpenAIEventHandler(AsyncEventHandler):
         finally:
             self._wav_buffer = None
 
+    def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
+        """Get an ASR model by name or None"""
+        for program in self._wyoming_info.asr:
+            for model in program.models:
+                if model.name == model_name or not model_name:
+                    return model
+                
+    def _log_unsupported_asr_model(self, model_name: str | None = None):
+        """Log an unsupported ASR model"""
+        if model_name:
+            _LOGGER.warning("Unsupported ASR model: %s", model_name)
+        else:
+            _LOGGER.warning("No ASR models specified")
+
+    def _is_asr_language_supported(self, language: str, model: AsrModel) -> bool:
+        """Check if a language is supported by an ASR model"""
+        return not model.languages or language in model.languages
+    
+    def _log_unsupported_asr_language(self, model_name: str, language: str):
+        """Log an unsupported ASR language"""
+        _LOGGER.error("Unsupported ASR model %s for language %s", model_name, language)
+
+    def _get_voice(self, name: str | None = None) -> TtsVoiceModel | None:
+        """Get a TTS voice by name or None"""
+        for program in self._wyoming_info.tts:
+            for voice in program.voices:
+                if voice.name == name:
+                    return voice
+                
+    def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
+        """Check if a language is supported by a TTS voice"""
+        return not voice.languages or language in voice.languages
+    
+    def _validate_tts_language(self, language: str, voice: TtsVoice) -> bool:
+        """Validate if a language is supported by a TTS voice"""
+        if language and not self._is_tts_language_supported(language, voice):
+            _LOGGER.error(f"Language {language} is not supported for voice {language}. Available languages: {voice.languages}")
+            return False
+        else:
+            return True
+        
+    def _log_unsupported_voice(self, requested_voice: str | None) -> None:
+        """Log an error message if a voice is not supported"""
+        if requested_voice:
+            _LOGGER.error(f"Voice {requested_voice} is not supported. Available voices: {[voice.name for program in self._wyoming_info.tts for voice in program.voices]}")
+        else:
+            _LOGGER.error(f"No TTS voices specified")
+
     async def _handle_synthesize(self, synthesize: Synthesize) -> bool:
         """Handle text-to-speech synthesis request"""
         try:
             _LOGGER.debug("Handling synthesize request %s", synthesize)
 
+            if not synthesize.voice and self._wyoming_info.tts and self._wyoming_info.tts[0].voices:
+                # No voice specified in the request, use the first available one
+                synthesize.voice = self._wyoming_info.tts[0].voices[0].name
+
             requested_voice = synthesize.voice.name
+            requested_language = synthesize.voice.language
 
             # Validate voice against self._wyoming_info
-            if requested_voice:
-                tts_voices = {voice.name for program in self._wyoming_info.tts for voice in program.voices}
-                if requested_voice not in tts_voices:
-                    _LOGGER.error(f"Voice {requested_voice} is not supported. Available voices: {tts_voices}")
+            voice = self._get_voice(requested_voice)
+            if voice:
+                if not self._validate_tts_language(requested_language, requested_voice):
                     return False
-
-            # Validate language against self._languages
-            # requested_language = synthesize.voice.language
-            # if requested_language and requested_language not in self._languages:
-            #     _LOGGER.error(f"Language {requested_language} is not supported. The following languages are set in the configuration: {self._languages}")
-            #     return False
+            else:
+                self._log_unsupported_voice(requested_voice)
+                return False
 
             async with self._client_lock:
                 async with self._tts_client.audio.speech.with_streaming_response.create(
@@ -218,7 +267,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     
                     # Stream the audio in chunks
                     timestamp = 0
-                    samples_per_chunk = ASR_CHUNK_SIZE // 2  # 2 bytes per sample
+                    samples_per_chunk = ASR_CHUNK_SIZE // AUDIO_WIDTH  # bytes per sample
                     timestamp_increment = (samples_per_chunk / TTS_AUDIO_RATE) * 1000  # ms
                     
                     async for chunk in response.iter_bytes(chunk_size=ASR_CHUNK_SIZE):
@@ -244,6 +293,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             return False
         
     async def stop(self) -> None:
+        """Stop the handler and close the clients"""
         await super().stop()
         self._stt_client.close()
         self._tts_client.close()
