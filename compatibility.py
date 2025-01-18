@@ -5,6 +5,9 @@ from wyoming.info import AsrModel, TtsVoice, Attribution
 from openai import AsyncOpenAI
 
 class CustomAsyncOpenAI(AsyncOpenAI):
+    """
+    Custom implementation of OpenAI's AsyncOpenAI class to handle API key authentication being optional.
+    """
     def __init__(self, *args, **kwargs):
         if "api_key" not in kwargs or not kwargs["api_key"]:
             kwargs["api_key"] = ""
@@ -13,6 +16,9 @@ class CustomAsyncOpenAI(AsyncOpenAI):
     @property
     @override
     def auth_headers(self) -> dict[str, str]:
+        """
+        Override the auth_headers property to remove the Authorization header if no API key is provided.
+        """
         super_headers = super().auth_headers
         if not self.api_key: 
             del super_headers["Authorization"]
