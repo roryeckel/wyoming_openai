@@ -40,8 +40,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self._stt_client = AsyncOpenAI(api_key=stt_api_key, base_url=stt_base_url)
-        self._tts_client = AsyncOpenAI(api_key=tts_api_key, base_url=tts_base_url)
+        self._stt_client = AsyncOpenAI(api_key=stt_api_key or "", base_url=stt_base_url)
+        self._tts_client = AsyncOpenAI(api_key=tts_api_key or "", base_url=tts_base_url)
 
         self._client_lock = client_lock
         
