@@ -7,6 +7,7 @@ services:
     environment:
       WYOMING_URI: tcp://0.0.0.0:10300
       WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
       STT_OPENAI_URL: https://api.openai.com/v1
       STT_MODELS: "whisper-1"
       TTS_OPENAI_URL: https://api.openai.com/v1

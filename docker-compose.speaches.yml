@@ -7,6 +7,7 @@ services:
     environment:
       WYOMING_URI: tcp://0.0.0.0:10300
       WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
       STT_OPENAI_URL: http://speaches:8000/v1
       STT_MODELS: "Systran/faster-distil-whisper-large-v3"
       TTS_OPENAI_URL: http://speaches:8000/v1
