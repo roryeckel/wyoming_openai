@@ -1,18 +1,23 @@
-# wyoming_openai
+# Wyoming OpenAI
 
 OpenAI-Compatible Proxy Client for the Wyoming Protocol
 
-Maintained by Rory Eckel
+**Author:** Rory Eckel
 
 ## Overview
 
-This project provides an OpenAI-compatible proxy server for the [Wyoming](https://github.com/rhasspy/wyoming) framework. It enables transcription (ASR - Automatic Speech Recognition) and text-to-speech synthesis (TTS) using OpenAI compatible APIs, making it easy to integrate these powerful services into your Wyoming-based applications. This is especially useful for those hosting their own ASR and TTS models locally, as it is usually infeasible to run servers for both protocols simultaneously due to resource constraints.
+This project introduces an OpenAI-compatible proxy server that integrates seamlessly with the [Wyoming](https://github.com/rhasspy/wyoming) framework. It provides transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities using OpenAI-compatible APIs. By acting as a bridge between the Wyoming protocol and OpenAI's services, this proxy server enables efficient utilization of local ASR and TTS models. This is particularly advantageous for homelab users who aim to consolidate multiple protocols into a single server, thereby addressing resource constraints.
 
 ## Objectives
 
-1. **Proxy Server for OpenAI APIs**: Act as an intermediary between Wyoming protocol and OpenAI's ASR and TTS services.
-2. **Support Multiple Models/Voices**: Allow configuration of specific ASR models and TTS voices via command line arguments.
-3. **Streamline Audio Handling**: Efficiently manage audio streams for both transcription and synthesis.
+1. **OpenAI API Proxy Server**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
+2. **Service Consolidation**: Allow users operating different protocols to run them on a single server without needing separate instances for each service.
+3. **Asynchronous Processing**: Enable efficient handling of multiple requests by supporting asynchronous processing of audio streams.
+
+## Terminology
+
+- **TTS (Text-to-Speech)**: The process of converting text into audible speech output.
+- **ASR (Automatic Speech Recognition) / STT (Speech-to-Text)**: Technologies that convert spoken language into written text. ASR and STT are often used interchangeably to describe this function.
 
 ## Installation Instructions
 
@@ -87,3 +92,8 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 ## Contributing
 
 Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
+
+### Future Plans
+
+- OpenAI Realtime API
+- Improved streaming support directly to OpenAI APIs
