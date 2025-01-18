@@ -1,4 +1,4 @@
-from typing import List, Set
+from typing import List
 from wyoming.info import AsrModel, TtsVoice, Attribution
 
 class TtsVoiceModel(TtsVoice):
