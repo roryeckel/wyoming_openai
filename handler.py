@@ -45,10 +45,6 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._client_lock = client_lock
         
-        # Default to first available model/voice if available
-        self._stt_model = asr_models[0].name if asr_models else "whisper-1"
-        self._tts_model = tts_voices[0].model_name if tts_voices else "tts-1"
-        
         self._wyoming_info = Info(
             asr=[
                 AsrProgram(
@@ -82,6 +78,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._wav_buffer: Optional[NamedBytesIO] = None
         self._wav_write_buffer: Optional[wave.Wave_write] = None
         self._is_recording = False
+        self._current_asr_model = None
 
     async def handle_event(self, event: Event) -> bool:
         if AudioChunk.is_type(event.type):
@@ -114,9 +111,9 @@ class OpenAIEventHandler(AsyncEventHandler):
     
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
-        asr_model = self._get_asr_model(transcribe.name)
-        if asr_model:
-            if self._is_asr_language_supported(transcribe.language, asr_model):
+        self._current_asr_model = self._get_asr_model(transcribe.name)
+        if self._current_asr_model:
+            if self._is_asr_language_supported(transcribe.language, self._current_asr_model):
                 return True
             else:
                 self._log_unsupported_asr_language(transcribe.name, transcribe.language)
@@ -162,7 +159,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             async with self._client_lock:
                 result = await self._stt_client.audio.transcriptions.create(
                     file=self._wav_buffer,
-                    model=self._stt_model
+                    model=self._current_asr_model.name
                 )
                 
             if result.text:
@@ -207,7 +204,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Get a TTS voice by name or None"""
         for program in self._wyoming_info.tts:
             for voice in program.voices:
-                if voice.name == name:
+                if not name or voice.name == name:
                     return voice
                 
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
@@ -252,7 +249,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             async with self._client_lock:
                 async with self._tts_client.audio.speech.with_streaming_response.create(
-                    model=self._tts_model,
+                    model=voice.model_name,
                     voice=requested_voice,
                     input=synthesize.text) as response:
                 
