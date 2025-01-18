@@ -7,7 +7,7 @@ from wyoming.server import AsyncServer
 
 from . import __version__
 from .handler import OpenAIEventHandler
-from .utilities import create_asr_models, create_tts_voices
+from .compatibility import create_asr_models, create_tts_voices
 
 
 def configure_logging(level):

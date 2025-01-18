@@ -1,0 +1,34 @@
+services:
+  wyoming_openai:
+    build: .
+    container_name: wyoming_openai
+    ports:
+      - "10300:10300"
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      STT_OPENAI_URL: http://speaches:8000/v1
+      STT_MODELS: "Systran/faster-distil-whisper-large-v3"
+      TTS_OPENAI_URL: http://speaches:8000/v1
+      TTS_MODELS: "hexgrad/Kokoro-82M"
+      TTS_VOICES: "af"
+
+  speaches:
+      container_name: speaches
+      image: ghcr.io/speaches-ai/speaches:latest-cuda
+      restart: unless-stopped
+      ports:
+        - "8000:8000"
+      environment:
+          - enable_ui=False
+          - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
+          - WHISPER__compute_type=int8_float32
+      volumes:
+          - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
+      deploy:
+          resources:
+              reservations:
+                  devices:
+                      - driver: nvidia
+                        capabilities: [gpu]
+      runtime: nvidia

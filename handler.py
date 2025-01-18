@@ -11,8 +11,11 @@ from wyoming.asr import Transcribe, Transcript
 from wyoming.tts import Synthesize
 from wyoming.server import AsyncEventHandler
 
+from .compatibility import TtsVoiceModel
 from .utilities import NamedBytesIO
 from . import __version__
+
+# TODO: Replace the _wav_buffer with a _pcm_buffer to hold the raw PCM file instead of encoding wav on the fly. The new _pcm_buffer should be stored in NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_base_url: str,
         client_lock: asyncio.Lock,
         asr_models: List[AsrModel],
-        tts_voices: List[TtsVoice],
+        tts_voices: List[TtsVoiceModel],
         **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -44,7 +47,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         
         # Default to first available model/voice if available
         self._stt_model = asr_models[0].name if asr_models else "whisper-1"
-        self._tts_model = "tts-1"  # Base TTS model
+        self._tts_model = tts_voices[0].model_name if tts_voices else "tts-1"
         
         self._wyoming_info = Info(
             asr=[
