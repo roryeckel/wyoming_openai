@@ -1,14 +1,14 @@
 import os
 import argparse
 import asyncio
-import json
 import logging
 from functools import partial
 from wyoming.server import AsyncServer
 
 from . import __version__
 from .handler import OpenAIEventHandler
-from .utilities import get_openai_models
+from .utilities import create_asr_models, create_tts_voices
+
 
 def configure_logging(level):
     numeric_level = getattr(logging, level.upper(), None)
@@ -44,10 +44,10 @@ async def main():
         help="Custom OpenAI API base URL for STT"
     )
     parser.add_argument(
-        "--stt-patterns", 
-        type=json.loads,
-        default=os.getenv("STT_PATTERNS", '["^whisper-", "transcribe", "stt", "speech.*text"]'),
-        help="JSON list of regex patterns to identify STT models"
+        "--stt-models",
+        nargs='+',  # Use nargs to accept multiple values
+        default=os.getenv("STT_MODELS", 'whisper-1').split(),
+        help="List of STT model identifiers"
     )
 
     # TTS configuration
@@ -63,48 +63,35 @@ async def main():
         help="Custom OpenAI API base URL for TTS"
     )
     parser.add_argument(
-        "--tts-patterns",
-        type=json.loads,
-        default=os.getenv("TTS_PATTERNS", '["^tts-", "speech.*synthesis", "text.*speech"]'),
-        help="JSON list of regex patterns to identify TTS models"
+        "--tts-models",
+        nargs='+',
+        default=os.getenv("TTS_MODELS", 'tts-1 tts-1-hd').split(),
+        help="List of TTS model identifiers"
     )
     parser.add_argument(
         "--tts-voices",
-        nargs='+',  # Use nargs to accept multiple values
+        nargs='+',
         default=os.getenv("TTS_VOICES", 'alloy echo fable onyx nova shimmer').split(),
         help="List of available TTS voices"
     )
 
     args = parser.parse_args()
 
-    if not args.stt_openai_key:
-        raise ValueError("STT OpenAI key must be provided either as a command-line argument or environment variable")
-
-    if not args.tts_openai_key:
-        raise ValueError("TTS OpenAI key must be provided either as a command-line argument or environment variable")
-
     configure_logging(args.log_level)
-    
-    asr_models, tts_voices = await get_openai_models(
-        args.stt_openai_key,
-        args.stt_openai_url,
-        args.stt_patterns,
-        args.tts_patterns,
-        args.tts_voices
-    )
+    _LOGGER = logging.getLogger(__name__)
+
+    asr_models = create_asr_models(args.stt_models, args.stt_openai_url)
+    tts_voices = create_tts_voices(args.tts_models, args.tts_voices, args.tts_openai_url)
 
     if not asr_models:
-        _LOGGER.warning("No ASR models found matching patterns: %s", args.stt_patterns)
-        _LOGGER.warning("Will use default 'whisper-1'")
+        _LOGGER.warning("No ASR models specified")
     if not tts_voices:
-        _LOGGER.warning("No TTS models found matching patterns: %s", args.tts_patterns)
-        _LOGGER.warning("Will use defaults")
+        _LOGGER.warning("No TTS models models specified")
 
     # Create server
     server = AsyncServer.from_uri(args.uri)
 
     # Run server
-    _LOGGER = logging.getLogger(__name__)
     _LOGGER.info("Starting server at %s", args.uri)
     await server.run(
         partial(

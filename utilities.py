@@ -1,74 +1,64 @@
 from io import BytesIO
-import logging
-import re
-from typing import List, Tuple
-from openai import AsyncOpenAI
+from typing import List
+
 from wyoming.info import AsrModel, TtsVoice, Attribution
 
-def is_matching_model(model_id: str, patterns: List[str]) -> bool:
-    """Check if model ID matches any of the given patterns"""
-    return any(re.match(pattern, model_id, re.IGNORECASE) for pattern in patterns)
+# def is_matching_model(model_id: str, patterns: List[str]) -> bool:
+#     """Check if model ID matches any of the given patterns"""
+#     return any(re.match(pattern, model_id, re.IGNORECASE) for pattern in patterns)
 
-async def get_openai_models(
-    api_key: str, 
-    base_url: str,
-    stt_patterns: List[str],
-    tts_patterns: List[str],
-    tts_voices: List[str]
-) -> Tuple[List[AsrModel], List[TtsVoice]]:
-    async with AsyncOpenAI(api_key=api_key, base_url=base_url) as client:
-        logger = logging.getLogger(__name__)
-        logger.debug("Fetching OpenAI models...")
+# async def get_openai_models(
+#     api_key: str, 
+#     base_urls: Set[str]
+# ):
+#     logger = logging.getLogger(__name__)
+#     logger.debug("Fetching OpenAI models...")
 
-        try:
-            models_response = await client.models.list()
-            
-            asr_models = []
-            tts_model_voices = []
+#     for base_url in base_urls:
+#         async with AsyncOpenAI(api_key=api_key, base_url=base_url) as client:
+#             try:
+#                 models_response = await client.models.list()
 
-            for model in models_response.data:
-                if is_matching_model(model.id, stt_patterns):
-                    asr_models.append(
-                        AsrModel(
-                            name=model.id,
-                            description=model.id,
-                            attribution=Attribution(
-                                name="OpenAI Compatible",
-                                url=base_url
-                            ),
-                            installed=True,
-                            languages=['en'],
-                            version=model.id
-                        )
-                    )
-                    logger.info("Found ASR model: %s", model.id)
-                    
-                elif is_matching_model(model.id, tts_patterns):
-                    # For each TTS model, create voices for all available voice options
-                    for voice in tts_voices:
-                        tts_model_voices.append(
-                            TtsVoice(
-                                name=voice,
-                                description=f"{voice} ({model.id})",
-                                attribution=Attribution(
-                                    name="OpenAI Compatible",
-                                    url=base_url
-                                ),
-                                installed=True,
-                                languages=['en'],
-                                version=model.id
-                            )
-                        )
-                    logger.info("Found TTS model: %s with voices", model.id)
+#                 for model in models_response.data:
+#                     logger.info("Found ASR model: %s", model.id)
+#                 else:
+#                     logger.debug("Skipping model: %s (no matching patterns)", model.id)
 
-                else:
-                    logger.debug("Skipping model: %s (no matching patterns)", model.id)
+#             except Exception as e:
+#                 logger.error("Failed to fetch OpenAI models: %s", e)
 
-            return asr_models, tts_model_voices
+def create_asr_models(stt_models: List[str], stt_url: str):
+    asr_models = []
+    for model in stt_models:
+        asr_models.append(AsrModel(
+            name=model,
+            description=model,
+            attribution=Attribution(
+                name="OpenAI Compatible",
+                url=stt_url
+            ),
+            installed=True,
+            languages=['en'],
+            version=None
+        ))
+    return asr_models
 
-        except Exception as e:
-            logger.error("Failed to fetch OpenAI models: %s", e)
-            return [], []
+def create_tts_voices(tts_models: List[str], tts_voices: List[str], tts_url: str):
+    voices = []
+    for model in tts_models:
+        for voice in tts_voices:
+            voices.append(TtsVoice(
+                name=voice,
+                description=f"{voice} ({model})",
+                attribution=Attribution(
+                    name="OpenAI Compatible",
+                    url=tts_url
+                ),
+                installed=True,
+                languages=['en'],
+                version=None
+            ))
+    return voices
 
 class NamedBytesIO(BytesIO):
     def __init__(self, *args, **kwargs):

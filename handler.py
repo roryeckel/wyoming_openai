@@ -199,43 +199,42 @@ class OpenAIEventHandler(AsyncEventHandler):
             #     return False
 
             async with self._client_lock:
-                response = await self._tts_client.audio.speech.with_streaming_response.create(
+                async with self._tts_client.audio.speech.with_streaming_response.create(
                     model=self._tts_model,
                     voice=requested_voice,
-                    input=synthesize.text
-                )
+                    input=synthesize.text) as response:
                 
-                # Send audio start with required audio parameters
-                await self.write_event(
-                    AudioStart(
-                        rate=TTS_AUDIO_RATE,
-                        width=AUDIO_WIDTH,
-                        channels=AUDIO_CHANNELS
-                    ).event()
-                )
-                
-                # Stream the audio in chunks
-                timestamp = 0
-                samples_per_chunk = ASR_CHUNK_SIZE // 2  # 2 bytes per sample
-                timestamp_increment = (samples_per_chunk / TTS_AUDIO_RATE) * 1000  # ms
-                
-                for chunk in response.iter_bytes(chunk_size=ASR_CHUNK_SIZE):
+                    # Send audio start with required audio parameters
                     await self.write_event(
-                        AudioChunk(
-                            audio=chunk,
+                        AudioStart(
                             rate=TTS_AUDIO_RATE,
                             width=AUDIO_WIDTH,
-                            channels=AUDIO_CHANNELS,
-                            timestamp=int(timestamp)
+                            channels=AUDIO_CHANNELS
                         ).event()
                     )
-                    timestamp += timestamp_increment
-                
-                # Send audio stop
-                await self.write_event(AudioStop().event())
-                
-                _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
-                return True
+                    
+                    # Stream the audio in chunks
+                    timestamp = 0
+                    samples_per_chunk = ASR_CHUNK_SIZE // 2  # 2 bytes per sample
+                    timestamp_increment = (samples_per_chunk / TTS_AUDIO_RATE) * 1000  # ms
+                    
+                    async for chunk in response.iter_bytes(chunk_size=ASR_CHUNK_SIZE):
+                        await self.write_event(
+                            AudioChunk(
+                                audio=chunk,
+                                rate=TTS_AUDIO_RATE,
+                                width=AUDIO_WIDTH,
+                                channels=AUDIO_CHANNELS,
+                                timestamp=int(timestamp)
+                            ).event()
+                        )
+                        timestamp += timestamp_increment
+                    
+                    # Send audio stop
+                    await self.write_event(AudioStop().event())
+                    
+                    _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
+                    return True
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)

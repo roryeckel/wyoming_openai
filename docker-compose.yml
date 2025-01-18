@@ -7,12 +7,5 @@ services:
     environment:
       WYOMING_URI: tcp://0.0.0.0:10300
       WYOMING_LOG_LEVEL: INFO
-      STT_OPENAI_KEY: ${STT_OPENAI_KEY}  # Use an env file or export this variable
-      STT_OPENAI_URL: https://api.openai.com/v1
-      STT_PATTERNS: '["^whisper-", "transcribe", "stt", "speech.*text"]'
-      TTS_OPENAI_KEY: ${TTS_OPENAI_KEY}  # Use an env file or export this variable
-      TTS_OPENAI_URL: https://api.openai.com/v1
-      TTS_PATTERNS: '["^tts-", "speech.*synthesis", "text.*speech"]'
-      TTS_VOICES: alloy echo fable onyx nova shimmer
     env_file:
       - .env
