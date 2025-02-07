@@ -12,7 +12,7 @@ services:
       STT_MODELS: "Systran/faster-distil-whisper-large-v3"
       TTS_OPENAI_URL: http://speaches:8000/v1
       TTS_MODELS: "hexgrad/Kokoro-82M"
-      TTS_VOICES: "af"
+      TTS_VOICES: "af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa"
 
   speaches:
       container_name: speaches
