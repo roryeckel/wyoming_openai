@@ -33,3 +33,5 @@ services:
                       - driver: nvidia
                         capabilities: [gpu]
       runtime: nvidia
+volumes:
+  huggingface-hub:
