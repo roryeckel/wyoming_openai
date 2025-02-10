@@ -21,17 +21,17 @@ services:
     ports:
       - "8000:8000"
     environment:
-        - enable_ui=False
-        - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
-        - WHISPER__compute_type=int8_float32
+      - enable_ui=False
+      - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
+      - WHISPER__compute_type=int8_float32
     volumes:
-        - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
+      - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
     deploy:
-        resources:
-            reservations:
-                devices:
-                    - driver: nvidia
-                      capabilities: [gpu]
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [ gpu ]
     runtime: nvidia
 volumes:
   huggingface-hub:
