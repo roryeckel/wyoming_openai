@@ -15,23 +15,23 @@ services:
       TTS_VOICES: "af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa"
 
   speaches:
-      container_name: speaches
-      image: ghcr.io/speaches-ai/speaches:latest-cuda
-      restart: unless-stopped
-      ports:
-        - "8000:8000"
-      environment:
-          - enable_ui=False
-          - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
-          - WHISPER__compute_type=int8_float32
-      volumes:
-          - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
-      deploy:
-          resources:
-              reservations:
-                  devices:
-                      - driver: nvidia
-                        capabilities: [gpu]
-      runtime: nvidia
+    container_name: speaches
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+        - enable_ui=False
+        - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
+        - WHISPER__compute_type=int8_float32
+    volumes:
+        - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: nvidia
+                      capabilities: [gpu]
+    runtime: nvidia
 volumes:
   huggingface-hub:
