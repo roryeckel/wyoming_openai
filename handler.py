@@ -28,10 +28,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     def __init__(
         self,
         *args,
-        stt_api_key: str,
-        stt_base_url: str,
-        tts_api_key: str,
-        tts_base_url: str,
+        stt_client: CustomAsyncOpenAI,
+        tts_client: CustomAsyncOpenAI,
         client_lock: asyncio.Lock,
         asr_models: List[AsrModel],
         tts_voices: List[TtsVoiceModel],
@@ -39,8 +37,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self._stt_client = CustomAsyncOpenAI(api_key=stt_api_key, base_url=stt_base_url)
-        self._tts_client = CustomAsyncOpenAI(api_key=tts_api_key, base_url=tts_base_url)
+        self._stt_client = stt_client
+        self._tts_client = tts_client
 
         self._client_lock = client_lock
         

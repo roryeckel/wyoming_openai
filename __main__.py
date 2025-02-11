@@ -7,7 +7,7 @@ from wyoming.server import AsyncServer
 
 from . import __version__
 from .handler import OpenAIEventHandler
-from .compatibility import create_asr_models, create_tts_voices
+from .compatibility import CustomAsyncOpenAI, create_asr_models, create_tts_voices
 
 
 def configure_logging(level):
@@ -97,16 +97,19 @@ async def main():
     # Create server
     server = AsyncServer.from_uri(args.uri)
 
+    # Create clients
+    stt_client = CustomAsyncOpenAI(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
+    tts_client = CustomAsyncOpenAI(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
+    client_lock = asyncio.Lock()
+
     # Run server
     _LOGGER.info("Starting server at %s", args.uri)
     await server.run(
         partial(
             OpenAIEventHandler,
-            stt_api_key=args.stt_openai_key,
-            stt_base_url=args.stt_openai_url,
-            tts_api_key=args.tts_openai_key,
-            tts_base_url=args.tts_openai_url,
-            client_lock=asyncio.Lock(),
+            stt_client=stt_client,
+            tts_client=tts_client,
+            client_lock=client_lock,
             asr_models=asr_models,
             tts_voices=tts_voices
         )
