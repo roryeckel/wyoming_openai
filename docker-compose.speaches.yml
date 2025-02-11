@@ -12,7 +12,7 @@ services:
       STT_MODELS: "Systran/faster-distil-whisper-large-v3"
       TTS_OPENAI_URL: http://speaches:8000/v1
       TTS_MODELS: "hexgrad/Kokoro-82M"
-      TTS_VOICES: "af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa"
+      TTS_VOICES: "af af_bella af_sarah am_adam am_michael bf_emma bf_isabella bm_george bm_lewis af_nicole af_sky" # http://speaches:8000/docs#/speech-to-text/list_voices_v1_audio_speech_voices_get
 
   speaches:
     container_name: speaches
@@ -33,5 +33,6 @@ services:
             - driver: nvidia
               capabilities: [ gpu ]
     runtime: nvidia
+
 volumes:
   huggingface-hub:
