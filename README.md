@@ -12,8 +12,9 @@ This project introduces an OpenAI-compatible proxy server that integrates seamle
 
 ## Objectives
 
-1. **OpenAI API Proxy Server**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
+1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
 2. **Service Consolidation**: Allow users operating different protocols to run them on a single server without needing separate instances for each service.
+Example: Sharing TTS/STT services between Open WebUI and Home Assistant.
 3. **Asynchronous Processing**: Enable efficient handling of multiple requests by supporting asynchronous processing of audio streams.
 
 ## Terminology
@@ -21,14 +22,14 @@ This project introduces an OpenAI-compatible proxy server that integrates seamle
 - **TTS (Text-to-Speech)**: The process of converting text into audible speech output.
 - **ASR (Automatic Speech Recognition) / STT (Speech-to-Text)**: Technologies that convert spoken language into written text. ASR and STT are often used interchangeably to describe this function.
 
-## Installation Instructions
+## Installation (for Development)
 
 ### Prerequisites
 
 - Tested with Python 3.12 or later
 - OpenAI API key(s) if using proprietary models
 
-### Steps to Install
+### Instructions
 
 1. **Clone the Repository**
 
@@ -91,7 +92,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-models`                          | `TTS_MODELS`                               | Space-separated list of models to use for the TTS service.  |
 | `--tts-voices`                          | `TTS_VOICES`                               | Space-separated list of voices for TTS.                     |
 
-## Docker
+## Docker (Recommended)
 
 ### Prerequisites
 
@@ -134,7 +135,8 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
 
 Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
 
-### Future Plans
+### Future Plans (Descending Priority)
 
-- OpenAI Realtime API
 - Improved streaming support directly to OpenAI APIs
+- Reverse direction support (Server for OpenAI compatible endpoints - possibly FastAPI)
+- OpenAI Realtime API
