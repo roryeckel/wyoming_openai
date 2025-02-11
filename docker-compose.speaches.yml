@@ -22,6 +22,7 @@ services:
       - "8000:8000"
     environment:
       - enable_ui=False
+      - log_level=info
       - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
       - WHISPER__compute_type=int8_float32
     volumes:
