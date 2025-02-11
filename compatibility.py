@@ -100,6 +100,7 @@ def create_tts_voices(tts_models: List[str], tts_voices: List[str], tts_url: str
             ))
     return voices
 
+# https://github.com/speaches-ai/speaches/issues/266
 # async def get_openai_models(
 #     api_key: str, 
 #     base_urls: Set[str]
@@ -120,7 +121,7 @@ def create_tts_voices(tts_models: List[str], tts_voices: List[str], tts_url: str
 #                 models_response = await client.models.list()
 #
 #                 for model in models_response.data:
-#                     logger.info("Found ASR model: %s", model.id)
+#                     logger.info("Found model: %s", model.id)
 #
 #             except Exception as e:
 #                 logger.error("Failed to fetch OpenAI models: %s", e)

@@ -14,7 +14,7 @@ from .compatibility import TtsVoiceModel, CustomAsyncOpenAI
 from .utilities import NamedBytesIO
 from . import __version__
 
-# TODO: Replace the _wav_buffer with a _pcm_buffer to hold the raw PCM file instead of encoding wav on the fly. The new _pcm_buffer should be stored in NamedBytesIO
+# TODO: Replace the _wav_buffer with a _pcm_buffer to hold the raw PCM file instead of encoding wav on the fly.
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,8 +76,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State for current transcription
         self._wav_buffer: Optional[NamedBytesIO] = None
         self._wav_write_buffer: Optional[wave.Wave_write] = None
-        self._is_recording = False
-        self._current_asr_model = None
+        self._is_recording: bool = False
+        self._current_asr_model: Optional[AsrModel] = None
 
     async def handle_event(self, event: Event) -> bool:
         if AudioChunk.is_type(event.type):
