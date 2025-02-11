@@ -22,7 +22,7 @@ Example: Sharing TTS/STT services between Open WebUI and Home Assistant.
 - **TTS (Text-to-Speech)**: The process of converting text into audible speech output.
 - **ASR (Automatic Speech Recognition) / STT (Speech-to-Text)**: Technologies that convert spoken language into written text. ASR and STT are often used interchangeably to describe this function.
 
-## Installation (for Development)
+## Installation (Local Development)
 
 ### Prerequisites
 
@@ -100,7 +100,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 
 ### Deployment Options
 
-You can deploy the Wyoming OpenAI proxy server in different environments depending on whether you are using official OpenAI services or a local alternative like Speaches. Below are two example scenarios:
+You can deploy the Wyoming OpenAI proxy server in different environments depending on whether you are using official OpenAI services or a local alternative like Speaches. Below are example scenarios:
 
 #### 1. Deploying with Official OpenAI Services
 
@@ -109,6 +109,12 @@ To set up the Wyoming OpenAI proxy to work with official OpenAI APIs, follow the
 - **Environment Variables**: Create a `.env` file in your project directory that includes necessary environment variables such as `STT_OPENAI_KEY`, `TTS_OPENAI_KEY`.
 
 - **Docker Compose Configuration**: Use the provided `docker-compose.yml` template. This setup binds a Wyoming server to port 10300 and uses environment variables for OpenAI URLs, model configurations, and voices as specified in the compose file.
+
+- **Command**:
+  
+  ```bash
+  docker-compose -f docker-compose.yml up -d
+  ```
 
 #### 2. Deploying with Speaches Local Service
 
@@ -121,14 +127,36 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
   - It uses a local port (8000) to expose the Speaches service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
 
+- **Command**:
+  
+  ```bash
+  docker-compose -f docker-compose.speaches.yml up -d
+  ```
+
+#### 3. Development with Docker
+
+If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
+
+- **Command**:
+  
+  ```bash
+  docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+  ```
+
+#### 4. Development with Speaches Local Service
+
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`.
+
+- **Command**:
+  
+  ```bash
+  docker-compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
+  ```
+
 ### General Deployment Steps
 
-1. **Start Services**:
-   - For OpenAI: Run `docker-compose up -d` using your chosen Docker Compose file.
-   - For Speaches: Similarly, run `docker-compose -f docker-compose.speaches.yml up -d`.
-
+1. **Start Services**: Run the appropriate Docker Compose command based on your deployment option.
 2. **Verify Deployment**: Ensure that all services are running by checking the logs with `docker-compose logs -f` or accessing the Wyoming OpenAI proxy through its exposed port (e.g., 10300) to ensure it responds as expected.
-
 3. **Configuration Changes**: You can modify environment variables in the `.env` file or directly within your Docker Compose configuration files to adjust settings such as languages, models, and voices without rebuilding containers.
 
 ## Contributing

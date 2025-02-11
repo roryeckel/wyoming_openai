@@ -1,0 +1,4 @@
+services:
+  wyoming_openai:
+    build: .
+    image: null
