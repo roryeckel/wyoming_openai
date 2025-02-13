@@ -89,7 +89,10 @@ async def main():
 
     # Create clients and detect supported backend specializations
     stt_client = await CustomAsyncOpenAI.autodetect_backend(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
+    _LOGGER.debug("Detected STT backend: %s", stt_client.backend)
+
     tts_client = await CustomAsyncOpenAI.autodetect_backend(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
+    _LOGGER.debug("Detected TTS backend: %s", tts_client.backend)
 
     asr_models = create_asr_models(args.stt_models, args.stt_openai_url, args.languages)
 

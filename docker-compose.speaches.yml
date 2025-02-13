@@ -13,6 +13,9 @@ services:
       TTS_OPENAI_URL: http://speaches:8000/v1
       TTS_MODELS: "hexgrad/Kokoro-82M"
       # TTS_VOICES: "af af_bella af_sarah am_adam am_michael bf_emma bf_isabella bm_george bm_lewis af_nicole af_sky"
+    depends_on:
+      speaches:
+        condition: service_healthy
 
   speaches:
     container_name: speaches
@@ -25,6 +28,12 @@ services:
       - log_level=info
       - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
       - WHISPER__compute_type=int8_float32
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     volumes:
       - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
     deploy:

@@ -11,6 +11,9 @@ services:
       TTS_OPENAI_URL: http://kokoro:8880/v1
       TTS_MODELS: "kokoro"
       # TTS_VOICES: "af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa"
+    depends_on:
+      kokoro:
+        condition: service_healthy
 
   kokoro:
     image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
@@ -20,6 +23,12 @@ services:
       - "8880:8880"
     environment:
       - USE_GPU=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8880/v1/test"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     deploy:
       resources:
         reservations:

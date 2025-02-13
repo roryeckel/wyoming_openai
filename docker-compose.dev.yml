@@ -2,3 +2,5 @@ services:
   wyoming_openai:
     build: .
     image: null
+    environment:
+      WYOMING_LOG_LEVEL: DEBUG
