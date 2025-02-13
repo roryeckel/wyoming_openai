@@ -29,6 +29,7 @@ jobs:
       with:
         images: ghcr.io/${{ github.repository }}
         tags: |
+          type=raw,value=latest,enable=${{ github.event_name == 'release' }}
           type=ref,event=branch
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
