@@ -173,6 +173,18 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker-compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
+#### 6. Docker Tags
+
+We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
+
+- **`latest`**: This tag always points to the latest stable release of the Wyoming OpenAI proxy server. It is recommended for users who want to run the most recent, well-tested version without worrying about specific versions.
+
+- **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
+
+- **`version`**: Specific version tags (e.g., `0.1.0`) correspond to stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+
+- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.1`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
+
 ### General Deployment Steps
 
 1. **Start Services**: Run the appropriate Docker Compose command based on your deployment option.
