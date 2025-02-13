@@ -191,6 +191,12 @@ We follow specific tagging conventions for our Docker images. These tags help in
 2. **Verify Deployment**: Ensure that all services are running by checking the logs with `docker-compose logs -f` or accessing the Wyoming OpenAI proxy through its exposed port (e.g., 10300) to ensure it responds as expected.
 3. **Configuration Changes**: You can modify environment variables in the `.env` file or directly within your Docker Compose configuration files to adjust settings such as languages, models, and voices without rebuilding containers.
 
+### Usage in Home Assistant
+
+1. Install & set up your Wyoming OpenAI instance.
+2. In HA, Go to Settings, Devices & Services, Add Integration, and search for Wyoming Protocol. Add the Wyoming Protocol integration with the URI of your Wyoming OpenAI instance.
+3. The hard part is over! Configure your Voice Assistant pipeline to use the STT/TTS services provided by your new Wyoming OpenAI instance.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
