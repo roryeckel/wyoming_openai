@@ -155,7 +155,7 @@ def tts_voice_to_string(tts_voice_model: TtsVoiceModel) -> str:
 class OpenAIBackend(Enum):
     OFFICIAL = 0
     SPEACHES = 1
-    FASTAPI_KOKORO = 2
+    KOKORO_FASTAPI = 2
 
 class CustomAsyncOpenAI(AsyncOpenAI):
     """
@@ -189,7 +189,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
     # FastAPI-Kokoro
     
-    async def _is_fastapi_kokoro(self) -> bool:
+    async def _is_kokoro_fastapi(self) -> bool:
         """
         Checks if the backend is FastAPI-Kokoro by sending a request to /test
         Example Response: { "status": "ok" }
@@ -201,14 +201,14 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         except Exception:
             return False
         
-    async def _list_fastapi_kokoro_voices(self) -> List[str]:
+    async def _list_kokoro_fastapi_voices(self) -> List[str]:
         """
         Fetches the available audio voices from the FastAPI-Kokoro /audio/voices endpoint.
         Caution: This is not a part of official OpenAI spec.
         Example: ["af_sky"]
         """
-        if self.backend != OpenAIBackend.FASTAPI_KOKORO:
-            _LOGGER.debug("Skipping /audio/voices request because backend is not FASTAPI_KOKORO")
+        if self.backend != OpenAIBackend.KOKORO_FASTAPI:
+            _LOGGER.debug("Skipping /audio/voices request because backend is not KOKORO_FASTAPI")
             return []
 
         try:
@@ -268,8 +268,8 @@ class CustomAsyncOpenAI(AsyncOpenAI):
                 tts_voices = await self.list_openai_voices()
             elif self.backend == OpenAIBackend.SPEACHES:
                 tts_voices = await self._list_speaches_voices(model_name)
-            elif self.backend == OpenAIBackend.FASTAPI_KOKORO:
-                tts_voices = await self._list_fastapi_kokoro_voices()
+            elif self.backend == OpenAIBackend.KOKORO_FASTAPI:
+                tts_voices = await self._list_kokoro_fastapi_voices()
             else:
                 _LOGGER.warning("Unknown backend: %s", self.backend)
                 continue
@@ -292,8 +292,8 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         
         if await client._is_speaches():
             client.backend = OpenAIBackend.SPEACHES
-        elif await client._is_fastapi_kokoro():
-            client.backend = OpenAIBackend.FASTAPI_KOKORO
+        elif await client._is_kokoro_fastapi():
+            client.backend = OpenAIBackend.KOKORO_FASTAPI
         else:
             client.backend = OpenAIBackend.OFFICIAL
         
