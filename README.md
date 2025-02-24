@@ -133,17 +133,17 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
   docker-compose -f docker-compose.speaches.yml up -d
   ```
 
-#### 3. Deploying with FastAPI-Kokoro and Speaches Local Services
+#### 3. Deploying with Kokoro-FastAPI and Speaches Local Services
 
-For users preferring a setup that leverages FastAPI-Kokoro for TTS and Speaches for STT, follow these instructions:
+For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches for STT, follow these instructions:
 
-- **Docker Compose Configuration**: Use the `docker-compose.fastapi-kokoro.yml` template which includes configuration for both the Wyoming OpenAI proxy and FastAPI-Kokoro TTS service (Kokoro).
+- **Docker Compose Configuration**: Use the `docker-compose.fastapi-kokoro.yml` template which includes configuration for both the Wyoming OpenAI proxy and Kokoro-FastAPI TTS service (Kokoro).
 
 - **Speaches Setup**:
   - Use it in combination with the Speaches container for access to STT.
 
 - **Kokoro Setup**:
-  - The FastAPI-Kokoro container provides TTS capabilities.
+  - The Kokoro-FastAPI container provides TTS capabilities.
   - It uses a local port (8880) to expose the Kokoro service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
 

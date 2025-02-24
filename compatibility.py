@@ -187,11 +187,11 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         return ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']
 
-    # FastAPI-Kokoro
+    # Kokoro-FastAPI
     
     async def _is_kokoro_fastapi(self) -> bool:
         """
-        Checks if the backend is FastAPI-Kokoro by sending a request to /test
+        Checks if the backend is Kokoro-FastAPI by sending a request to /test
         Example Response: { "status": "ok" }
         """
         try:
@@ -203,7 +203,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         
     async def _list_kokoro_fastapi_voices(self) -> List[str]:
         """
-        Fetches the available audio voices from the FastAPI-Kokoro /audio/voices endpoint.
+        Fetches the available audio voices from the Kokoro-FastAPI /audio/voices endpoint.
         Caution: This is not a part of official OpenAI spec.
         Example: ["af_sky"]
         """
