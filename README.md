@@ -197,6 +197,14 @@ We follow specific tagging conventions for our Docker images. These tags help in
 2. In HA, Go to Settings, Devices & Services, Add Integration, and search for Wyoming Protocol. Add the Wyoming Protocol integration with the URI of your Wyoming OpenAI instance.
 3. The hard part is over! Configure your Voice Assistant pipeline to use the STT/TTS services provided by your new Wyoming OpenAI instance.
 
+#### Reloading Configuration Changes in Home Assistant
+
+When you make changes to your configuration such as updating models, voices, or URLs, it's important to reload the Wyoming OpenAI integration in Home Assistant to apply these changes. Here's how to do it:
+
+1. Go to **Settings** > **Devices & Services**
+2. Find and select your **Wyoming OpenAI** integration
+3. Click on **Reload**
+
 ### Sequence Diagrams
 
 #### Home Assistant
