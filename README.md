@@ -113,7 +113,7 @@ To set up the Wyoming OpenAI proxy to work with official OpenAI APIs, follow the
 - **Command**:
   
   ```bash
-  docker-compose -f docker-compose.yml up -d
+  docker compose -f docker-compose.yml up -d
   ```
 
 #### 2. Deploying with Speaches Local Service
@@ -130,7 +130,7 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
 - **Command**:
   
   ```bash
-  docker-compose -f docker-compose.speaches.yml up -d
+  docker compose -f docker-compose.speaches.yml up -d
   ```
 
 #### 3. Deploying with Kokoro-FastAPI and Speaches Local Services
@@ -150,7 +150,7 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
 - **Command**:
 
   ```bash
-  docker-compose -f docker-compose.speaches.yml -f docker-compose.fastapi-kokoro.yml up -d
+  docker compose -f docker-compose.speaches.yml -f docker-compose.fastapi-kokoro.yml up -d
   ```
 
 #### 4. Development with Docker
@@ -160,7 +160,7 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
 - **Command**:
   
   ```bash
-  docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
 #### 5. Example: Development with Additional Local Service
@@ -170,7 +170,7 @@ For a development setup using the Speaches local service, combine `docker-compos
 - **Command**:
   
   ```bash
-  docker-compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
+  docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
 #### 6. Docker Tags
@@ -188,7 +188,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 ### General Deployment Steps
 
 1. **Start Services**: Run the appropriate Docker Compose command based on your deployment option.
-2. **Verify Deployment**: Ensure that all services are running by checking the logs with `docker-compose logs -f` or accessing the Wyoming OpenAI proxy through its exposed port (e.g., 10300) to ensure it responds as expected.
+2. **Verify Deployment**: Ensure that all services are running by checking the logs with `docker compose logs -f` or accessing the Wyoming OpenAI proxy through its exposed port (e.g., 10300) to ensure it responds as expected.
 3. **Configuration Changes**: You can modify environment variables in the `.env` file or directly within your Docker Compose configuration files to adjust settings such as languages, models, and voices without rebuilding containers.
 
 ### Usage in Home Assistant
