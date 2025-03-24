@@ -8,7 +8,7 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 ## Overview
 
-This project introduces an OpenAI-compatible proxy server that integrates seamlessly with the [Wyoming](https://github.com/rhasspy/wyoming) framework. It provides transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities using OpenAI-compatible APIs. By acting as a bridge between the Wyoming protocol and OpenAI's services, this proxy server enables efficient utilization of local ASR and TTS models. This is particularly advantageous for homelab users who aim to consolidate multiple protocols into a single server, thereby addressing resource constraints.
+This project introduces a [Wyoming](https://github.com/rhasspy/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant.
 
 ## Objectives
 
@@ -16,6 +16,7 @@ This project introduces an OpenAI-compatible proxy server that integrates seamle
 2. **Service Consolidation**: Allow users of various programs to run inference on a single server without needing separate instances for each service.
 Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home Assistant](#usage-in-home-assistant).
 3. **Asynchronous Processing**: Enable efficient handling of multiple requests by supporting asynchronous processing of audio streams.
+4. **Simple Setup with Docker**: Provide a straightforward deployment process using [Docker and Docker Compose](#docker-recommended) for OpenAI and various popular open source projects.
 
 ## Terminology
 
@@ -26,7 +27,7 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 
 ### Prerequisites
 
-- Tested with Python 3.12 or later
+- Tested with Python 3.12
 - Optional: OpenAI API key(s) if using proprietary models
 
 ### Instructions
@@ -51,7 +52,7 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
    pip install -r requirements.txt
    ```
 
-4. **Configure OpenAI API Keys** (ensure you have your OpenAI API keys ready)
+4. **Configure Environment Variables or Command Line Arguments**
 
 ## Command Line Arguments
 
@@ -61,16 +62,16 @@ The proxy server can be configured using several command line arguments to tailo
 
 ```bash
 python -m wyoming_openai \
-    --uri tcp://0.0.0.0:10300 \
-    --log-level INFO \
-    --languages en \
-    --stt-openai-key YOUR_STT_API_KEY_HERE \
-    --stt-openai-url https://api.openai.com/v1 \
-    --stt-models whisper-1 \
-    --tts-openai-key YOUR_TTS_API_KEY_HERE \
-    --tts-openai-url https://api.openai.com/v1 \
-    --tts-models tts-1 \
-    --tts-voices alloy echo fable onyx nova shimmer
+  --uri tcp://0.0.0.0:10300 \
+  --log-level INFO \
+  --languages en \
+  --stt-openai-key YOUR_STT_API_KEY_HERE \
+  --stt-openai-url https://api.openai.com/v1 \
+  --stt-models whisper-1 \
+  --tts-openai-key YOUR_TTS_API_KEY_HERE \
+  --tts-openai-url https://api.openai.com/v1 \
+  --tts-models tts-1 \
+  --tts-voices alloy echo fable onyx nova shimmer
 ```
 
 ## Environment Variables
