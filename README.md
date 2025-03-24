@@ -211,13 +211,51 @@ When you make changes to your configuration such as updating models, voices, or 
 
 Home Assistant uses the Wyoming Protocol integration to communicate with the Wyoming OpenAI proxy server. The proxy server then communicates with the OpenAI API to perform the requested ASR or TTS tasks. The results are then sent back to Home Assistant.
 
-[![](https://mermaid.ink/img/pako:eNqdk01v2zAMhv8KoVOKJtjdhwLqhiI9bB1mo0EGA4UqM4lQW1QlOf1C__uoKIm9pb3MJ0t8KL18Kb4JTQ2KQgR87NFq_GbU2quutsCfUz4abZyyEeYSVIA5dQgyBBMib55Si2Winl6oM3Z9Rw6tMqfUjfx5nbgbjstr4FVtM_WDIgJt0fN904QVUDpEvZlFmlX4HGFSVtUXWf46g6uWnnLWXM4uLhbLAiqvbNDe3CPgFg8Cj2HZN4bKyErG4ZbI5RCU0aNK0nPkNPnrprcPOTkMzKA6gZf9aoU-wELeQqOiyhza5mM1fPlIzGLJ0X3hnAKaOtciH692AlemxQwmZnYoOxkT97W7CB6DIxvweCRzcznY4_6q_1Pn07HJ99wBmFRV-aHr5YuNGwzmde86TGISdA5bMhrPTgvL54V9WmC9_PjC2IGk9n-6NXYlQ2EHgU6NG7VsMOWTvh779a-eQ7_EVHToO2UaHp-3xNaC6-mwFgX_Nso_1KK278ypPhKbpEURfY9T4alfb0SxUm3gVe_4lRwG77jLg_KbaFhjYyL573lad0P7_gfoyTL1?type=png)](https://mermaid-js.github.io/mermaid-live-editor/edit#pako:eNqdk01v2zAMhv8KoVOKJtjdhwLqhiI9bB1mo0EGA4UqM4lQW1QlOf1C__uoKIm9pb3MJ0t8KL18Kb4JTQ2KQgR87NFq_GbU2quutsCfUz4abZyyEeYSVIA5dQgyBBMib55Si2Winl6oM3Z9Rw6tMqfUjfx5nbgbjstr4FVtM_WDIgJt0fN904QVUDpEvZlFmlX4HGFSVtUXWf46g6uWnnLWXM4uLhbLAiqvbNDe3CPgFg8Cj2HZN4bKyErG4ZbI5RCU0aNK0nPkNPnrprcPOTkMzKA6gZf9aoU-wELeQqOiyhza5mM1fPlIzGLJ0X3hnAKaOtciH692AlemxQwmZnYoOxkT97W7CB6DIxvweCRzcznY4_6q_1Pn07HJ99wBmFRV-aHr5YuNGwzmde86TGISdA5bMhrPTgvL54V9WmC9_PjC2IGk9n-6NXYlQ2EHgU6NG7VsMOWTvh779a-eQ7_EVHToO2UaHp-3xNaC6-mwFgX_Nso_1KK278ypPhKbpEURfY9T4alfb0SxUm3gVe_4lRwG77jLg_KbaFhjYyL573lad0P7_gfoyTL1)
+```mermaid
+sequenceDiagram
+  participant HA as Home Assistant
+  participant WY as wyoming_openai
+  participant OAPI as OpenAI API
+  Note over HA,OAPI: Speech-to-Text (STT/ASR) Flow
+  HA->>WY: Transcribe event
+  HA->>WY: AudioStart event
+  loop Audio Streaming
+  HA->>WY: AudioChunk events
+  Note over WY: Buffers WAV data
+  end
+  HA->>WY: AudioStop event
+  WY->>OAPI: Send complete audio file
+  OAPI-->>WY: Text transcript response
+  WY-->>HA: Transcript event
+  Note over HA,OAPI: Text-to-Speech (TTS) Flow
+  HA->>WY: Synthesize event (text + voice)
+  WY->>OAPI: Speech synthesis request
+  WY->>HA: AudioStart event
+  loop Audio Streaming
+  OAPI-->>WY: Audio stream chunks
+  WY-->>HA: AudioChunk events
+  end
+  WY->>HA: AudioStop event
+```
 
 #### Open WebUI
 
 No proxy is needed for Open WebUI, because it has native support for OpenAI-compatible endpoints.
 
-[![](https://mermaid.ink/img/pako:eNp9klFLwzAQx7_KkacJK773YVAYQh90YisF6UtMzzW45uLlqo6x727aOAfizFMu_P7HD_45KEMdqlwFfBvRGVxbvWU9tA7i8ZrFGuu1E9g0oANsPDpo8Pmx_IMo7ssTU5QQp9Yl6o4Egd6R45blhOVQeUTTZ0JZjZ8Ci6qur4vq4QpudvSRUpsmW60SvbaMRkCPnSUQ1i4Ytl4sOeBJPMh3JNLZlGpymPee2QgGTy5gIi-KTbFJKwnCoq6r_6VCAsPeSY_BhstGxawfhFEPv3TUUg3Ig7Zd7OIwvbUqrhuwVXm8dppfW9W6Y-T0KFTtnVG58IhLxTRue5W_6F2I0-g7LacWf15jP09E5xk7K8S3qfr5Bxy_AGmJqvg?type=png)](https://mermaid-js.github.io/mermaid-live-editor/edit#pako:eNp9klFLwzAQx7_KkacJK773YVAYQh90YisF6UtMzzW45uLlqo6x727aOAfizFMu_P7HD_45KEMdqlwFfBvRGVxbvWU9tA7i8ZrFGuu1E9g0oANsPDpo8Pmx_IMo7ssTU5QQp9Yl6o4Egd6R45blhOVQeUTTZ0JZjZ8Ci6qur4vq4QpudvSRUpsmW60SvbaMRkCPnSUQ1i4Ytl4sOeBJPMh3JNLZlGpymPee2QgGTy5gIi-KTbFJKwnCoq6r_6VCAsPeSY_BhstGxawfhFEPv3TUUg3Ig7Zd7OIwvbUqrhuwVXm8dppfW9W6Y-T0KFTtnVG58IhLxTRue5W_6F2I0-g7LacWf15jP09E5xk7K8S3qfr5Bxy_AGmJqvg)
+```mermaid
+sequenceDiagram
+    participant OW as Open WebUI
+    participant OAPI as OpenAI API
+
+    Note over OW,OAPI: Speech-to-Text (STT/ASR) Flow
+    OW->>OAPI: Direct audio transcription request
+    OAPI-->>OW: Text transcript response
+    
+    Note over OW,OAPI: Text-to-Speech (TTS) Flow
+    OW->>OAPI: Direct speech synthesis request
+    OAPI-->>OW: Audio stream response
+    
+```
 
 ## Contributing
 
