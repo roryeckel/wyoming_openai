@@ -95,7 +95,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | The base URL for the OpenAI-compatible text-to-speech API            |
 | `--tts-models`                          | `TTS_MODELS`                               | Space-separated list of models to use for the TTS service.           |
 | `--tts-voices`                          | `TTS_VOICES`                               | Space-separated list of voices for TTS, default is automatic.        |
-| `--stt-backend`                         | `STT_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
+| `--tts-backend`                         | `TTS_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
 
 ## Docker (Recommended)
 
