@@ -74,6 +74,7 @@ python -m wyoming_openai \
   --tts-models tts-1 \
   --tts-voices alloy echo fable onyx nova shimmer \
   --tts-backend OPENAI
+```
 
 ## Environment Variables
 
