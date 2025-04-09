@@ -7,7 +7,7 @@ from wyoming.server import AsyncServer
 
 from . import __version__
 from .handler import OpenAIEventHandler
-from .compatibility import CustomAsyncOpenAI, create_asr_models, create_tts_voices, tts_voice_to_string, asr_model_to_string
+from .compatibility import CustomAsyncOpenAI, create_asr_models, create_tts_voices, tts_voice_to_string, asr_model_to_string, OpenAIBackend
 
 
 def configure_logging(level):
@@ -17,6 +17,8 @@ def configure_logging(level):
     logging.basicConfig(level=numeric_level)
 
 async def main():
+    env_stt_backend = os.getenv("STT_BACKEND")
+    env_tts_backend = os.getenv("TTS_BACKEND")
     parser = argparse.ArgumentParser()
 
     # General configuration
@@ -55,6 +57,14 @@ async def main():
         default=os.getenv("STT_MODELS", 'whisper-1').split(),
         help="List of STT model identifiers"
     )
+    parser.add_argument(
+        "--stt-backend",
+        type=OpenAIBackend,
+        required=False,
+        choices=list(OpenAIBackend),
+        default=OpenAIBackend[env_stt_backend] if env_stt_backend else None,
+        help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, or None)"
+    )
 
     # TTS configuration
     parser.add_argument(
@@ -81,17 +91,35 @@ async def main():
         required=False,
         help="List of available TTS voices"
     )
+    parser.add_argument(
+        "--tts-backend",
+        type=OpenAIBackend,
+        required=False,
+        choices=list(OpenAIBackend),
+        default=OpenAIBackend[env_tts_backend] if env_tts_backend else None,
+        help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, or None)"
+    )
 
     args = parser.parse_args()
 
     configure_logging(args.log_level)
     _LOGGER = logging.getLogger(__name__)
 
-    # Create clients and detect supported backend specializations
-    stt_client = await CustomAsyncOpenAI.autodetect_backend(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
+    # Create factories and clients
+    if args.stt_backend is None:
+        _LOGGER.debug("STT backend is None, autodetecting...")
+        stt_factory = CustomAsyncOpenAI.create_autodetected_factory()
+    else:
+        stt_factory = CustomAsyncOpenAI.create_backend_factory(args.stt_backend)
+    stt_client = await stt_factory(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
     _LOGGER.debug("Detected STT backend: %s", stt_client.backend)
 
-    tts_client = await CustomAsyncOpenAI.autodetect_backend(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
+    if args.tts_backend is None:
+        _LOGGER.debug("TTS backend is None, autodetecting...")
+        tts_factory = CustomAsyncOpenAI.create_autodetected_factory()
+    else:
+        tts_factory = CustomAsyncOpenAI.create_backend_factory(args.tts_backend)
+    tts_client = await tts_factory(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
     _LOGGER.debug("Detected TTS backend: %s", tts_client.backend)
 
     asr_models = create_asr_models(args.stt_models, args.stt_openai_url, args.languages)
@@ -112,7 +140,7 @@ async def main():
     if tts_voices:
         _LOGGER.info("*** TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in tts_voices))
     else:
-        _LOGGER.warning("No TTS models models specified")
+        _LOGGER.warning("No TTS models specified")
 
     # Create server
     server = AsyncServer.from_uri(args.uri)

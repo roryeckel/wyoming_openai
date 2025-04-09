@@ -68,11 +68,12 @@ python -m wyoming_openai \
   --stt-openai-key YOUR_STT_API_KEY_HERE \
   --stt-openai-url https://api.openai.com/v1 \
   --stt-models whisper-1 \
+  --stt-backend OPENAI \
   --tts-openai-key YOUR_TTS_API_KEY_HERE \
   --tts-openai-url https://api.openai.com/v1 \
   --tts-models tts-1 \
-  --tts-voices alloy echo fable onyx nova shimmer
-```
+  --tts-voices alloy echo fable onyx nova shimmer \
+  --tts-backend OPENAI
 
 ## Environment Variables
 
@@ -80,18 +81,20 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 
 ### Table of Environment Variables for Command Line Arguments
 
-| **Command Line Argument**               | **Environment Variable**                   | **Description**                                              |
-|-----------------------------------------|--------------------------------------------|--------------------------------------------------------------|
-| `--uri`                                 | `WYOMING_URI`                              | The URI for the Wyoming server to bind to.                   |
-| `--log-level`                           | `WYOMING_LOG_LEVEL`                        | Sets the logging level (e.g., INFO, DEBUG).                  |
-| `--languages`                           | `WYOMING_LANGUAGES`                        | Space-separated list of supported languages to avertise.     |
-| `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | The API key for accessing OpenAI's speech-to-text services.  |
-| `--stt-openai-url`                      | `STT_OPENAI_URL`                           | The URL for OpenAI's STT endpoint.                           |
-| `--stt-models`                          | `STT_MODELS`                               | Space-separated list of models to use for the STT service.   |
-| `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | The API key for accessing OpenAI's text-to-speech services.  |
-| `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | The URL for OpenAI's TTS endpoint.                           |
-| `--tts-models`                          | `TTS_MODELS`                               | Space-separated list of models to use for the TTS service.   |
-| `--tts-voices`                          | `TTS_VOICES`                               | Space-separated list of voices for TTS, default is automatic |
+| **Command Line Argument**               | **Environment Variable**                   | **Description**                                                      |
+|-----------------------------------------|--------------------------------------------|----------------------------------------------------------------------|
+| `--uri`                                 | `WYOMING_URI`                              | The URI for the Wyoming server to bind to.                           |
+| `--log-level`                           | `WYOMING_LOG_LEVEL`                        | Sets the logging level (e.g., INFO, DEBUG).                          |
+| `--languages`                           | `WYOMING_LANGUAGES`                        | Space-separated list of supported languages to advertise.            |
+| `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | Optional API key for OpenAI-compatible speech-to-text services.      |
+| `--stt-openai-url`                      | `STT_OPENAI_URL`                           | The base URL for the OpenAI-compatible speech-to-text API            |
+| `--stt-models`                          | `STT_MODELS`                               | Space-separated list of models to use for the STT service.           |
+| `--stt-backend`                         | `STT_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
+| `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | Optional API key for OpenAI-compatible text-to-speech services.      |
+| `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | The base URL for the OpenAI-compatible text-to-speech API            |
+| `--tts-models`                          | `TTS_MODELS`                               | Space-separated list of models to use for the TTS service.           |
+| `--tts-voices`                          | `TTS_VOICES`                               | Space-separated list of voices for TTS, default is automatic.        |
+| `--stt-backend`                         | `STT_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
 
 ## Docker (Recommended)
 
@@ -138,7 +141,7 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
 
 For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches for STT, follow these instructions:
 
-- **Docker Compose Configuration**: Use the `docker-compose.fastapi-kokoro.yml` template which includes configuration for both the Wyoming OpenAI proxy and Kokoro-FastAPI TTS service (Kokoro).
+- **Docker Compose Configuration**: Use the `docker-compose.kokoro-fastapi.yml` template which includes configuration for both the Wyoming OpenAI proxy and Kokoro-FastAPI TTS service (Kokoro).
 
 - **Speaches Setup**:
   - Use it in combination with the Speaches container for access to STT.
@@ -151,7 +154,7 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
 - **Command**:
 
   ```bash
-  docker compose -f docker-compose.speaches.yml -f docker-compose.fastapi-kokoro.yml up -d
+  docker compose -f docker-compose.speaches.yml -f docker-compose.kokoro-fastapi.yml up -d
   ```
 
 #### 4. Development with Docker
@@ -166,7 +169,7 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
 
 #### 5. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.fastapi-kokoro.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`.
 
 - **Command**:
   
@@ -182,7 +185,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`version`**: Specific version tags (e.g., `0.1.0`) correspond to stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`version`**: Specific version tags (e.g., `0.1.1`) correspond to stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
 - **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.1`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 

@@ -4,14 +4,17 @@ services:
     container_name: wyoming_openai
     ports:
       - "10300:10300"
+    restart: unless-stopped
     environment:
       WYOMING_URI: tcp://0.0.0.0:10300
       WYOMING_LOG_LEVEL: INFO
       WYOMING_LANGUAGES: en
       STT_OPENAI_URL: https://api.openai.com/v1
       STT_MODELS: "whisper-1"
+      STT_BACKEND: "OPENAI"
       TTS_OPENAI_URL: https://api.openai.com/v1
       TTS_MODELS: "tts-1 tts-1-hd"
+      TTS_BACKEND: "OPENAI"
       # TTS_VOICES: "alloy echo fable onyx nova shimmer"
     env_file:
       - .env

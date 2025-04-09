@@ -153,7 +153,7 @@ def tts_voice_to_string(tts_voice_model: TtsVoiceModel) -> str:
 #                 logger.error("Failed to fetch OpenAI models: %s", e)
 
 class OpenAIBackend(Enum):
-    OFFICIAL = 0
+    OPENAI = 0 # "Official"
     SPEACHES = 1
     KOKORO_FASTAPI = 2
 
@@ -164,7 +164,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
     def __init__(self, *args, **kwargs):
         if "api_key" not in kwargs or not kwargs["api_key"]:
             kwargs["api_key"] = ""
-        self.backend: OpenAIBackend = kwargs.pop("backend", OpenAIBackend.OFFICIAL)
+        self.backend: OpenAIBackend = kwargs.pop("backend", OpenAIBackend.OPENAI)
         super().__init__(*args, **kwargs)
 
     @property
@@ -217,7 +217,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
             return response.json().get("voices", [])
         except Exception as e:
             _LOGGER.exception(e, "Failed to fetch /audio/voices")
-            return []
+            raise
         
     # Speaches
 
@@ -250,7 +250,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
             return [voice["voice_id"] for voice in result]
         except Exception as e:
             _LOGGER.exception(e, "Failed to fetch /audio/speech/voices")
-            return []
+            raise
         
     # Unified API
 
@@ -264,7 +264,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
         tts_voice_models = []
         for model_name in model_names:
-            if self.backend == OpenAIBackend.OFFICIAL:
+            if self.backend == OpenAIBackend.OPENAI:
                 tts_voices = await self.list_openai_voices()
             elif self.backend == OpenAIBackend.SPEACHES:
                 tts_voices = await self._list_speaches_voices(model_name)
@@ -284,17 +284,27 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         return tts_voice_models
 
     @classmethod
-    async def autodetect_backend(cls, *args, **kwargs):
+    def create_autodetected_factory(cls):
         """
-        Automatically detects and returns an instance of OpenAI API client based on available endpoints.
+        Create a factory that autodetects the backend type.
+        This factory will initialize the client and set the backend based on the detected type.
         """
-        client = cls(*args, **kwargs)
-        
-        if await client._is_speaches():
-            client.backend = OpenAIBackend.SPEACHES
-        elif await client._is_kokoro_fastapi():
-            client.backend = OpenAIBackend.KOKORO_FASTAPI
-        else:
-            client.backend = OpenAIBackend.OFFICIAL
-        
-        return client
+        async def factory(*args, **kwargs):
+            client = cls(*args, **kwargs)
+            if await client._is_speaches():
+                client.backend = OpenAIBackend.SPEACHES
+            elif await client._is_kokoro_fastapi():
+                client.backend = OpenAIBackend.KOKORO_FASTAPI
+            else:
+                client.backend = OpenAIBackend.OPENAI
+            return client
+        return factory
+    
+    @classmethod
+    def create_backend_factory(cls, backend: OpenAIBackend):
+        """
+        Create a factory for a specific backend type.
+        """
+        async def factory(*args, **kwargs):
+            return cls(*args, **kwargs, backend=backend)
+        return factory
