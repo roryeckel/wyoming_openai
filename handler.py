@@ -208,10 +208,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Check if a language is supported by a TTS voice"""
         return not voice.languages or language in voice.languages
     
-    def _validate_tts_language(self, language: str, voice: TtsVoice) -> bool:
-        """Validate if a language is supported by a TTS voice"""
+    def _validate_tts_language(self, language: str | None, voice: TtsVoice) -> bool:
+        """Validate if a language is supported by a TTS voice. Returns True if supported. If no language is specified, also returns True."""
         if language and not self._is_tts_language_supported(language, voice):
-            _LOGGER.error(f"Language {language} is not supported for voice {language}. Available languages: {voice.languages}")
+            _LOGGER.error(f"Language {language} is not supported for voice {voice.name}. Available languages: {voice.languages}")
             return False
         else:
             return True
@@ -228,17 +228,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         try:
             _LOGGER.debug("Handling synthesize request %s", synthesize)
 
-            if not synthesize.voice and self._wyoming_info.tts and self._wyoming_info.tts[0].voices:
-                # No voice specified in the request, use the first available one
-                synthesize.voice = self._wyoming_info.tts[0].voices[0].name
-
-            requested_voice = synthesize.voice.name
-            requested_language = synthesize.voice.language
+            if synthesize.voice:
+                requested_voice = synthesize.voice.name
+                requested_language = synthesize.voice.language
+            else:
+                requested_voice = None
+                requested_language = None
 
             # Validate voice against self._wyoming_info
             voice = self._get_voice(requested_voice)
             if voice:
-                if not self._validate_tts_language(requested_language, requested_voice):
+                if not self._validate_tts_language(requested_language, voice):
                     return False
             else:
                 self._log_unsupported_voice(requested_voice)
@@ -247,7 +247,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             async with self._client_lock:
                 async with self._tts_client.audio.speech.with_streaming_response.create(
                     model=voice.model_name,
-                    voice=requested_voice,
+                    voice=voice.name,
                     input=synthesize.text) as response:
                 
                     # Send audio start with required audio parameters
