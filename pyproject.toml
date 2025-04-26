@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wyoming_openai"
+version = "0.2.0"
+description = "OpenAI-Compatible Proxy Middleware for the Wyoming Protocol"
+authors = [
+    { name = "Rory Eckel" }
+]
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "openai==1.61.1",
+    "wyoming==1.6.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/roryeckel/wyoming_openai"
+Issues = "https://github.com/roryeckel/wyoming_openai/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
