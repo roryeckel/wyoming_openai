@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies (if any)
+# build-essential and libssl-dev might be needed for some dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -13,22 +14,21 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
-WORKDIR /wyoming_openai
+WORKDIR /app
 
-# Copy the requirements file into the container
-COPY requirements.txt .
+# Copy files required for installation
+# We need pyproject.toml for dependencies and package info
+# README.md and LICENSE are referenced in pyproject.toml
+# src contains the actual code
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
 
-# Install any needed packages specified in requirements.txt
+# Install python dependencies and the project itself using pyproject.toml
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir .
 
-# Copy the rest of the application's code into the container
-COPY . .
-
-# Expose a port if necessary (change to your required port)
+# Expose the application port (already correct)
 EXPOSE 10300
 
-WORKDIR /
-
-# Run the application when the container launches
+# Run the application as an installed module (already correct)
 CMD ["python", "-m", "wyoming_openai"]
