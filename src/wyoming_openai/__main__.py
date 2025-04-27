@@ -105,6 +105,8 @@ async def main():
     configure_logging(args.log_level)
     _LOGGER = logging.getLogger(__name__)
 
+    _LOGGER.info("Starting Wyoming OpenAI %s", __version__)
+
     # Create factories and clients
     if args.stt_backend is None:
         _LOGGER.debug("STT backend is None, autodetecting...")
