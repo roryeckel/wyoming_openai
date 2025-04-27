@@ -46,11 +46,20 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
    ```
 
-3. **Install Dependencies**
+3. **Install as a Development Package**
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+    ```bash
+    pip install -e .
+    ```
+    Assuming you have activated a virtual environment, the wyoming_openai package will be installed into it. This will build and install the package in editable mode, allowing you to make changes to the code without needing to reinstall it each time.
+
+    Or, if you prefer to install it as a regular (production) package:
+
+    ```bash
+    pip install .
+    ```
+
+    This is more suitable for a global installation.
 
 4. **Configure Environment Variables or Command Line Arguments**
 
@@ -59,6 +68,8 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 The proxy server can be configured using several command line arguments to tailor its behavior to your specific needs.
 
 ### Example Usage
+
+Assuming you have installed the package in your current environment, you can run the server with the following command:
 
 ```bash
 python -m wyoming_openai \
@@ -186,9 +197,9 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`version`**: Specific version tags (e.g., `0.1.2`) correspond to stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.2.0`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
-- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.1`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
+- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.2`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 
 ### General Deployment Steps
 
