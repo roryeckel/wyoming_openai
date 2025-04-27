@@ -27,8 +27,8 @@ COPY src ./src
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir .
 
-# Expose the application port (already correct)
+# Expose the application port
 EXPOSE 10300
 
-# Run the application as an installed module (already correct)
+# Run the application as an installed module
 CMD ["python", "-m", "wyoming_openai"]
