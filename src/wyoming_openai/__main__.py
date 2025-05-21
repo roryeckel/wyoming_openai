@@ -99,6 +99,12 @@ async def main():
         default=OpenAIBackend[env_tts_backend] if env_tts_backend else None,
         help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, or None)"
     )
+    parser.add_argument(
+        "--tts-speed",
+        type=float,
+        default=float(os.getenv("TTS_SPEED", "1.0")),
+        help="Speed of the TTS output (0.25 to 4.0, default is 1.0)"
+    )
 
     args = parser.parse_args()
 
@@ -156,7 +162,8 @@ async def main():
             tts_client=tts_client,
             client_lock=asyncio.Lock(),
             asr_models=asr_models,
-            tts_voices=tts_voices
+            tts_voices=tts_voices,
+            tts_speed=args.tts_speed
         )
     )
 

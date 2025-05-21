@@ -84,7 +84,8 @@ python -m wyoming_openai \
   --tts-openai-url https://api.openai.com/v1 \
   --tts-models tts-1 \
   --tts-voices alloy echo fable onyx nova shimmer \
-  --tts-backend OPENAI
+  --tts-backend OPENAI \
+  --tts-speed 1.0
 ```
 
 ## Environment Variables
@@ -107,6 +108,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-models`                          | `TTS_MODELS`                               | Space-separated list of models to use for the TTS service.           |
 | `--tts-voices`                          | `TTS_VOICES`                               | Space-separated list of voices for TTS, default is automatic.        |
 | `--tts-backend`                         | `TTS_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
+| `--tts-speed`                           | `TTS_SPEED`                                | Speed of the TTS output (0.25 to 4.0, default is 1.0).               |
 
 ## Docker (Recommended)
 

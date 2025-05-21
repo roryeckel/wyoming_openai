@@ -33,15 +33,18 @@ class OpenAIEventHandler(AsyncEventHandler):
         client_lock: asyncio.Lock,
         asr_models: List[AsrModel],
         tts_voices: List[TtsVoiceModel],
+        tts_speed: float = 1.0,
         **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self._stt_client = stt_client
-        self._tts_client = tts_client
-
         self._client_lock = client_lock
-        
+
+        self._stt_client = stt_client
+
+        self._tts_client = tts_client
+        self._tts_speed = tts_speed
+
         self._wyoming_info = Info(
             asr=[
                 AsrProgram(
@@ -248,7 +251,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 async with self._tts_client.audio.speech.with_streaming_response.create(
                     model=voice.model_name,
                     voice=voice.name,
-                    input=synthesize.text) as response:
+                    input=synthesize.text,
+                    speed=self._tts_speed) as response:
                 
                     # Send audio start with required audio parameters
                     await self.write_event(

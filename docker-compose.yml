@@ -16,5 +16,6 @@ services:
       TTS_MODELS: "tts-1 tts-1-hd"
       TTS_BACKEND: "OPENAI"
       # TTS_VOICES: "alloy echo fable onyx nova shimmer"
+      TTS_SPEED: "1.0"
     env_file:
       - .env
