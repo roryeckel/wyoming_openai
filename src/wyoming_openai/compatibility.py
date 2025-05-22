@@ -1,10 +1,9 @@
-from enum import Enum
 import logging
-from typing import List, Union
-from typing_extensions import override
+from enum import Enum
+from typing import override
 
-from wyoming.info import AsrModel, TtsVoice, Attribution
 from openai import AsyncOpenAI
+from wyoming.info import AsrModel, Attribution, TtsVoice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ class TtsVoiceModel(TtsVoice):
         super().__init__(*args, **kwargs)
         self.model_name = model_name
 
-def create_asr_models(stt_models: List[str], stt_url: str, languages: List[str]) -> List[AsrModel]:
+def create_asr_models(stt_models: list[str], stt_url: str, languages: list[str]) -> list[AsrModel]:
     """
     Creates a list of ASR (Automatic Speech Recognition) models in the Wyoming Protocol format.
 
@@ -55,7 +54,7 @@ def create_asr_models(stt_models: List[str], stt_url: str, languages: List[str])
         ))
     return asr_models
 
-def create_tts_voices(tts_models: List[str], tts_voices: List[str], tts_url: str, languages: List[str]) -> List[TtsVoiceModel]:
+def create_tts_voices(tts_models: list[str], tts_voices: list[str], tts_url: str, languages: list[str]) -> list[TtsVoiceModel]:
     """
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
 
@@ -128,7 +127,7 @@ def tts_voice_to_string(tts_voice_model: TtsVoiceModel) -> str:
 
 # https://github.com/speaches-ai/speaches/issues/266
 # async def get_openai_models(
-#     api_key: str, 
+#     api_key: str,
 #     base_urls: Set[str]
 # ):
 # """
@@ -177,10 +176,10 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         if not self.api_key:
             del super_headers["Authorization"]
         return super_headers
-    
+
     # OpenAI
 
-    async def list_openai_voices(self) -> List[str]:
+    async def list_openai_voices(self) -> list[str]:
         """
         Not official implemented by OpenAI, hard-coded.
         https://platform.openai.com/docs/guides/text-to-speech/voice-options
@@ -188,7 +187,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         return ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']
 
     # Kokoro-FastAPI
-    
+
     async def _is_kokoro_fastapi(self) -> bool:
         """
         Checks if the backend is Kokoro-FastAPI by sending a request to /test
@@ -200,8 +199,8 @@ class CustomAsyncOpenAI(AsyncOpenAI):
             return response.json().get("status", None) == "ok"
         except Exception:
             return False
-        
-    async def _list_kokoro_fastapi_voices(self) -> List[str]:
+
+    async def _list_kokoro_fastapi_voices(self) -> list[str]:
         """
         Fetches the available audio voices from the Kokoro-FastAPI /audio/voices endpoint.
         Caution: This is not a part of official OpenAI spec.
@@ -218,7 +217,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         except Exception as e:
             _LOGGER.exception(e, "Failed to fetch /audio/voices")
             raise
-        
+
     # Speaches
 
     async def _is_speaches(self) -> bool:
@@ -232,8 +231,8 @@ class CustomAsyncOpenAI(AsyncOpenAI):
             return response.text == "OK"
         except Exception:
             return False
-        
-    async def _list_speaches_voices(self, model_name: str) -> List[str]:
+
+    async def _list_speaches_voices(self, model_name: str) -> list[str]:
         """
         Fetches the available audio voices from the Speaches /audio/speech/voices endpoint.
         Caution: This is not a part of official OpenAI spec.
@@ -251,10 +250,10 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         except Exception as e:
             _LOGGER.exception(e, "Failed to fetch /audio/speech/voices")
             raise
-        
+
     # Unified API
 
-    async def list_supported_voices(self, model_names: Union[str, List[str]], languages: List[str]) -> List[TtsVoiceModel]:
+    async def list_supported_voices(self, model_names: str | list[str], languages: list[str]) -> list[TtsVoiceModel]:
         """
         Fetches the available voices via unofficial specs.
         Note: this is not the list of CONFIGURED voices.
@@ -299,7 +298,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
                 client.backend = OpenAIBackend.OPENAI
             return client
         return factory
-    
+
     @classmethod
     def create_backend_factory(cls, backend: OpenAIBackend):
         """

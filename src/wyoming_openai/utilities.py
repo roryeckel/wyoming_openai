@@ -1,5 +1,6 @@
 from io import BytesIO
 
+
 class NamedBytesIO(BytesIO):
     """
     A subclass of BytesIO that adds a 'name' attribute to the file-like object.

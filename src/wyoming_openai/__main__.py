@@ -1,13 +1,21 @@
-import os
 import argparse
 import asyncio
 import logging
+import os
 from functools import partial
+
 from wyoming.server import AsyncServer
 
 from . import __version__
+from .compatibility import (
+    CustomAsyncOpenAI,
+    OpenAIBackend,
+    asr_model_to_string,
+    create_asr_models,
+    create_tts_voices,
+    tts_voice_to_string,
+)
 from .handler import OpenAIEventHandler
-from .compatibility import CustomAsyncOpenAI, create_asr_models, create_tts_voices, tts_voice_to_string, asr_model_to_string, OpenAIBackend
 
 
 def configure_logging(level):
@@ -72,7 +80,7 @@ async def main():
         required=False,
         default=os.getenv("TTS_OPENAI_KEY", None),
         help="OpenAI API key for text-to-speech"
-    ) 
+    )
     parser.add_argument(
         "--tts-openai-url",
         default=os.getenv("TTS_OPENAI_URL", "https://api.openai.com/v1"),

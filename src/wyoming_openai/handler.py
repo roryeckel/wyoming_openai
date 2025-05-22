@@ -1,18 +1,17 @@
 import asyncio
 import logging
 import wave
-from typing import List, Optional
 
-from wyoming.info import Info, Describe, AsrProgram, Attribution, AsrModel, TtsProgram, TtsVoice
+from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
-from wyoming.asr import Transcribe, Transcript
-from wyoming.tts import Synthesize
+from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler
+from wyoming.tts import Synthesize
 
-from .compatibility import TtsVoiceModel, CustomAsyncOpenAI
-from .utilities import NamedBytesIO
 from . import __version__
+from .compatibility import CustomAsyncOpenAI, TtsVoiceModel
+from .utilities import NamedBytesIO
 
 # TODO: Replace the _wav_buffer with a _pcm_buffer to hold the raw PCM file instead of encoding wav on the fly.
 
@@ -31,8 +30,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         stt_client: CustomAsyncOpenAI,
         tts_client: CustomAsyncOpenAI,
         client_lock: asyncio.Lock,
-        asr_models: List[AsrModel],
-        tts_voices: List[TtsVoiceModel],
+        asr_models: list[AsrModel],
+        tts_voices: list[TtsVoiceModel],
         tts_speed: float = 1.0,
         **kwargs
     ) -> None:
@@ -75,17 +74,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         )
 
         # State for current transcription
-        self._wav_buffer: Optional[NamedBytesIO] = None
-        self._wav_write_buffer: Optional[wave.Wave_write] = None
+        self._wav_buffer: NamedBytesIO | None = None
+        self._wav_write_buffer: wave.Wave_write | None = None
         self._is_recording: bool = False
-        self._current_asr_model: Optional[AsrModel] = None
+        self._current_asr_model: AsrModel | None = None
 
     async def handle_event(self, event: Event) -> bool:
         if AudioChunk.is_type(event.type):
             # Non-logging because spammy
             await self._handle_audio_chunk(AudioChunk.from_event(event))
             return True
-        
+
         _LOGGER.debug("Incoming event type %s", event.type)
 
         if Transcribe.is_type(event.type):
@@ -94,29 +93,28 @@ class OpenAIEventHandler(AsyncEventHandler):
         if AudioStart.is_type(event.type):
             await self._handle_audio_start()
             return True
-            
+
         if AudioStop.is_type(event.type):
             await self._handle_audio_stop()
             return True
-        
+
         if Synthesize.is_type(event.type):
             return await self._handle_synthesize(Synthesize.from_event(event))
-        
+
         if Describe.is_type(event.type):
             await self.write_event(self._wyoming_info.event())
             return True
 
         _LOGGER.warning("Unhandled event type: %s", event.type)
         return False
-    
+
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
         self._current_asr_model = self._get_asr_model(transcribe.name)
         if self._current_asr_model:
             if self._is_asr_language_supported(transcribe.language, self._current_asr_model):
                 return True
-            else:
-                self._log_unsupported_asr_language(transcribe.name, transcribe.language)
+            self._log_unsupported_asr_language(transcribe.name, transcribe.language)
         else:
             self._log_unsupported_asr_model(transcribe.name)
         return False
@@ -136,7 +134,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if self._is_recording and chunk.audio and self._wav_write_buffer:
             self._wav_write_buffer.writeframes(chunk.audio)
         else:
-            _LOGGER.warning(f"Problem handling audio chunk")
+            _LOGGER.warning("Problem handling audio chunk")
 
     async def _handle_audio_stop(self) -> None:
         """Handle end of audio stream and perform transcription"""
@@ -145,7 +143,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             return
 
         self._is_recording = False
-        
+
         try:
             # Close the WAV file
             if self._wav_write_buffer:
@@ -161,7 +159,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     file=self._wav_buffer,
                     model=self._current_asr_model.name
                 )
-                
+
             if result.text:
                 _LOGGER.info(f"Successfully transcribed: {result.text}")
 
@@ -184,7 +182,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             for model in program.models:
                 if model.name == model_name or not model_name:
                     return model
-                
+
     def _log_unsupported_asr_model(self, model_name: str | None = None):
         """Log an unsupported ASR model"""
         if model_name:
@@ -195,7 +193,7 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _is_asr_language_supported(self, language: str, model: AsrModel) -> bool:
         """Check if a language is supported by an ASR model"""
         return not model.languages or language in model.languages
-    
+
     def _log_unsupported_asr_language(self, model_name: str, language: str):
         """Log an unsupported ASR language"""
         _LOGGER.error("Unsupported ASR model %s for language %s", model_name, language)
@@ -206,25 +204,24 @@ class OpenAIEventHandler(AsyncEventHandler):
             for voice in program.voices:
                 if not name or voice.name == name:
                     return voice
-                
+
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
         """Check if a language is supported by a TTS voice"""
         return not voice.languages or language in voice.languages
-    
+
     def _validate_tts_language(self, language: str | None, voice: TtsVoice) -> bool:
         """Validate if a language is supported by a TTS voice. Returns True if supported. If no language is specified, also returns True."""
         if language and not self._is_tts_language_supported(language, voice):
             _LOGGER.error(f"Language {language} is not supported for voice {voice.name}. Available languages: {voice.languages}")
             return False
-        else:
-            return True
-        
+        return True
+
     def _log_unsupported_voice(self, requested_voice: str | None) -> None:
         """Log an error message if a voice is not supported"""
         if requested_voice:
             _LOGGER.error(f"Voice {requested_voice} is not supported. Available voices: {[voice.name for program in self._wyoming_info.tts for voice in program.voices]}")
         else:
-            _LOGGER.error(f"No TTS voices specified")
+            _LOGGER.error("No TTS voices specified")
 
     async def _handle_synthesize(self, synthesize: Synthesize) -> bool:
         """Handle text-to-speech synthesis request"""
@@ -253,7 +250,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     voice=voice.name,
                     input=synthesize.text,
                     speed=self._tts_speed) as response:
-                
+
                     # Send audio start with required audio parameters
                     await self.write_event(
                         AudioStart(
@@ -262,12 +259,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                             channels=AUDIO_CHANNELS
                         ).event()
                     )
-                    
+
                     # Stream the audio in chunks
                     timestamp = 0
                     samples_per_chunk = ASR_CHUNK_SIZE // AUDIO_WIDTH  # bytes per sample
                     timestamp_increment = (samples_per_chunk / TTS_AUDIO_RATE) * 1000  # ms
-                    
+
                     async for chunk in response.iter_bytes(chunk_size=ASR_CHUNK_SIZE):
                         await self.write_event(
                             AudioChunk(
@@ -279,17 +276,17 @@ class OpenAIEventHandler(AsyncEventHandler):
                             ).event()
                         )
                         timestamp += timestamp_increment
-                    
+
                     # Send audio stop
                     await self.write_event(AudioStop().event())
-                    
+
                     _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
                     return True
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
-        
+
     async def stop(self) -> None:
         """Stop the handler and close the clients"""
         await super().stop()
