@@ -94,21 +94,21 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 
 ### Table of Environment Variables for Command Line Arguments
 
-| **Command Line Argument**               | **Environment Variable**                   | **Description**                                                      |
-|-----------------------------------------|--------------------------------------------|----------------------------------------------------------------------|
-| `--uri`                                 | `WYOMING_URI`                              | The URI for the Wyoming server to bind to.                           |
-| `--log-level`                           | `WYOMING_LOG_LEVEL`                        | Sets the logging level (e.g., INFO, DEBUG).                          |
-| `--languages`                           | `WYOMING_LANGUAGES`                        | Space-separated list of supported languages to advertise.            |
-| `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | Optional API key for OpenAI-compatible speech-to-text services.      |
-| `--stt-openai-url`                      | `STT_OPENAI_URL`                           | The base URL for the OpenAI-compatible speech-to-text API            |
-| `--stt-models`                          | `STT_MODELS`                               | Space-separated list of models to use for the STT service.           |
-| `--stt-backend`                         | `STT_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
-| `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | Optional API key for OpenAI-compatible text-to-speech services.      |
-| `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | The base URL for the OpenAI-compatible text-to-speech API            |
-| `--tts-models`                          | `TTS_MODELS`                               | Space-separated list of models to use for the TTS service.           |
-| `--tts-voices`                          | `TTS_VOICES`                               | Space-separated list of voices for TTS, default is automatic.        |
-| `--tts-backend`                         | `TTS_BACKEND`                              | Enable unofficial API feature sets (default is autodetect).          |
-| `--tts-speed`                           | `TTS_SPEED`                                | Speed of the TTS output (0.25 to 4.0, default is 1.0).               |
+| **Command Line Argument**               | **Environment Variable**                   | **Default Value**                           | **Description**                                                      |
+|-----------------------------------------|--------------------------------------------|-----------------------------------------------|----------------------------------------------------------------------|
+| `--uri`                                 | `WYOMING_URI`                              | tcp://0.0.0.0:10300                           | The URI for the Wyoming server to bind to.                           |
+| `--log-level`                           | `WYOMING_LOG_LEVEL`                        | INFO                                          | Sets the logging level (e.g., INFO, DEBUG).                          |
+| `--languages`                           | `WYOMING_LANGUAGES`                        | en                                            | Space-separated list of supported languages to advertise.            |
+| `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible speech-to-text services.      |
+| `--stt-openai-url`                      | `STT_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible speech-to-text API            |
+| `--stt-models`                          | `STT_MODELS`                               | whisper-1                                     | Space-separated list of models to use for the STT service.           |
+| `--stt-backend`                         | `STT_BACKEND`                              | None (autodetect)                             | Enable unofficial API feature sets.          |
+| `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
+| `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible text-to-speech API            |
+| `--tts-models`                          | `TTS_MODELS`                               | tts-1 tts-1-hd                                | Space-separated list of models to use for the TTS service.           |
+| `--tts-voices`                          | `TTS_VOICES`                               | Empty (automatic)                             | Space-separated list of voices for TTS.        |
+| `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetect)                             | Enable unofficial API feature sets.          |
+| `--tts-speed`                           | `TTS_SPEED`                                | 1.0                                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
 
 ## Docker (Recommended)
 
@@ -199,7 +199,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`major.minor.patch version`**: Specific version tags (e.g., `0.2.0`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.2.1`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
 - **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.2`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 
