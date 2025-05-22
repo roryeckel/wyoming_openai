@@ -21,5 +21,37 @@ dependencies = [
 Homepage = "https://github.com/roryeckel/wyoming_openai"
 Issues = "https://github.com/roryeckel/wyoming_openai/issues"
 
+[project.optional-dependencies]
+dev = [
+    "ruff==0.11.10",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+# Enable Pyflakes (`F`), isort (`I`), and other recommended rules
+select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "T20", "RET", "SIM", "ERA"]
+ignore = []
+
+# Same as Black.
+line-length = 100
+indent-width = 4
+
+# Assume Python 3.12
+target-version = "py312"
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".git",
+    ".github",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    "__pypackages__",
+    "dist",
+    "build",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wyoming_openai"]

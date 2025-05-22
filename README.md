@@ -88,11 +88,11 @@ python -m wyoming_openai \
   --tts-speed 1.0
 ```
 
-## Environment Variables
+## Configuration Options
 
 In addition to using command-line arguments, you can configure the Wyoming OpenAI proxy server via environment variables. This is especially useful for containerized deployments.
 
-### Table of Environment Variables for Command Line Arguments
+### Table of Environment & Command Line Options
 
 | **Command Line Argument**               | **Environment Variable**                   | **Default Value**                           | **Description**                                                      |
 |-----------------------------------------|--------------------------------------------|-----------------------------------------------|----------------------------------------------------------------------|
@@ -209,7 +209,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 2. **Verify Deployment**: Ensure that all services are running by checking the logs with `docker compose logs -f` or accessing the Wyoming OpenAI proxy through its exposed port (e.g., 10300) to ensure it responds as expected.
 3. **Configuration Changes**: You can modify environment variables in the `.env` file or directly within your Docker Compose configuration files to adjust settings such as languages, models, and voices without rebuilding containers.
 
-### Usage in Home Assistant
+## Usage in Home Assistant
 
 1. Install & set up your Wyoming OpenAI instance using one of the [deployment options](#deployment-options) above.
 2. In HA, Go to Settings, Devices & Services, Add Integration, and search for Wyoming Protocol. Add the Wyoming Protocol integration with the URI of your Wyoming OpenAI instance.
@@ -275,12 +275,30 @@ sequenceDiagram
     
 ```
 
-## Contributing
-
-Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
-
-### Future Plans (Descending Priority)
+## Future Plans (Descending Priority)
 
 - Improved streaming support directly to OpenAI APIs
 - Reverse direction support (Server for OpenAI compatible endpoints - possibly FastAPI)
 - OpenAI Realtime API
+
+## Contributing
+
+Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
+
+## Linting and Code Quality (Ruff)
+
+This project uses [Ruff](https://github.com/astral-sh/ruff) for linting and code quality checks. Ruff is a fast Python linter written in Rust that can replace multiple tools like flake8, isort, and more.
+
+To use Ruff during development:
+
+1. Install development dependencies:
+   ```bash
+   pip install -e ".[dev]"
+   ```
+
+2. Run Ruff to check your code:
+   ```bash
+   ruff check .
+   ```
+
+The project includes a GitHub Action that automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
