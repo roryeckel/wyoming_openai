@@ -31,8 +31,8 @@ where = ["src"]
 
 [tool.ruff]
 # Enable Pyflakes (`F`), isort (`I`), and other recommended rules
-select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "T20", "RET", "SIM", "ERA"]
-ignore = []
+lint.select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "T20", "RET"]
+lint.ignore = []
 
 line-length = 200
 indent-width = 4

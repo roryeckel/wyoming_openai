@@ -117,26 +117,26 @@ async def main():
     args = parser.parse_args()
 
     configure_logging(args.log_level)
-    _LOGGER = logging.getLogger(__name__)
+    _logger = logging.getLogger(__name__)
 
-    _LOGGER.info("Starting Wyoming OpenAI %s", __version__)
+    _logger.info("Starting Wyoming OpenAI %s", __version__)
 
     # Create factories and clients
     if args.stt_backend is None:
-        _LOGGER.debug("STT backend is None, autodetecting...")
+        _logger.debug("STT backend is None, autodetecting...")
         stt_factory = CustomAsyncOpenAI.create_autodetected_factory()
     else:
         stt_factory = CustomAsyncOpenAI.create_backend_factory(args.stt_backend)
     stt_client = await stt_factory(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
-    _LOGGER.debug("Detected STT backend: %s", stt_client.backend)
+    _logger.debug("Detected STT backend: %s", stt_client.backend)
 
     if args.tts_backend is None:
-        _LOGGER.debug("TTS backend is None, autodetecting...")
+        _logger.debug("TTS backend is None, autodetecting...")
         tts_factory = CustomAsyncOpenAI.create_autodetected_factory()
     else:
         tts_factory = CustomAsyncOpenAI.create_backend_factory(args.tts_backend)
     tts_client = await tts_factory(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
-    _LOGGER.debug("Detected TTS backend: %s", tts_client.backend)
+    _logger.debug("Detected TTS backend: %s", tts_client.backend)
 
     asr_models = create_asr_models(args.stt_models, args.stt_openai_url, args.languages)
 
@@ -149,20 +149,20 @@ async def main():
 
     # Log everything available
     if asr_models:
-        _LOGGER.info("*** ASR Models ***\n%s", "\n".join(asr_model_to_string(x) for x in asr_models))
+        _logger.info("*** ASR Models ***\n%s", "\n".join(asr_model_to_string(x) for x in asr_models))
     else:
-        _LOGGER.warning("No ASR models specified")
+        _logger.warning("No ASR models specified")
 
     if tts_voices:
-        _LOGGER.info("*** TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in tts_voices))
+        _logger.info("*** TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in tts_voices))
     else:
-        _LOGGER.warning("No TTS models specified")
+        _logger.warning("No TTS models specified")
 
     # Create server
     server = AsyncServer.from_uri(args.uri)
 
     # Run server
-    _LOGGER.info("Starting server at %s", args.uri)
+    _logger.info("Starting server at %s", args.uri)
     await server.run(
         partial(
             OpenAIEventHandler,
