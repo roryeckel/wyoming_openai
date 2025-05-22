@@ -246,12 +246,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._log_unsupported_voice(requested_voice)
                 return False
 
-            async with self._client_lock:
-                async with self._tts_client.audio.speech.with_streaming_response.create(
-                    model=voice.model_name,
-                    voice=voice.name,
-                    input=synthesize.text,
-                    speed=self._tts_speed) as response:
+            async with self._client_lock, self._tts_client.audio.speech.with_streaming_response.create(
+                model=voice.model_name,
+                voice=voice.name,
+                input=synthesize.text,
+                speed=self._tts_speed) as response:
 
                     # Send audio start with required audio parameters
                     await self.write_event(

@@ -34,8 +34,7 @@ where = ["src"]
 select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "T20", "RET", "SIM", "ERA"]
 ignore = []
 
-# Same as Black.
-line-length = 100
+line-length = 200
 indent-width = 4
 
 # Assume Python 3.12
