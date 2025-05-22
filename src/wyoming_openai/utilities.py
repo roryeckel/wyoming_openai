@@ -11,10 +11,9 @@ class NamedBytesIO(BytesIO):
 
         Args:
             *args: Variable length argument list passed to BytesIO constructor.
-            name (str): The name or filename associated with this byte stream. 
+            name (str): The name or filename associated with this byte stream.
                         Default is 'audio.wav'.
             **kwargs: Arbitrary keyword arguments passed to BytesIO constructor.
-        
         """
         super().__init__(*args, **kwargs)
         self._name = name

@@ -182,6 +182,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             for model in program.models:
                 if model.name == model_name or not model_name:
                     return model
+        return None
 
     def _log_unsupported_asr_model(self, model_name: str | None = None):
         """Log an unsupported ASR model"""
@@ -204,6 +205,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             for voice in program.voices:
                 if not name or voice.name == name:
                     return voice
+        return None
 
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
         """Check if a language is supported by a TTS voice"""

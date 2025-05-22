@@ -11,7 +11,7 @@ _LOGGER = logging.getLogger(__name__)
 class TtsVoiceModel(TtsVoice):
     """
     A subclass of TtsVoice from the Wyoming Protocol representing a text-to-speech voice with an associated model name.
-    
+
     Attributes:
         model_name (str): The name of the underlying text-to-speech model.
     """
