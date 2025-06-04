@@ -17,11 +17,11 @@ from .utilities import NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
 
-AUDIO_WIDTH = 2  # 16-bit audio
-AUDIO_CHANNELS = 1  # Mono audio
-TTS_AUDIO_RATE = 24000
-ASR_AUDIO_RATE = 16000
-ASR_CHUNK_SIZE = 2048
+DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
+DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
+DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
+TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec)
+TTS_CHUNK_SIZE = 2048  # Magical guess :)
 
 class OpenAIEventHandler(AsyncEventHandler):
     def __init__(
@@ -80,6 +80,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._current_asr_model: AsrModel | None = None
 
     async def handle_event(self, event: Event) -> bool:
+        """
+        Handle incoming events
+        https://github.com/rhasspy/rhasspy3/blob/master/docs/wyoming.md#events-types
+        """
         if AudioChunk.is_type(event.type):
             # Non-logging because spammy
             await self._handle_audio_chunk(AudioChunk.from_event(event))
@@ -91,7 +95,17 @@ class OpenAIEventHandler(AsyncEventHandler):
             return await self._handle_transcribe(Transcribe.from_event(event))
 
         if AudioStart.is_type(event.type):
-            await self._handle_audio_start()
+            sample_rate = DEFAULT_ASR_AUDIO_RATE
+            audio_width = DEFAULT_AUDIO_WIDTH
+            audio_channels = DEFAULT_AUDIO_CHANNELS
+            if event.data:
+                if 'rate' in event.data:
+                    sample_rate = event.data['rate']
+                if 'width' in event.data:
+                    audio_width = event.data['width']
+                if 'channels' in event.data:
+                    audio_channels = event.data['channels']
+            await self._handle_audio_start(sample_rate, audio_width, audio_channels)
             return True
 
         if AudioStop.is_type(event.type):
@@ -119,15 +133,16 @@ class OpenAIEventHandler(AsyncEventHandler):
             self._log_unsupported_asr_model(transcribe.name)
         return False
 
-    async def _handle_audio_start(self) -> None:
+    async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
         """Handle start of audio stream"""
         self._is_recording = True
         self._wav_buffer = NamedBytesIO(name='recording.wav')
         self._wav_write_buffer = wave.open(self._wav_buffer, "wb")
-        self._wav_write_buffer.setnchannels(AUDIO_CHANNELS)
-        self._wav_write_buffer.setsampwidth(AUDIO_WIDTH)
-        self._wav_write_buffer.setframerate(ASR_AUDIO_RATE)
-        _LOGGER.info("Recording started")
+        self._wav_write_buffer.setnchannels(audio_channels)
+        self._wav_write_buffer.setsampwidth(audio_width)
+        self._wav_write_buffer.setframerate(sample_rate)
+        _LOGGER.info("Recording started at %d Hz, %d channels, %d bytes per sample",
+                     sample_rate, audio_channels, audio_width)
 
     async def _handle_audio_chunk(self, chunk: AudioChunk) -> None:
         """Handle audio chunk"""
@@ -256,23 +271,23 @@ class OpenAIEventHandler(AsyncEventHandler):
                     await self.write_event(
                         AudioStart(
                             rate=TTS_AUDIO_RATE,
-                            width=AUDIO_WIDTH,
-                            channels=AUDIO_CHANNELS
+                            width=DEFAULT_AUDIO_WIDTH,
+                            channels=DEFAULT_AUDIO_CHANNELS
                         ).event()
                     )
 
                     # Stream the audio in chunks
                     timestamp = 0
-                    samples_per_chunk = ASR_CHUNK_SIZE // AUDIO_WIDTH  # bytes per sample
+                    samples_per_chunk = TTS_CHUNK_SIZE // DEFAULT_AUDIO_WIDTH  # bytes per sample
                     timestamp_increment = (samples_per_chunk / TTS_AUDIO_RATE) * 1000  # ms
 
-                    async for chunk in response.iter_bytes(chunk_size=ASR_CHUNK_SIZE):
+                    async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                         await self.write_event(
                             AudioChunk(
                                 audio=chunk,
                                 rate=TTS_AUDIO_RATE,
-                                width=AUDIO_WIDTH,
-                                channels=AUDIO_CHANNELS,
+                                width=DEFAULT_AUDIO_WIDTH,
+                                channels=DEFAULT_AUDIO_CHANNELS,
                                 timestamp=int(timestamp)
                             ).event()
                         )
