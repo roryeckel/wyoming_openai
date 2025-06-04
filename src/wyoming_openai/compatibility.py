@@ -234,12 +234,12 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
     async def _list_speaches_voices(self, model_name: str) -> list[str]:
         """
-        Fetches the available voices from the Speaches /v1/models/{model_name}
+        Fetches the available voices from the Speaches /models/{model_name}
         and optionally falls back to the older /audio/speech/voices endpoint.
         Caution: This is not a part of official OpenAI spec.
         """
         if self.backend != OpenAIBackend.SPEACHES:
-            _LOGGER.debug("Skipping /v1/models/{model_name} request because backend is not SPEACHES", model_name=model_name)
+            _LOGGER.debug("Skipping /models/{model_name} request because backend is not SPEACHES", model_name=model_name)
             return []
 
         # NEW Endpoint
@@ -262,13 +262,13 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         #   ]
         # }
         try:
-            response = await self._client.get(f"/v1/models/{model_name}")
+            response = await self._client.get(f"/models/{model_name}")
             response.raise_for_status()
             result = response.json()
             if "voices" in result:
                 return [voice["name"] for voice in result.get("voices", [])]
         except Exception as e:
-            _LOGGER.exception(e, "Failed to fetch /v1/models/%s, checking legacy endpoint...")
+            _LOGGER.exception(e, "Failed to fetch /models/%s, checking legacy endpoint...")
 
         # LEGACY Endpoint
         # Example: [{"model_id": "hexgrad/Kokoro-82M", "voice_id": "af_sky"}]
