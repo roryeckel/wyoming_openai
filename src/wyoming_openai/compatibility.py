@@ -234,14 +234,44 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
     async def _list_speaches_voices(self, model_name: str) -> list[str]:
         """
-        Fetches the available audio voices from the Speaches /audio/speech/voices endpoint.
+        Fetches the available voices from the Speaches /v1/models/{model_name}
+        and optionally falls back to the older /audio/speech/voices endpoint.
         Caution: This is not a part of official OpenAI spec.
-        Example: [{"model_id": "hexgrad/Kokoro-82M", "voice_id": "af_sky"}]
         """
         if self.backend != OpenAIBackend.SPEACHES:
-            _LOGGER.debug("Skipping /audio/speech/voices request because backend is not SPEACHES")
+            _LOGGER.debug("Skipping /v1/models/{model_name} request because backend is not SPEACHES", model_name=model_name)
             return []
 
+        # NEW Endpoint
+        # Example: {
+        #   "id": "speaches-ai/Kokoro-82M-v1.0-ONNX",
+        #   "created": 1749005993,
+        #   "object": "model",
+        #   "owned_by": "speaches-ai",
+        #   "language": [
+        #     "multilingual"
+        #   ],
+        #   "task": "text-to-speech",
+        #   "sample_rate": 24000,
+        #   "voices": [
+        #     {
+        #       "name": "af_heart",
+        #       "language": "en-us",
+        #       "gender": "female"
+        #     }
+        #   ]
+        # }
+        try:
+            response = await self._client.get(f"/v1/models/{model_name}")
+            response.raise_for_status()
+            result = response.json()
+            if "voices" in result:
+                return [voice["name"] for voice in result.get("voices", [])]
+        except Exception as e:
+            _LOGGER.exception(e, "Failed to fetch /v1/models/%s, checking legacy endpoint...")
+
+        # LEGACY Endpoint
+        # Example: [{"model_id": "hexgrad/Kokoro-82M", "voice_id": "af_sky"}]
         try:
             response = await self._client.get("/audio/speech/voices", params={"model_id": model_name})
             response.raise_for_status()
