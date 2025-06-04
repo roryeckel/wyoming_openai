@@ -13,34 +13,37 @@ services:
       STT_MODELS: "Systran/faster-distil-whisper-large-v3"
       STT_BACKEND: "SPEACHES"
       TTS_OPENAI_URL: http://speaches:8000/v1
-      TTS_MODELS: "hexgrad/Kokoro-82M"
+      TTS_MODELS: "speaches-ai/Kokoro-82M-v1.0-ONNX"
       TTS_BACKEND: "SPEACHES"
       # TTS_VOICES: "af af_bella af_sarah am_adam am_michael bf_emma bf_isabella bm_george bm_lewis af_nicole af_sky"
     depends_on:
       speaches:
         condition: service_healthy
 
-  # https://speaches.ai/usage/text-to-speech/#prerequisite
-  # init-speaches:
-  #   image: ghcr.io/speaches-ai/speaches:latest-cuda
-  #   container_name: init-models
-  #   environment:
-  #     - KOKORO_REVISION=c97b7bbc3e60f447383c79b2f94fee861ff156ac
-  #   command: >
-  #     /bin/bash -c '
-  #       export REVISION=$${KOKORO_REVISION} &&
-  #       huggingface-cli download hexgrad/Kokoro-82M --include "kokoro-v0_19.onnx" --revision $${REVISION} &&
-  #       curl --location --output /home/ubuntu/.cache/huggingface/hub/models--hexgrad--Kokoro-82M/snapshots/$${REVISION}/voices.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.bin
-  #     '
-  #   volumes:
-  #     - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
-  #   runtime: nvidia
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             capabilities: [ gpu ]
+  # https://speaches.ai/usage/text-to-speech/
+  init-speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    container_name: init-speaches
+    environment:
+      - SPEACHES_BASE_URL=http://speaches:8000
+    command: >
+      /bin/bash -c '
+        curl -LsSf https://astral.sh/uv/install.sh | sh # https://github.com/speaches-ai/speaches/issues/416
+        uvx speaches-cli model download speaches-ai/Kokoro-82M-v1.0-ONNX
+        uvx speaches-cli model download Systran/faster-distil-whisper-large-v3
+      '
+    volumes:
+      - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [ gpu ]
+    depends_on:
+      speaches: # Seems backwards but the API is not yet available
+          condition: service_healthy
 
   speaches:
     container_name: speaches
@@ -68,9 +71,6 @@ services:
             - driver: nvidia
               capabilities: [ gpu ]
     runtime: nvidia
-    # depends_on:
-    #   init-speaches:
-    #     condition: service_completed_successfully
 
 volumes:
   huggingface-hub:
