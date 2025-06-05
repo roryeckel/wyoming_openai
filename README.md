@@ -141,7 +141,7 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
 - **Docker Compose Configuration**: Use the `docker-compose.speaches.yml` template which includes configuration for both the Wyoming OpenAI proxy and the Speaches service.
 
 - **Speaches Setup**:
-  - The Speaches container is configured with specific model settings (`Systran/faster-distil-whisper-large-v3` for STT and `hexgrad/Kokoro-82M` for TTS).
+  - The Speaches container is configured with specific model settings (`Systran/faster-distil-whisper-large-v3` for STT and `speaches-ai/Kokoro-82M-v1.0-ONNX` for TTS).
   - It uses a local port (8000) to expose the Speaches service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
 
