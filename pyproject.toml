@@ -14,7 +14,7 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
     "openai==1.61.1",
-    "wyoming==1.6.0"
+    "wyoming==1.6.1"
 ]
 
 [project.urls]
