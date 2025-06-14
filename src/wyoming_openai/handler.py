@@ -305,7 +305,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         timestamp += timestamp_increment
 
                     # Send audio stop
-                    await self.write_event(AudioStop().event())
+                    await self.write_event(AudioStop(timestamp=timestamp).event())
 
                     _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
                     return True
