@@ -14,8 +14,6 @@ from . import __version__
 from .compatibility import CustomAsyncOpenAI, TtsVoiceModel
 from .utilities import NamedBytesIO
 
-# TODO: Replace the _wav_buffer with a _pcm_buffer to hold the raw PCM file instead of encoding wav on the fly.
-
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
@@ -198,6 +196,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error during transcription: %s", e)
         finally:
+            self._wav_buffer.close()
             self._wav_buffer = None
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
