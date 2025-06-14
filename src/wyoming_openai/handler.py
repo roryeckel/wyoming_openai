@@ -33,8 +33,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         client_lock: asyncio.Lock,
         asr_models: list[AsrModel],
         stt_temperature: float | None = None,
+        stt_prompt: str | None = None,
         tts_voices: list[TtsVoiceModel],
         tts_speed: float | None = None,
+        tts_instructions: str | None = None,
         **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -43,9 +45,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._stt_client = stt_client
         self._stt_temperature = stt_temperature
+        self._stt_prompt = stt_prompt
 
         self._tts_client = tts_client
         self._tts_speed = tts_speed
+        self._tts_instructions = tts_instructions
 
         self._wyoming_info = Info(
             asr=[
@@ -176,7 +180,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 result = await self._stt_client.audio.transcriptions.create(
                     file=self._wav_buffer,
                     model=self._current_asr_model.name,
-                    temperature=NOT_GIVEN if self._stt_temperature is None else self._stt_temperature
+                    temperature=self._stt_temperature or NOT_GIVEN,
+                    prompt=self._stt_prompt or NOT_GIVEN
                 )
 
             if result.text:
@@ -269,7 +274,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                 model=voice.model_name,
                 voice=voice.name,
                 input=synthesize.text,
-                speed=NOT_GIVEN if self._tts_speed is None else self._tts_speed) as response:
+                speed=self._tts_speed or NOT_GIVEN,
+                instructions=self._tts_instructions or NOT_GIVEN
+            ) as response:
 
                     # Send audio start with required audio parameters
                     await self.write_event(

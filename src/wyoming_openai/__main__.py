@@ -79,6 +79,11 @@ async def main():
         default=float(os.getenv("STT_TEMPERATURE")) if os.getenv("STT_TEMPERATURE") else None,
         help="Sampling temperature for speech-to-text (0.0 to 1.0, default is None for OpenAI default)"
     )
+    parser.add_argument(
+        "--stt-prompt",
+        default=os.getenv("STT_PROMPT", None),
+        help="Optional prompt for STT requests (OpenAI createTranscription API)."
+    )
 
     # TTS configuration
     parser.add_argument(
@@ -118,6 +123,11 @@ async def main():
         type=float,
         default=float(os.getenv("TTS_SPEED")) if os.getenv("TTS_SPEED") else None,
         help="Speed of the TTS output (0.25 to 4.0, default is None for OpenAI default)"
+    )
+    parser.add_argument(
+        "--tts-instructions",
+        default=os.getenv("TTS_INSTRUCTIONS", None),
+        help="Optional instructions for TTS requests (OpenAI createSpeech API)."
     )
 
     args = parser.parse_args()
@@ -178,7 +188,9 @@ async def main():
             asr_models=asr_models,
             stt_temperature=args.stt_temperature,
             tts_voices=tts_voices,
-            tts_speed=args.tts_speed
+            tts_speed=args.tts_speed,
+            tts_instructions=args.tts_instructions,
+            stt_prompt=args.stt_prompt
         )
     )
 
