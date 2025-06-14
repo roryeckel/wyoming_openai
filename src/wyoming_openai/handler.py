@@ -2,6 +2,7 @@ import asyncio
 import logging
 import wave
 
+from openai import NOT_GIVEN
 from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
@@ -31,8 +32,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_client: CustomAsyncOpenAI,
         client_lock: asyncio.Lock,
         asr_models: list[AsrModel],
+        stt_temperature: float | None = None,
         tts_voices: list[TtsVoiceModel],
-        tts_speed: float = 1.0,
+        tts_speed: float | None = None,
         **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -40,6 +42,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._client_lock = client_lock
 
         self._stt_client = stt_client
+        self._stt_temperature = stt_temperature
 
         self._tts_client = tts_client
         self._tts_speed = tts_speed
@@ -172,7 +175,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             async with self._client_lock:
                 result = await self._stt_client.audio.transcriptions.create(
                     file=self._wav_buffer,
-                    model=self._current_asr_model.name
+                    model=self._current_asr_model.name,
+                    temperature=NOT_GIVEN if self._stt_temperature is None else self._stt_temperature
                 )
 
             if result.text:
@@ -265,7 +269,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 model=voice.model_name,
                 voice=voice.name,
                 input=synthesize.text,
-                speed=self._tts_speed) as response:
+                speed=NOT_GIVEN if self._tts_speed is None else self._tts_speed) as response:
 
                     # Send audio start with required audio parameters
                     await self.write_event(

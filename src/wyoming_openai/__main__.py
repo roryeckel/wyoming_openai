@@ -73,6 +73,12 @@ async def main():
         default=OpenAIBackend[env_stt_backend] if env_stt_backend else None,
         help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, or None)"
     )
+    parser.add_argument(
+        "--stt-temperature",
+        type=float,
+        default=float(os.getenv("STT_TEMPERATURE")) if os.getenv("STT_TEMPERATURE") else None,
+        help="Sampling temperature for speech-to-text (0.0 to 1.0, default is None for OpenAI default)"
+    )
 
     # TTS configuration
     parser.add_argument(
@@ -110,8 +116,8 @@ async def main():
     parser.add_argument(
         "--tts-speed",
         type=float,
-        default=float(os.getenv("TTS_SPEED", "1.0")),
-        help="Speed of the TTS output (0.25 to 4.0, default is 1.0)"
+        default=float(os.getenv("TTS_SPEED")) if os.getenv("TTS_SPEED") else None,
+        help="Speed of the TTS output (0.25 to 4.0, default is None for OpenAI default)"
     )
 
     args = parser.parse_args()
@@ -170,6 +176,7 @@ async def main():
             tts_client=tts_client,
             client_lock=asyncio.Lock(),
             asr_models=asr_models,
+            stt_temperature=args.stt_temperature,
             tts_voices=tts_voices,
             tts_speed=args.tts_speed
         )
