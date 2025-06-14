@@ -62,7 +62,7 @@ async def main():
     parser.add_argument(
         "--stt-models",
         nargs='+',  # Use nargs to accept multiple values
-        default=os.getenv("STT_MODELS", 'whisper-1').split(),
+        default=os.getenv("STT_MODELS", 'whisper-1 gpt-4o-mini-transcribe gpt-4o-transcribe').split(),
         help="List of STT model identifiers"
     )
     parser.add_argument(

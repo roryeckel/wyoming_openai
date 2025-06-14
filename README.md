@@ -78,7 +78,7 @@ python -m wyoming_openai \
   --languages en \
   --stt-openai-key YOUR_STT_API_KEY_HERE \
   --stt-openai-url https://api.openai.com/v1 \
-  --stt-models whisper-1 \
+  --stt-models whisper-1 gpt-4o-mini-transcribe gpt-4o-transcribe \
   --stt-backend OPENAI \
   --tts-openai-key YOUR_TTS_API_KEY_HERE \
   --tts-openai-url https://api.openai.com/v1 \
@@ -101,7 +101,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--languages`                           | `WYOMING_LANGUAGES`                        | en                                            | Space-separated list of supported languages to advertise.            |
 | `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible speech-to-text services.      |
 | `--stt-openai-url`                      | `STT_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible speech-to-text API            |
-| `--stt-models`                          | `STT_MODELS`                               | whisper-1                                     | Space-separated list of models to use for the STT service.           |
+| `--stt-models`                          | `STT_MODELS`                               | whisper-1 gpt-4o-mini-transcribe gpt-4o-transcribe            | Space-separated list of models to use for the STT service.           |
 | `--stt-backend`                         | `STT_BACKEND`                              | None (autodetected)                             | Enable unofficial API feature sets.          |
 | `--stt-temperature`                     | `STT_TEMPERATURE`                          | None (autodetected)                                          | Sampling temperature for speech-to-text (ranges from 0.0 to 1.0)               |
 | `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
