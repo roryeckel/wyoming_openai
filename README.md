@@ -280,7 +280,6 @@ sequenceDiagram
 
 ## Future Plans (Descending Priority)
 
-- gpt-4o-mini-tts input and instruction support
 - Improved streaming support directly to OpenAI APIs
 - Reverse direction support (Server for OpenAI compatible endpoints - possibly FastAPI)
 - OpenAI Realtime API
