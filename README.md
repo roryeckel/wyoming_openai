@@ -82,8 +82,8 @@ python -m wyoming_openai \
   --stt-backend OPENAI \
   --tts-openai-key YOUR_TTS_API_KEY_HERE \
   --tts-openai-url https://api.openai.com/v1 \
-  --tts-models tts-1 \
-  --tts-voices alloy echo fable onyx nova shimmer \
+  --tts-models tts-1 tts-1-hd gpt-4o-mini-tts \
+  --tts-voices alloy ash coral echo fable onyx nova sage shimmer \
   --tts-backend OPENAI \
   --tts-speed 1.0
 ```
@@ -106,7 +106,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--stt-temperature`                     | `STT_TEMPERATURE`                          | None (autodetected)                                          | Sampling temperature for speech-to-text (ranges from 0.0 to 1.0)               |
 | `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
 | `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible text-to-speech API            |
-| `--tts-models`                          | `TTS_MODELS`                               | tts-1 tts-1-hd                                | Space-separated list of models to use for the TTS service.           |
+| `--tts-models`                          | `TTS_MODELS`                               | tts-1 tts-1-hd gpt-4o-mini-tts                                | Space-separated list of models to use for the TTS service.           |
 | `--tts-voices`                          | `TTS_VOICES`                               | Empty (autodetected)                             | Space-separated list of voices for TTS.        |
 | `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetected)                             | Enable unofficial API feature sets.          |
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                             | Speed of the TTS output (ranges from 0.25 to 4.0).               |

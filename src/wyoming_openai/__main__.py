@@ -95,7 +95,7 @@ async def main():
     parser.add_argument(
         "--tts-models",
         nargs='+',
-        default=os.getenv("TTS_MODELS", 'tts-1 tts-1-hd').split(),
+        default=os.getenv("TTS_MODELS", 'tts-1 tts-1-hd gpt-4o-mini-tts').split(),
         help="List of TTS model identifiers"
     )
     parser.add_argument(
