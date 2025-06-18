@@ -6,7 +6,6 @@ from functools import partial
 
 from wyoming.server import AsyncServer
 
-from . import __version__
 from .compatibility import (
     CustomAsyncOpenAI,
     OpenAIBackend,
@@ -15,6 +14,7 @@ from .compatibility import (
     create_tts_voices,
     tts_voice_to_string,
 )
+from .const import __version__
 from .handler import OpenAIEventHandler
 
 

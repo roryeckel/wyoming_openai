@@ -10,8 +10,8 @@ from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info, TtsP
 from wyoming.server import AsyncEventHandler
 from wyoming.tts import Synthesize
 
-from . import __version__
 from .compatibility import CustomAsyncOpenAI, TtsVoiceModel
+from .const import __version__
 from .utilities import NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
