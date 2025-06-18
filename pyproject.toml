@@ -9,9 +9,18 @@ description = "OpenAI-Compatible Proxy Middleware for the Wyoming Protocol"
 authors = [
     { name = "Rory Eckel" }
 ]
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
+keywords = ["proxy", "tts", "openai", "home-assistant", "stt", "asr", "wyoming"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "openai==1.86.0",
     "wyoming==1.6.1"
@@ -28,6 +37,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["wyoming_openai", "wyoming_openai.*"]
 
 [tool.ruff]
 # Enable Pyflakes (`F`), isort (`I`), and other recommended rules
