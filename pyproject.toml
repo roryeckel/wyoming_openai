@@ -11,14 +11,13 @@ authors = [
 ]
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
 keywords = ["proxy", "tts", "openai", "home-assistant", "stt", "asr", "wyoming"]
 classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
