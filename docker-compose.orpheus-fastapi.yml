@@ -1,0 +1,103 @@
+services:
+  wyoming_openai:
+    image: ghcr.io/roryeckel/wyoming_openai:latest
+    container_name: wyoming_openai
+    ports:
+      - "10300:10300"
+    restart: unless-stopped
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
+      TTS_OPENAI_URL: http://orpheus-fastapi:5005/v1/audio/speech
+      TTS_MODELS: "orpheus"
+      TTS_BACKEND: "ORPHEUS_FASTAPI"
+    depends_on:
+      orpheus-fastapi:
+        condition: service_healthy
+
+  orpheus-fastapi:
+    container_name: orpheus-fastapi
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "5005:5005"
+    env_file:
+      - .env
+    environment:
+      ORPHEUS_API_URL: http://llama-cpp-server:5006/v1/completions
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      llama-cpp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - orpheus-models:/models
+
+  llama-cpp-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-cpp-server
+    ports:
+      - "5006:5006"
+    env_file:
+      - .env
+    command: >
+      -m /models/${ORPHEUS_MODEL_NAME}
+      --port 5006
+      --host 0.0.0.0
+      --n-gpu-layers 29
+      --ctx-size ${ORPHEUS_MAX_TOKENS}
+      --n-predict ${ORPHEUS_MAX_TOKENS}
+      --rope-scaling linear
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5006/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - orpheus-models:/models
+
+  model-init:
+    image: curlimages/curl:latest
+    container_name: model-init
+    user: ${UID:-1000}:${GID:-1000}
+    volumes:
+      - orpheus-models:/app/models
+    working_dir: /app
+    command: >
+      sh -c '
+      if [ ! -f /app/models/${ORPHEUS_MODEL_NAME} ]; then
+        echo "Downloading model file..."
+        wget -P /app/models https://huggingface.co/lex-au/${ORPHEUS_MODEL_NAME}/resolve/main/${ORPHEUS_MODEL_NAME}
+      else
+        echo "Model file already exists"
+      fi'
+    restart: "no"
+
+volumes:
+  orpheus-models:
