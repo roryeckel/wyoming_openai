@@ -10,7 +10,9 @@ from .compatibility import (
     CustomAsyncOpenAI,
     OpenAIBackend,
     asr_model_to_string,
-    create_asr_models,
+    create_asr_programs,
+    create_info,
+    create_tts_programs,
     create_tts_voices,
     tts_voice_to_string,
 )
@@ -82,7 +84,13 @@ async def main():
     parser.add_argument(
         "--stt-prompt",
         default=os.getenv("STT_PROMPT", None),
-        help="Optional prompt for STT requests (OpenAI createTranscription API)."
+        help="Optional prompt for STT requests"
+    )
+    parser.add_argument(
+        "--stt-streaming-models",
+        nargs="+",
+        default=os.getenv("STT_STREAMING_MODELS", "").split(),
+        help="Space-separated list of STT model names that support streaming (e.g. gpt-4o-transcribe)"
     )
 
     # TTS configuration
@@ -127,7 +135,7 @@ async def main():
     parser.add_argument(
         "--tts-instructions",
         default=os.getenv("TTS_INSTRUCTIONS", None),
-        help="Optional instructions for TTS requests (OpenAI createSpeech API)."
+        help="Optional instructions for TTS requests"
     )
 
     args = parser.parse_args()
@@ -154,7 +162,12 @@ async def main():
     tts_client = await tts_factory(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
     _logger.debug("Detected TTS backend: %s", tts_client.backend)
 
-    asr_models = create_asr_models(args.stt_models, args.stt_openai_url, args.languages)
+    asr_programs = create_asr_programs(
+        args.stt_models,
+        args.stt_streaming_models,
+        args.stt_openai_url,
+        args.languages
+    )
 
     if args.tts_voices:
         # If TTS_VOICES is set, use that
@@ -163,31 +176,36 @@ async def main():
         # Otherwise, list supported voices via defaults
         tts_voices = await tts_client.list_supported_voices(args.tts_models, args.languages)
 
-    # Log everything available
-    if asr_models:
-        _logger.info("*** ASR Models ***\n%s", "\n".join(asr_model_to_string(x) for x in asr_models))
+    tts_programs = create_tts_programs(tts_voices)
+
+    info = create_info(asr_programs, tts_programs)
+
+    # Log the model configurations
+    if asr_programs:
+        all_asr_models = [model for prog in asr_programs for model in prog.models]
+        _logger.info("*** ASR Models ***\n%s", "\n".join(asr_model_to_string(x) for x in all_asr_models))
     else:
         _logger.warning("No ASR models specified")
 
-    if tts_voices:
-        _logger.info("*** TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in tts_voices))
+    if tts_programs:
+        all_tts_voices = [voice for prog in tts_programs for voice in prog.voices]
+        _logger.info("*** TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in all_tts_voices))
     else:
         _logger.warning("No TTS models specified")
 
-    # Create server
+    # Create Wyoming server
     server = AsyncServer.from_uri(args.uri)
 
-    # Run server
+    # Run Wyoming server
     _logger.info("Starting server at %s", args.uri)
     await server.run(
         partial(
             OpenAIEventHandler,
+            info=info,
             stt_client=stt_client,
             tts_client=tts_client,
             client_lock=asyncio.Lock(),
-            asr_models=asr_models,
             stt_temperature=args.stt_temperature,
-            tts_voices=tts_voices,
             tts_speed=args.tts_speed,
             tts_instructions=args.tts_instructions,
             stt_prompt=args.stt_prompt

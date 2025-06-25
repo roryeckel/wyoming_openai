@@ -2,16 +2,22 @@ import asyncio
 import logging
 import wave
 
-from openai import NOT_GIVEN
-from wyoming.asr import Transcribe, Transcript
+from openai import NOT_GIVEN, AsyncStream
+from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+from wyoming.asr import (
+    Transcribe,
+    Transcript,
+    TranscriptChunk,
+    TranscriptStart,
+    TranscriptStop,
+)
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
-from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info, TtsProgram, TtsVoice
+from wyoming.info import AsrModel, Describe, Info, TtsVoice
 from wyoming.server import AsyncEventHandler
 from wyoming.tts import Synthesize
 
 from .compatibility import CustomAsyncOpenAI, TtsVoiceModel
-from .const import __version__
 from .utilities import NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,18 +32,18 @@ class OpenAIEventHandler(AsyncEventHandler):
     def __init__(
         self,
         *args,
+        info: Info,
         stt_client: CustomAsyncOpenAI,
         tts_client: CustomAsyncOpenAI,
         client_lock: asyncio.Lock,
-        asr_models: list[AsrModel],
         stt_temperature: float | None = None,
         stt_prompt: str | None = None,
-        tts_voices: list[TtsVoiceModel],
         tts_speed: float | None = None,
         tts_instructions: str | None = None,
-        **kwargs
+        **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self._wyoming_info = info
 
         self._client_lock = client_lock
 
@@ -49,35 +55,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._tts_speed = tts_speed
         self._tts_instructions = tts_instructions
 
-        self._wyoming_info = Info(
-            asr=[
-                AsrProgram(
-                    name="openai",
-                    description="OpenAI-Compatible Proxy",
-                    attribution=Attribution(
-                        name="Rory Eckel",
-                        url="https://github.com/roryeckel/wyoming-openai/",
-                    ),
-                    installed=True,
-                    version=__version__,
-                    models=asr_models
-                )
-            ],
-            tts=[
-                TtsProgram(
-                    name="openai",
-                    description="OpenAI-Compatible Proxy",
-                    attribution=Attribution(
-                        name="Rory Eckel",
-                        url="https://github.com/roryeckel/wyoming-openai/",
-                    ),
-                    installed=True,
-                    version=__version__,
-                    voices=tts_voices
-                )
-            ]
-        )
-
         # State for current transcription
         self._wav_buffer: NamedBytesIO | None = None
         self._wav_write_buffer: wave.Wave_write | None = None
@@ -87,7 +64,7 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def handle_event(self, event: Event) -> bool:
         """
         Handle incoming events
-        https://github.com/rhasspy/rhasspy3/blob/master/docs/wyoming.md#events-types
+        https://github.com/OHF-Voice/wyoming?tab=readme-ov-file#event-types
         """
         if AudioChunk.is_type(event.type):
             # Non-logging because spammy
@@ -175,29 +152,56 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             # Send to OpenAI for transcription
             async with self._client_lock:
-                result = await self._stt_client.audio.transcriptions.create(
+                use_streaming = self._is_asr_model_streaming(self._current_asr_model.name)
+
+                transcription = await self._stt_client.audio.transcriptions.create(
                     file=self._wav_buffer,
                     model=self._current_asr_model.name,
                     temperature=self._stt_temperature or NOT_GIVEN,
-                    prompt=self._stt_prompt or NOT_GIVEN
+                    prompt=self._stt_prompt or NOT_GIVEN,
+                    response_format="json",
+                    stream=use_streaming
                 )
 
-            if result.text:
-                _LOGGER.info(f"Successfully transcribed: {result.text}")
+                await self.write_event(TranscriptStart().event())
 
-                # Send transcript event
-                transcript = Transcript(
-                    text=result.text
-                )
-                await self.write_event(transcript.event())
-            else:
-                _LOGGER.warning("Received empty transcription result")
+                if isinstance(transcription, AsyncStream):
+                    _LOGGER.debug("Handling streaming transcription response")
+                    full_text = ""
+                    async for chunk in transcription:
+                        if chunk.type == "transcript.text.delta":
+                            if chunk.delta:
+                                full_text += chunk.delta
+                                _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
+                                await self.write_event(
+                                    TranscriptChunk(text=chunk.delta).event()
+                                )
+                    if full_text:
+                        _LOGGER.info("Successfully transcribed stream: %s", full_text)
+                        await self.write_event(Transcript(text=full_text).event())
+                    else:
+                        _LOGGER.warning("Received empty transcription from stream. If this is unexpected, please check your STT_STREAMING_MODELS configuration.")
+
+                elif isinstance(transcription, TranscriptionCreateResponse):
+                    # Handle non-streaming response
+                    _LOGGER.debug("Handling non-streaming transcription response")
+                    if transcription.text:
+                        _LOGGER.info("Successfully transcribed: %s", transcription.text)
+                        await self.write_event(Transcript(text=transcription.text).event())
+                    else:
+                        _LOGGER.warning("Received empty transcription result")
+
+                else:
+                    _LOGGER.error("Unexpected transcription response type: %s", type(transcription))
+
+                await self.write_event(TranscriptStop().event())
 
         except Exception as e:
             _LOGGER.exception("Error during transcription: %s", e)
         finally:
-            self._wav_buffer.close()
-            self._wav_buffer = None
+            if self._wav_buffer:
+                self._wav_buffer.close()
+                self._wav_buffer = None
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
         """Get an ASR model by name or None"""
@@ -206,6 +210,14 @@ class OpenAIEventHandler(AsyncEventHandler):
                 if model.name == model_name or not model_name:
                     return model
         return None
+
+    def _is_asr_model_streaming(self, model_name: str) -> bool:
+        """Check if an ASR model supports streaming"""
+        for program in self._wyoming_info.asr:
+            for model in program.models:
+                if model.name == model_name:
+                    return program.supports_transcript_streaming
+        return False
 
     def _log_unsupported_asr_model(self, model_name: str | None = None):
         """Log an unsupported ASR model"""

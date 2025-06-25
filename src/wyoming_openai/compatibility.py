@@ -3,7 +3,15 @@ from enum import Enum
 from typing import override
 
 from openai import AsyncOpenAI
-from wyoming.info import AsrModel, Attribution, TtsVoice
+from wyoming.info import AsrModel, AsrProgram, Attribution, Info, TtsProgram, TtsVoice
+
+from .const import (
+    ATTRIBUTION_NAME_MODEL,
+    ATTRIBUTION_NAME_PROGRAM,
+    ATTRIBUTION_NAME_PROGRAM_STREAMING,
+    ATTRIBUTION_URL,
+    __version__,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,34 +35,83 @@ class TtsVoiceModel(TtsVoice):
         super().__init__(*args, **kwargs)
         self.model_name = model_name
 
-def create_asr_models(stt_models: list[str], stt_url: str, languages: list[str]) -> list[AsrModel]:
+def create_asr_programs(
+    stt_models: list[str],
+    stt_streaming_models: list[str],
+    stt_url: str,
+    languages: list[str],
+) -> list[AsrProgram]:
     """
-    Creates a list of ASR (Automatic Speech Recognition) models in the Wyoming Protocol format.
-
-    Args:
-        stt_models (List[str]): A list of STT model names.
-        stt_url (str): The URL for the STT service attribution.
-        languages (List[str]): A list of supported languages.
-
-    Returns:
-        List[AsrModel]: A list of AsrModel instances.
+    Creates a list of ASR programs, separating models based on streaming support.
     """
-    asr_models = []
+    # Create ordered list: streaming models first, then non-streaming, preserving natural order and deduplicating
+    seen = set()
+    ordered_models = []
+
+    # Add streaming models first
+    for model_name in stt_streaming_models:
+        if model_name not in seen:
+            ordered_models.append(model_name)
+            seen.add(model_name)
+
+    # Add non-streaming models
     for model_name in stt_models:
-        asr_models.append(AsrModel(
+        if model_name not in seen:
+            ordered_models.append(model_name)
+            seen.add(model_name)
+
+    all_asr_models = []
+    for model_name in ordered_models:
+        all_asr_models.append(AsrModel(
             name=model_name,
             description=model_name,
-            attribution=Attribution(
-                name="OpenAI Wyoming Proxy",
-                url=stt_url
-            ),
+            attribution=Attribution(name=ATTRIBUTION_NAME_MODEL, url=stt_url),
             installed=True,
             languages=languages,
             version=None
         ))
-    return asr_models
 
-def create_tts_voices(tts_models: list[str], tts_voices: list[str], tts_url: str, languages: list[str]) -> list[TtsVoiceModel]:
+    streaming_asr_models = []
+    non_streaming_asr_models = []
+
+    for model in all_asr_models:
+        if model.name in stt_streaming_models:
+            streaming_asr_models.append(model)
+        else:
+            non_streaming_asr_models.append(model)
+
+    asr_programs = []
+
+    if streaming_asr_models:
+        asr_programs.append(AsrProgram(
+            name="openai-streaming",
+            description="OpenAI (Streaming)",
+            attribution=Attribution(name=ATTRIBUTION_NAME_PROGRAM_STREAMING, url=stt_url),
+            installed=True,
+            version=__version__,
+            models=streaming_asr_models,
+            supports_transcript_streaming=True,
+        ))
+
+    if non_streaming_asr_models:
+        asr_programs.append(AsrProgram(
+            name="openai",
+            description="OpenAI (Non-Streaming)",
+            attribution=Attribution(name=ATTRIBUTION_NAME_PROGRAM, url=stt_url),
+            installed=True,
+            version=__version__,
+            models=non_streaming_asr_models,
+            supports_transcript_streaming=False,
+        ))
+
+    return asr_programs
+
+def create_tts_voices(
+    tts_models: list[str],
+    tts_voices: list[str],
+    tts_url: str,
+    languages: list[str]
+) -> list[TtsVoiceModel]:
     """
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
 
@@ -75,7 +132,7 @@ def create_tts_voices(tts_models: list[str], tts_voices: list[str], tts_url: str
                 description=f"{voice} ({model_name})",
                 model_name=model_name,
                 attribution=Attribution(
-                    name="OpenAI Wyoming Proxy",
+                    name=ATTRIBUTION_NAME_MODEL,
                     url=tts_url
                 ),
                 installed=True,
@@ -83,6 +140,34 @@ def create_tts_voices(tts_models: list[str], tts_voices: list[str], tts_url: str
                 version=None
             ))
     return voices
+
+def create_tts_programs(tts_voices: list[TtsVoiceModel]) -> list[TtsProgram]:
+    """
+    Create TTS programs from a list of voices.
+    """
+    if not tts_voices:
+        return []
+
+    return [
+        TtsProgram(
+            name="openai",
+            description="OpenAI",
+            attribution=Attribution(
+                name=ATTRIBUTION_NAME_PROGRAM,
+                url=ATTRIBUTION_URL,
+            ),
+            installed=True,
+            version=__version__,
+            voices=tts_voices,
+        )
+    ]
+
+
+def create_info(asr_programs: list[AsrProgram], tts_programs: list[TtsProgram]) -> Info:
+    """
+    Create Wyoming info object.
+    """
+    return Info(asr=asr_programs, tts=tts_programs)
 
 def asr_model_to_string(asr_model: AsrModel) -> str:
     """
