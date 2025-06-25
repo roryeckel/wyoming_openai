@@ -10,6 +10,14 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant.
 
+## Featured Models
+
+This project features a variety of examples for using cutting-edge models in both Speech-to-Text (STT) and Text-to-Speech (TTS):
+
+- **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
+- **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
+- **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#3-deploying-with-kokoro-fastapi-and-speaches-local-services).
+- **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
@@ -117,8 +125,8 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--languages`                           | `WYOMING_LANGUAGES`                        | en                                            | Space-separated list of supported languages to advertise.            |
 | `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible speech-to-text services.      |
 | `--stt-openai-url`                      | `STT_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible speech-to-text API            |
-| `--stt-models`                          | `STT_MODELS`                               | gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1            | Space-separated list of models to use for the STT service.           |
-| `--stt-streaming-models`                | `STT_STREAMING_MODELS`                     | (empty)                                       | Space-separated list of STT models that support streaming (e.g. gpt-4o-transcribe). Only these models will use streaming mode. |
+| `--stt-models`                          | `STT_MODELS`                               | whisper-1            | Space-separated list of models to use for the STT service.           |
+| `--stt-streaming-models`                | `STT_STREAMING_MODELS`                     |  gpt-4o-transcribe gpt-4o-mini-transcribe                                       | Space-separated list of STT models that support streaming (e.g. gpt-4o-transcribe). Only these models will use streaming mode. |
 | `--stt-backend`                         | `STT_BACKEND`                              | None (autodetected)                             | Enable unofficial API feature sets.          |
 | `--stt-temperature`                     | `STT_TEMPERATURE`                          | None (autodetected)                                          | Sampling temperature for speech-to-text (ranges from 0.0 to 1.0)               |
 | `--stt-prompt`                          | `STT_PROMPT`                               | None                                          | Optional prompt for STT requests (Text to guide the model's style).   |

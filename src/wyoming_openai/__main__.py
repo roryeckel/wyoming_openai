@@ -66,7 +66,7 @@ async def main():
     parser.add_argument(
         "--stt-models",
         nargs='+',  # Use nargs to accept multiple values
-        default=os.getenv("STT_MODELS", 'gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1').split(),
+        default=os.getenv("STT_MODELS", 'whisper-1').split(),
         help="List of STT model identifiers"
     )
     parser.add_argument(
@@ -91,7 +91,7 @@ async def main():
     parser.add_argument(
         "--stt-streaming-models",
         nargs="+",
-        default=os.getenv("STT_STREAMING_MODELS", "").split(),
+        default=os.getenv("STT_STREAMING_MODELS", "gpt-4o-transcribe gpt-4o-mini-transcribe").split(),
         help="Space-separated list of STT model names that support streaming (e.g. gpt-4o-transcribe)"
     )
 
