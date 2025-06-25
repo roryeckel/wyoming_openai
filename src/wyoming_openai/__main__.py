@@ -21,12 +21,14 @@ from .handler import OpenAIEventHandler
 
 
 def configure_logging(level):
+    """Configure logging based on a string level."""
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f'Invalid log level: {level}')
     logging.basicConfig(level=numeric_level)
 
 async def main():
+    """Main entry point for the Wyoming OpenAI server."""
     env_stt_backend = os.getenv("STT_BACKEND")
     env_tts_backend = os.getenv("TTS_BACKEND")
     parser = argparse.ArgumentParser()

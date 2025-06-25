@@ -43,6 +43,15 @@ def create_asr_programs(
 ) -> list[AsrProgram]:
     """
     Creates a list of ASR programs, separating models based on streaming support.
+
+    Args:
+        stt_models (list[str]): List of STT model identifiers.
+        stt_streaming_models (list[str]): List of STT models identifiers that support streaming.
+        stt_url (str): The URL for the STT service attribution.
+        languages (list[str]): A list of supported languages.
+
+    Returns:
+        list[AsrProgram]: A list of Wyoming ASR programs.
     """
     # Create ordered list: streaming models first, then non-streaming, preserving natural order and deduplicating
     seen = set()
@@ -116,13 +125,13 @@ def create_tts_voices(
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
 
     Args:
-        tts_models (List[str]): A list of TTS model names.
-        tts_voices (List[str]): A list of voice identifiers.
+        tts_models (list[str]): A list of TTS model identifiers.
+        tts_voices (list[str]): A list of voice identifiers.
         tts_url (str): The URL for the TTS service attribution.
-        languages (List[str]): A list of supported languages.
+        languages (list[str]): A list of supported languages.
 
     Returns:
-        List[TtsVoiceModel]: A list of TtsVoiceModel instances.
+        list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
     """
     voices = []
     for model_name in tts_models:
@@ -144,6 +153,12 @@ def create_tts_voices(
 def create_tts_programs(tts_voices: list[TtsVoiceModel]) -> list[TtsProgram]:
     """
     Create TTS programs from a list of voices.
+
+    Args:
+        tts_voices (list[TtsVoiceModel]): A list of TTS voice models.
+
+    Returns:
+        list[TtsProgram]: A list of Wyoming TTS programs.
     """
     if not tts_voices:
         return []
@@ -166,6 +181,13 @@ def create_tts_programs(tts_voices: list[TtsVoiceModel]) -> list[TtsProgram]:
 def create_info(asr_programs: list[AsrProgram], tts_programs: list[TtsProgram]) -> Info:
     """
     Create Wyoming info object.
+
+    Args:
+        asr_programs (list[AsrProgram]): A list of ASR programs.
+        tts_programs (list[TtsProgram]): A list of TTS programs.
+
+    Returns:
+        Info: A Wyoming info object.
     """
     return Info(asr=asr_programs, tts=tts_programs)
 
@@ -237,6 +259,7 @@ def tts_voice_to_string(tts_voice_model: TtsVoiceModel) -> str:
 #                 logger.error("Failed to fetch OpenAI models: %s", e)
 
 class OpenAIBackend(Enum):
+    """Enum for different unofficial backends."""
     OPENAI = 0 # "Official"
     SPEACHES = 1
     KOKORO_FASTAPI = 2

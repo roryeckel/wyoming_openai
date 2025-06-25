@@ -42,6 +42,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_instructions: str | None = None,
         **kwargs,
     ) -> None:
+        """
+        Initializes the OpenAIEventHandler.
+
+        Args:
+            *args: Variable length argument list for the superclass.
+            info (Info): The Wyoming info object.
+            stt_client (CustomAsyncOpenAI): The client for speech-to-text.
+            tts_client (CustomAsyncOpenAI): The client for text-to-speech.
+            client_lock (asyncio.Lock): A lock to ensure thread-safe client access.
+            stt_temperature (float | None): The temperature for STT, or None for default.
+            stt_prompt (str | None): An optional prompt for STT.
+            tts_speed (float | None): The speed for TTS, or None for default.
+            tts_instructions (str | None): Optional instructions for TTS.
+            **kwargs: Arbitrary keyword arguments for the superclass.
+        """
         super().__init__(*args, **kwargs)
         self._wyoming_info = info
 
