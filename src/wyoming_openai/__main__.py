@@ -184,8 +184,25 @@ async def main():
 
     # Log the model configurations
     if asr_programs:
-        all_asr_models = [model for prog in asr_programs for model in prog.models]
-        _logger.info("*** ASR Models ***\n%s", "\n".join(asr_model_to_string(x) for x in all_asr_models))
+        streaming_asr_models_for_logging = []
+        non_streaming_asr_models_for_logging = []
+
+        for prog in asr_programs:
+            for model in prog.models:
+                if prog.supports_transcript_streaming:
+                    streaming_asr_models_for_logging.append(model)
+                else:
+                    non_streaming_asr_models_for_logging.append(model)
+
+        if streaming_asr_models_for_logging:
+            _logger.info("*** Streaming ASR Models ***\n%s", "\n".join(asr_model_to_string(x, is_streaming=True) for x in streaming_asr_models_for_logging))
+        else:
+            _logger.info("No Streaming ASR models specified")
+
+        if non_streaming_asr_models_for_logging:
+            _logger.info("*** Non-Streaming ASR Models ***\n%s", "\n".join(asr_model_to_string(x, is_streaming=False) for x in non_streaming_asr_models_for_logging))
+        else:
+            _logger.info("No Non-Streaming ASR models specified")
     else:
         _logger.warning("No ASR models specified")
 

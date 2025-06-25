@@ -191,12 +191,13 @@ def create_info(asr_programs: list[AsrProgram], tts_programs: list[TtsProgram]) 
     """
     return Info(asr=asr_programs, tts=tts_programs)
 
-def asr_model_to_string(asr_model: AsrModel) -> str:
+def asr_model_to_string(asr_model: AsrModel, is_streaming: bool = False) -> str:
     """
     Converts an AsrModel instance to a human-readable string representation.
 
     Args:
         asr_model (AsrModel): The ASR model instance to convert.
+        is_streaming (bool): Indicates whether the model is streaming.
 
     Returns:
         str: A human-readable string representation of the ASR model.
@@ -206,8 +207,9 @@ def asr_model_to_string(asr_model: AsrModel) -> str:
         f"  Name: {asr_model.name}\n"
         f"  Description: {asr_model.description}\n"
         f"  Attribution: {asr_model.attribution.name} - {asr_model.attribution.url}\n"
-        f"  Installed: {'Yes' if asr_model.installed else 'No'}\n"
         f"  Languages: {', '.join(asr_model.languages)}\n"
+        f"  Supports Streaming: {is_streaming}\n"
+        f"  Installed: {'Yes' if asr_model.installed else 'No'}\n"
         f"  Version: {asr_model.version}"
     )
 
