@@ -8,8 +8,16 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 ## Overview
 
-This project introduces a [Wyoming](https://github.com/rhasspy/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant.
+This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant.
 
+## Featured Models
+
+This project features a variety of examples for using cutting-edge models in both Speech-to-Text (STT) and Text-to-Speech (TTS) scenarios:
+
+- **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
+- **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
+- **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#3-deploying-with-kokoro-fastapi-and-speaches-local-services).
+- **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
@@ -63,6 +71,22 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 
 4. **Configure Environment Variables or Command Line Arguments**
 
+## Installation from PyPI
+
+Since v0.3.2, `wyoming-openai` is now available on [PyPI](https://pypi.org/project/wyoming-openai/). To install the latest release, run:
+
+```bash
+pip install wyoming-openai
+```
+
+This is useful for local deployment when you don't want to clone the repository or if you want to use the library components in your own projects.
+
+To upgrade to the latest version, run:
+
+```bash
+pip install --upgrade wyoming-openai
+```
+
 ## Command Line Arguments
 
 The proxy server can be configured using several command line arguments to tailor its behavior to your specific needs.
@@ -78,7 +102,8 @@ python -m wyoming_openai \
   --languages en \
   --stt-openai-key YOUR_STT_API_KEY_HERE \
   --stt-openai-url https://api.openai.com/v1 \
-  --stt-models gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1 \
+  --stt-models whisper-1 \
+  --stt-streaming-models gpt-4o-transcribe gpt-4o-mini-transcribe \
   --stt-backend OPENAI \
   --tts-openai-key YOUR_TTS_API_KEY_HERE \
   --tts-openai-url https://api.openai.com/v1 \
@@ -101,16 +126,17 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--languages`                           | `WYOMING_LANGUAGES`                        | en                                            | Space-separated list of supported languages to advertise.            |
 | `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible speech-to-text services.      |
 | `--stt-openai-url`                      | `STT_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible speech-to-text API            |
-| `--stt-models`                          | `STT_MODELS`                               | gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1            | Space-separated list of models to use for the STT service.           |
-| `--stt-backend`                         | `STT_BACKEND`                              | None (autodetected)                             | Enable unofficial API feature sets.          |
-| `--stt-temperature`                     | `STT_TEMPERATURE`                          | None (autodetected)                                          | Sampling temperature for speech-to-text (ranges from 0.0 to 1.0)               |
+| `--stt-models`                          | `STT_MODELS`                               | None (required*)                                          | Space-separated list of models to use for the STT service. Example: `gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1` |
+| `--stt-streaming-models`                | `STT_STREAMING_MODELS`                     | None                                          | Space-separated list of STT models that support streaming (e.g. `gpt-4o-transcribe gpt-4o-mini-transcribe`). Only these models will use streaming mode. |
+| `--stt-backend`                         | `STT_BACKEND`                              | None (autodetected)                           | Enable unofficial API feature sets.          |
+| `--stt-temperature`                     | `STT_TEMPERATURE`                          | None (autodetected)                           | Sampling temperature for speech-to-text (ranges from 0.0 to 1.0)               |
 | `--stt-prompt`                          | `STT_PROMPT`                               | None                                          | Optional prompt for STT requests (Text to guide the model's style).   |
 | `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
 | `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible text-to-speech API            |
-| `--tts-models`                          | `TTS_MODELS`                               | gpt-4o-mini-tts tts-1-hd tts-1                                | Space-separated list of models to use for the TTS service.           |
-| `--tts-voices`                          | `TTS_VOICES`                               | Empty (autodetected)                             | Space-separated list of voices for TTS.        |
-| `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetected)                             | Enable unofficial API feature sets.          |
-| `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                             | Speed of the TTS output (ranges from 0.25 to 4.0).               |
+| `--tts-models`                          | `TTS_MODELS`                               | None (required*)                           | Space-separated list of models to use for the TTS service. Example: `gpt-4o-mini-tts tts-1-hd tts-1` |
+| `--tts-voices`                          | `TTS_VOICES`                               | Empty (autodetected)                          | Space-separated list of voices for TTS.        |
+| `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetected)                           | Enable unofficial API feature sets.          |
+| `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
 
 ## Docker (Recommended)
@@ -202,9 +228,9 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.1`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.3`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
-- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.2`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
+- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.3`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 
 ### General Deployment Steps
 
@@ -288,7 +314,9 @@ sequenceDiagram
 
 Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
 
-## Linting and Code Quality (Ruff)
+## Quality Assurance
+
+### Linting (Ruff)
 
 This project uses [Ruff](https://github.com/astral-sh/ruff) for linting and code quality checks. Ruff is a fast Python linter written in Rust that can replace multiple tools like flake8, isort, and more.
 
@@ -304,4 +332,24 @@ To use Ruff during development:
    ruff check .
    ```
 
-The project includes a GitHub Action that automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
+A GitHub Action automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
+
+### Testing (Pytest)
+
+This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
+
+To run the tests:
+
+1. Install development dependencies (if not already done):
+    ```bash
+    pip install -e ".[dev]"
+    ```
+
+2. In the [`tests/`](tests/) folder, run all tests with:
+    ```bash
+    pytest
+    ```
+
+All new code should include appropriate tests.
+A GitHub Action automatically runs pytest on all pull requests and branch pushes to ensure tests pass.
+

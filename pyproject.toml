@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wyoming_openai"
-version = "0.3.2"
+version = "0.3.3"
 description = "OpenAI-Compatible Proxy Middleware for the Wyoming Protocol"
 authors = [
     { name = "Rory Eckel" }
@@ -21,8 +21,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "openai==1.86.0",
-    "wyoming==1.6.1"
+    "openai==1.91.0",
+    "wyoming==1.7.1"
 ]
 
 [project.urls]
@@ -32,6 +32,9 @@ Issues = "https://github.com/roryeckel/wyoming_openai/issues"
 [project.optional-dependencies]
 dev = [
     "ruff==0.11.10",
+    "pytest==8.4.1",
+    "pytest-asyncio==1.0.0",
+    "pytest-mock==3.14.1",
 ]
 
 [tool.setuptools.packages.find]
