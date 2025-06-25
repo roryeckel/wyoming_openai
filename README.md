@@ -63,6 +63,22 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 
 4. **Configure Environment Variables or Command Line Arguments**
 
+## Installation from PyPI
+
+Since v0.3.2, `wyoming-openai` is now available on [PyPI](https://pypi.org/project/wyoming-openai/). To install the latest release, run:
+
+```bash
+pip install wyoming-openai
+```
+
+This is useful for local deployment when you don't want to clone the repository or if you want to use the library components in your own projects.
+
+To upgrade to the latest version, run:
+
+```bash
+pip install --upgrade wyoming-openai
+```
+
 ## Command Line Arguments
 
 The proxy server can be configured using several command line arguments to tailor its behavior to your specific needs.
