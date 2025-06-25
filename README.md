@@ -313,7 +313,9 @@ sequenceDiagram
 
 Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
 
-## Linting and Code Quality (Ruff)
+## Quality Assurance
+
+### Linting (Ruff)
 
 This project uses [Ruff](https://github.com/astral-sh/ruff) for linting and code quality checks. Ruff is a fast Python linter written in Rust that can replace multiple tools like flake8, isort, and more.
 
@@ -329,4 +331,24 @@ To use Ruff during development:
    ruff check .
    ```
 
-The project includes a GitHub Action that automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
+A GitHub Action automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
+
+### Testing (Pytest)
+
+This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
+
+To run the tests:
+
+1. Install development dependencies (if not already done):
+    ```bash
+    pip install -e ".[dev]"
+    ```
+
+2. In the pytest folder, run all tests with:
+    ```bash
+    pytest
+    ```
+
+All new code should include appropriate tests.
+A GitHub Action automatically runs pytest on all pull requests and branch pushes to ensure tests pass.
+

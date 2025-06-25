@@ -32,6 +32,9 @@ Issues = "https://github.com/roryeckel/wyoming_openai/issues"
 [project.optional-dependencies]
 dev = [
     "ruff==0.11.10",
+    "pytest==8.4.1",
+    "pytest-asyncio==1.0.0",
+    "pytest-mock==3.14.1",
 ]
 
 [tool.setuptools.packages.find]
