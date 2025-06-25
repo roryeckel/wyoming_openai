@@ -66,7 +66,7 @@ async def main():
     parser.add_argument(
         "--stt-models",
         nargs='+',  # Use nargs to accept multiple values
-        default=os.getenv("STT_MODELS", 'whisper-1').split(),
+        default=os.getenv("STT_MODELS", '').split(),
         help="List of STT model identifiers"
     )
     parser.add_argument(
@@ -91,7 +91,7 @@ async def main():
     parser.add_argument(
         "--stt-streaming-models",
         nargs="+",
-        default=os.getenv("STT_STREAMING_MODELS", "gpt-4o-transcribe gpt-4o-mini-transcribe").split(),
+        default=os.getenv("STT_STREAMING_MODELS", '').split(),
         help="Space-separated list of STT model names that support streaming (e.g. gpt-4o-transcribe)"
     )
 
@@ -110,7 +110,7 @@ async def main():
     parser.add_argument(
         "--tts-models",
         nargs='+',
-        default=os.getenv("TTS_MODELS", 'gpt-4o-mini-tts tts-1-hd tts-1').split(),
+        default=os.getenv("TTS_MODELS", '').split(),
         help="List of TTS model identifiers"
     )
     parser.add_argument(
@@ -179,6 +179,11 @@ async def main():
         tts_voices = await tts_client.list_supported_voices(args.tts_models, args.languages)
 
     tts_programs = create_tts_programs(tts_voices)
+
+    # Ensure at least one model is specified
+    if not asr_programs and not tts_programs:
+        _logger.error("No STT or TTS models specified. Exiting.")
+        return
 
     info = create_info(asr_programs, tts_programs)
 
