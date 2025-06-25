@@ -12,7 +12,7 @@ This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server
 
 ## Featured Models
 
-This project features a variety of examples for using cutting-edge models in both Speech-to-Text (STT) and Text-to-Speech (TTS):
+This project features a variety of examples for using cutting-edge models in both Speech-to-Text (STT) and Text-to-Speech (TTS) scenarios:
 
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
@@ -344,7 +344,7 @@ To run the tests:
     pip install -e ".[dev]"
     ```
 
-2. In the pytest folder, run all tests with:
+2. In the [`tests/`](tests/) folder, run all tests with:
     ```bash
     pytest
     ```
