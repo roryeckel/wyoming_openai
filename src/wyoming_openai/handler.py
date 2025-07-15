@@ -193,18 +193,18 @@ class OpenAIEventHandler(AsyncEventHandler):
                                 )
                     if full_text:
                         _LOGGER.info("Successfully transcribed stream: %s", full_text)
-                        await self.write_event(Transcript(text=full_text).event())
                     else:
                         _LOGGER.warning("Received empty transcription from stream. If this is unexpected, please check your STT_STREAMING_MODELS configuration.")
+                    await self.write_event(Transcript(text=full_text).event())
 
                 elif isinstance(transcription, TranscriptionCreateResponse):
                     # Handle non-streaming response
                     _LOGGER.debug("Handling non-streaming transcription response")
                     if transcription.text:
                         _LOGGER.info("Successfully transcribed: %s", transcription.text)
-                        await self.write_event(Transcript(text=transcription.text).event())
                     else:
                         _LOGGER.warning("Received empty transcription result")
+                    await self.write_event(Transcript(text=transcription.text).event())
 
                 else:
                     _LOGGER.error("Unexpected transcription response type: %s", type(transcription))
