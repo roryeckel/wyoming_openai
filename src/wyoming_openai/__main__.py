@@ -153,7 +153,7 @@ async def main():
         stt_factory = CustomAsyncOpenAI.create_autodetected_factory()
     else:
         stt_factory = CustomAsyncOpenAI.create_backend_factory(args.stt_backend)
-    
+
     stt_client = await stt_factory(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
     _logger.debug("Detected STT backend: %s", stt_client.backend)
 
@@ -163,7 +163,7 @@ async def main():
         tts_factory = CustomAsyncOpenAI.create_autodetected_factory()
     else:
         tts_factory = CustomAsyncOpenAI.create_backend_factory(args.tts_backend)
-    
+
     tts_client = await tts_factory(api_key=args.tts_openai_key, base_url=args.tts_openai_url)
     _logger.debug("Detected TTS backend: %s", tts_client.backend)
 
