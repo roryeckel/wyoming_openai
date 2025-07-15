@@ -271,9 +271,24 @@ sequenceDiagram
   Note over WY: Buffers WAV data
   end
   HA->>WY: AudioStop event
-  WY->>OAPI: Send complete audio file
-  OAPI-->>WY: Text transcript response
-  WY-->>HA: Transcript event
+  
+  alt Non-Streaming Transcription
+    WY->>OAPI: Send complete audio file
+    OAPI-->>WY: Text transcript response
+    WY->>HA: TranscriptStart event
+    WY->>HA: Transcript event (complete text)
+    WY->>HA: TranscriptStop event
+  else Streaming Transcription
+    WY->>OAPI: Send audio file with stream=true
+    WY->>HA: TranscriptStart event
+    loop
+      OAPI-->>WY: Transcript chunk delta
+      WY-->>HA: TranscriptChunk event (partial text)
+    end
+    WY->>HA: Transcript event (complete text)
+    WY->>HA: TranscriptStop event
+  end
+  
   Note over HA,OAPI: Text-to-Speech (TTS) Flow
   HA->>WY: Synthesize event (text + voice)
   WY->>OAPI: Speech synthesis request
