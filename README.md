@@ -173,6 +173,7 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
   - The Speaches container is configured with specific model settings (`Systran/faster-distil-whisper-large-v3` for STT and `speaches-ai/Kokoro-82M-v1.0-ONNX` for TTS).
   - It uses a local port (8000) to expose the Speaches service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
+  - Note: wyoming_openai disables Speaches VAD (Voice Activity Detection) by default, as it is not yet compatible with the Wyoming protocol.
 
 - **Command**:
   
@@ -228,7 +229,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.3`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.4`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
 - **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.3`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 
@@ -271,9 +272,24 @@ sequenceDiagram
   Note over WY: Buffers WAV data
   end
   HA->>WY: AudioStop event
-  WY->>OAPI: Send complete audio file
-  OAPI-->>WY: Text transcript response
-  WY-->>HA: Transcript event
+  
+  alt Non-Streaming Transcription
+    WY->>OAPI: Send complete audio file
+    OAPI-->>WY: Text transcript response
+    WY->>HA: TranscriptStart event
+    WY->>HA: Transcript event (complete text)
+    WY->>HA: TranscriptStop event
+  else Streaming Transcription
+    WY->>OAPI: Send audio file with stream=true
+    WY->>HA: TranscriptStart event
+    loop
+      OAPI-->>WY: Transcript chunk delta
+      WY-->>HA: TranscriptChunk event (partial text)
+    end
+    WY->>HA: Transcript event (complete text)
+    WY->>HA: TranscriptStop event
+  end
+  
   Note over HA,OAPI: Text-to-Speech (TTS) Flow
   HA->>WY: Synthesize event (text + voice)
   WY->>OAPI: Speech synthesis request
