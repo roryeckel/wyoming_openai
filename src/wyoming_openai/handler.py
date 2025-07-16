@@ -17,7 +17,7 @@ from wyoming.info import AsrModel, Describe, Info, TtsVoice
 from wyoming.server import AsyncEventHandler
 from wyoming.tts import Synthesize
 
-from .compatibility import CustomAsyncOpenAI, TtsVoiceModel
+from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .utilities import NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
@@ -169,13 +169,20 @@ class OpenAIEventHandler(AsyncEventHandler):
             async with self._client_lock:
                 use_streaming = self._is_asr_model_streaming(self._current_asr_model.name)
 
+                # Prepare extra_body for SPEACHES backend
+                extra_body = {}
+                if hasattr(self._stt_client, 'backend') and self._stt_client.backend == OpenAIBackend.SPEACHES:
+                    extra_body["vad_filter"] = False
+                    _LOGGER.debug("Adding vad_filter=False for SPEACHES backend")
+
                 transcription = await self._stt_client.audio.transcriptions.create(
                     file=self._wav_buffer,
                     model=self._current_asr_model.name,
                     temperature=self._stt_temperature or NOT_GIVEN,
                     prompt=self._stt_prompt or NOT_GIVEN,
                     response_format="json",
-                    stream=use_streaming
+                    stream=use_streaming,
+                    extra_body=extra_body if extra_body else None
                 )
 
                 await self.write_event(TranscriptStart().event())
