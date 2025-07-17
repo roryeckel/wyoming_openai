@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import wave
 
@@ -25,8 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
-TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec)
-TTS_CHUNK_SIZE = 2048  # Magical guess :)
+TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
+TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 
 class OpenAIEventHandler(AsyncEventHandler):
     def __init__(
@@ -311,31 +312,58 @@ class OpenAIEventHandler(AsyncEventHandler):
                 instructions=self._tts_instructions or NOT_GIVEN
             ) as response:
 
-                    # Send audio start with required audio parameters
-                    await self.write_event(
-                        AudioStart(
-                            rate=TTS_AUDIO_RATE,
-                            width=DEFAULT_AUDIO_WIDTH,
-                            channels=DEFAULT_AUDIO_CHANNELS
-                        ).event()
-                    )
-
-                    # Stream the audio in chunks
-                    timestamp = 0
-                    samples_per_chunk = TTS_CHUNK_SIZE // DEFAULT_AUDIO_WIDTH  # bytes per sample
-                    timestamp_increment = (samples_per_chunk / TTS_AUDIO_RATE) * 1000  # ms
+                    # Buffer first chunk to parse WAV header
+                    first_chunk = None
+                    audio_rate = TTS_AUDIO_RATE
+                    audio_width = DEFAULT_AUDIO_WIDTH
+                    audio_channels = DEFAULT_AUDIO_CHANNELS
 
                     async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
-                        await self.write_event(
-                            AudioChunk(
-                                audio=chunk,
-                                rate=TTS_AUDIO_RATE,
-                                width=DEFAULT_AUDIO_WIDTH,
-                                channels=DEFAULT_AUDIO_CHANNELS,
-                                timestamp=int(timestamp)
-                            ).event()
-                        )
-                        timestamp += timestamp_increment
+                        if first_chunk is None:
+                            first_chunk = chunk
+                            audio_data = chunk
+
+                            # Try to parse WAV header from first chunk
+                            wav_params = self._parse_wav_header(chunk)
+                            if wav_params:
+                                audio_rate, audio_channels, audio_width, data_offset = wav_params
+                                # Strip WAV header from audio data
+                                audio_data = chunk[data_offset:]
+                                _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                                            audio_rate, audio_channels, audio_width, data_offset)
+                            else:
+                                _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
+
+                            # Send audio start with detected parameters
+                            await self.write_event(
+                                AudioStart(
+                                    rate=audio_rate,
+                                    width=audio_width,
+                                    channels=audio_channels
+                                ).event()
+                            )
+
+                            # Initialize timestamp calculation with detected rate
+                            timestamp = 0
+                            samples_per_chunk = TTS_CHUNK_SIZE // audio_width
+                            timestamp_increment = (samples_per_chunk / audio_rate) * 1000  # ms
+                        else:
+                            audio_data = chunk
+
+                        # Send audio chunk (header stripped for first chunk)
+                        if audio_data:  # Only send if there's actual audio data
+                            await self.write_event(
+                                AudioChunk(
+                                    audio=audio_data,
+                                    rate=audio_rate,
+                                    width=audio_width,
+                                    channels=audio_channels,
+                                    timestamp=int(timestamp)
+                                ).event()
+                            )
+                            # Calculate timestamp increment based on actual audio data length
+                            actual_samples = len(audio_data) // audio_width
+                            timestamp += (actual_samples / audio_rate) * 1000
 
                     # Send audio stop
                     await self.write_event(AudioStop(timestamp=timestamp).event())
@@ -346,6 +374,29 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
+
+    def _parse_wav_header(self, wav_data: bytes) -> tuple[int, int, int, int] | None:
+        """
+        Parse WAV header to extract sample rate, channels, sample width, and data offset.
+        Returns (sample_rate, channels, sample_width, data_offset) or None if parsing fails.
+        """
+        try:
+            # Create a BytesIO object from the data
+            wav_io = io.BytesIO(wav_data)
+
+            # Open with wave module
+            with wave.open(wav_io, 'rb') as wav_file:
+                sample_rate = wav_file.getframerate()
+                channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+
+                # Get the current position which should be at the start of audio data
+                data_offset = wav_io.tell()
+
+                return sample_rate, channels, sample_width, data_offset
+        except Exception as e:
+            _LOGGER.debug("Failed to parse WAV header: %s", e)
+            return None
 
     async def stop(self) -> None:
         """Stop the handler and close the clients"""

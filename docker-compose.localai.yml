@@ -1,0 +1,112 @@
+services:
+  wyoming_openai:
+    image: ghcr.io/roryeckel/wyoming_openai:latest
+    container_name: wyoming_openai
+    ports:
+      - "10300:10300"
+    restart: unless-stopped
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
+      STT_OPENAI_URL: http://localai:8080/v1
+      STT_MODELS: "whisper-large-v3-turbo-q8_0.bin"
+      STT_BACKEND: "LOCALAI"
+      TTS_OPENAI_URL: http://localai:8080/v1
+      TTS_MODELS: "en_US-amy-low.onnx en_US-amy-medium.onnx en_US-arctic-medium.onnx en_US-bryce-medium.onnx en_US-danny-low.onnx en_US-hfc_female-medium.onnx en_US-hfc_male-medium.onnx en_US-joe-medium.onnx en_US-john-medium.onnx en_US-kathleen-low.onnx en_US-kristin-medium.onnx en_US-kusal-medium.onnx en_US-l2arctic-medium.onnx en_US-lessac-high.onnx en_US-lessac-low.onnx en_US-lessac-medium.onnx en_US-libritts-high.onnx en_US-libritts_r-medium.onnx en_US-ljspeech-high.onnx en_US-ljspeech-medium.onnx en_US-norman-medium.onnx en_US-reza_ibrahim-medium.onnx en_US-ryan-high.onnx en_US-ryan-low.onnx en_US-ryan-medium.onnx en_US-sam-medium.onnx"
+      TTS_BACKEND: "LOCALAI"
+      # TTS_VOICES: "en-us-amy-low en-us-kathleen-low en-us-lessac-medium"
+    depends_on:
+      localai:
+        condition: service_healthy
+
+  localai:
+    container_name: localai
+    image: localai/localai:latest-gpu-nvidia-cuda12
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DEBUG=true
+      - MODELS_PATH=/models
+      - THREADS=4
+      - BUILD_TYPE=""
+      - GO_TAGS=tts
+      - GALLERIES='[{"name":"localai-gallery", "url":"https://localai.io/gallery.html"}]'
+    volumes:
+      - localai-models:/models
+      - localai-config:/config
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Initialize LocalAI with required models
+  init-localai:
+    container_name: init-localai
+    image: alpine:latest
+    restart: "no"
+    environment:
+      - LOCALAI_URL=http://localai:8080
+    volumes:
+      - localai-models:/models
+    command: >
+      /bin/sh -c '
+        apk add --no-cache curl jq
+        
+        # Wait for LocalAI to be ready
+        until curl -sf $$LOCALAI_URL/readyz > /dev/null; do
+          sleep 10
+        done
+        
+        # Download actual Whisper GGML model weights
+        echo "Downloading whisper model weights..."
+        cd /models
+        
+        # Download whisper large-v3-turbo model (better quality)
+        echo "Downloading ggml-large-v3-turbo-q8_0.bin..."
+        curl -L -o whisper-large-v3-turbo-q8_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin
+        
+        echo "Whisper model installation completed"
+        ls -la /models/
+        
+        # Get list of en_US voices
+        curl -s "https://huggingface.co/api/models/rhasspy/piper-voices/tree/main/en/en_US" | \
+          jq -r "map(select(.type == \"directory\") | .path)[]" > /tmp/voice_list.txt
+        
+        # Download each voice with available qualities
+        while IFS= read -r voice_dir; do
+          voice_name=$$(basename "$$voice_dir")
+          
+          # Get available qualities for this voice
+          curl -s "https://huggingface.co/api/models/rhasspy/piper-voices/tree/main/$$voice_dir" | \
+            jq -r "map(select(.type == \"directory\") | .path)[]" | \
+          while IFS= read -r quality_dir; do
+            quality=$$(basename "$$quality_dir")
+            base_name="en_US-$${voice_name}-$${quality}.onnx"
+            
+            # Download model and config files
+            for ext in "" ".json"; do
+              curl -sL -o "/models/$$base_name$$ext" \
+                "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/$$quality_dir/$$base_name$$ext"
+            done
+          done
+        done < /tmp/voice_list.txt
+        
+        echo "LocalAI initialization complete!"
+      '
+    depends_on:
+      localai:
+        condition: service_healthy
+
+volumes:
+  localai-models:
+  localai-config:

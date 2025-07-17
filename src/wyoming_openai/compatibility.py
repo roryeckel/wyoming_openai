@@ -265,6 +265,7 @@ class OpenAIBackend(Enum):
     OPENAI = 0 # "Official"
     SPEACHES = 1
     KOKORO_FASTAPI = 2
+    LOCALAI = 3
 
 class CustomAsyncOpenAI(AsyncOpenAI):
     """
@@ -327,6 +328,27 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         except Exception as e:
             _LOGGER.exception(e, "Failed to fetch /audio/voices")
             raise
+
+    # LocalAI
+
+    async def _is_localai(self) -> bool:
+        """
+        Checks if the backend is LocalAI by sending a request to /readyz
+        LocalAI returns a 200 OK status on /readyz when ready
+        """
+        try:
+            response = await self._client.get("/readyz")
+            response.raise_for_status()
+            return True
+        except Exception:
+            return False
+
+    async def _list_localai_voices(self, model_name: str) -> list[str]:
+        """
+        LocalAI doesn't require voice specification - the voice is optional.
+        Returns the model name as the voice name for compatibility.
+        """
+        return [model_name]
 
     # Speaches
 
@@ -409,6 +431,8 @@ class CustomAsyncOpenAI(AsyncOpenAI):
                 tts_voices = await self._list_speaches_voices(model_name)
             elif self.backend == OpenAIBackend.KOKORO_FASTAPI:
                 tts_voices = await self._list_kokoro_fastapi_voices()
+            elif self.backend == OpenAIBackend.LOCALAI:
+                tts_voices = await self._list_localai_voices(model_name)
             else:
                 _LOGGER.warning("Unknown backend: %s", self.backend)
                 continue
@@ -430,7 +454,9 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         async def factory(*args, **kwargs):
             client = cls(*args, **kwargs)
-            if await client._is_speaches():
+            if await client._is_localai():
+                client.backend = OpenAIBackend.LOCALAI
+            elif await client._is_speaches():
                 client.backend = OpenAIBackend.SPEACHES
             elif await client._is_kokoro_fastapi():
                 client.backend = OpenAIBackend.KOKORO_FASTAPI

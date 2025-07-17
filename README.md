@@ -181,7 +181,26 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
   docker compose -f docker-compose.speaches.yml up -d
   ```
 
-#### 3. Deploying with Kokoro-FastAPI and Speaches Local Services
+#### 3. Deploying with LocalAI Local Service
+
+LocalAI is a drop-in replacement for OpenAI API that runs completely locally, supporting both Whisper (STT) and Piper (TTS). This setup provides excellent privacy and performance without requiring external API keys.
+
+- **LocalAI Setup**:
+  - The provided example compose uses LocalAI's GPU-accelerated image with NVIDIA CUDA 12 support, but you can adjust things as needed.
+  - Automatically downloads Whisper large-v3-turbo model and multiple Piper TTS voices on first run
+  - Provides OpenAI-compatible endpoints for seamless integration
+  - No API keys required since everything runs locally
+  - Includes automatic model initialization via dedicated init container
+
+- **Docker Compose Configuration**: Use the `docker-compose.localai.yml` template which includes configuration for both the Wyoming OpenAI proxy and LocalAI service.
+
+- **Command**:
+
+  ```bash
+  docker compose -f docker-compose.localai.yml up -d
+  ```
+
+#### 4. Deploying with Kokoro-FastAPI and Speaches Local Services
 
 For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches for STT, follow these instructions:
 
@@ -201,7 +220,7 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
   docker compose -f docker-compose.speaches.yml -f docker-compose.kokoro-fastapi.yml up -d
   ```
 
-#### 4. Development with Docker
+#### 5. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -211,9 +230,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 5. Example: Development with Additional Local Service
+#### 6. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml` and `docker-compose.localai.yml`.
 
 - **Command**:
   
@@ -221,7 +240,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 6. Docker Tags
+#### 7. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
