@@ -317,6 +317,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     audio_rate = TTS_AUDIO_RATE
                     audio_width = DEFAULT_AUDIO_WIDTH
                     audio_channels = DEFAULT_AUDIO_CHANNELS
+                    timestamp = 0
 
                     async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                         if first_chunk is None:
@@ -342,11 +343,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                                     channels=audio_channels
                                 ).event()
                             )
-
-                            # Initialize timestamp calculation with detected rate
-                            timestamp = 0
-                            samples_per_chunk = TTS_CHUNK_SIZE // audio_width
-                            timestamp_increment = (samples_per_chunk / audio_rate) * 1000  # ms
                         else:
                             audio_data = chunk
 

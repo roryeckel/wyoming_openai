@@ -15,7 +15,6 @@ services:
       TTS_OPENAI_URL: http://localai:8080/v1
       TTS_MODELS: "en_US-amy-low.onnx en_US-amy-medium.onnx en_US-arctic-medium.onnx en_US-bryce-medium.onnx en_US-danny-low.onnx en_US-hfc_female-medium.onnx en_US-hfc_male-medium.onnx en_US-joe-medium.onnx en_US-john-medium.onnx en_US-kathleen-low.onnx en_US-kristin-medium.onnx en_US-kusal-medium.onnx en_US-l2arctic-medium.onnx en_US-lessac-high.onnx en_US-lessac-low.onnx en_US-lessac-medium.onnx en_US-libritts-high.onnx en_US-libritts_r-medium.onnx en_US-ljspeech-high.onnx en_US-ljspeech-medium.onnx en_US-norman-medium.onnx en_US-reza_ibrahim-medium.onnx en_US-ryan-high.onnx en_US-ryan-low.onnx en_US-ryan-medium.onnx en_US-sam-medium.onnx"
       TTS_BACKEND: "LOCALAI"
-      # TTS_VOICES: "en-us-amy-low en-us-kathleen-low en-us-lessac-medium"
     depends_on:
       localai:
         condition: service_healthy
