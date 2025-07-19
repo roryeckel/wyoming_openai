@@ -17,6 +17,7 @@ This project features a variety of examples for using cutting-edge models in bot
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#3-deploying-with-kokoro-fastapi-and-speaches-local-services).
+- **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
 ## Objectives
 
@@ -187,7 +188,7 @@ LocalAI is a drop-in replacement for OpenAI API that runs completely locally, su
 
 - **LocalAI Setup**:
   - The provided example compose uses LocalAI's GPU-accelerated image with NVIDIA CUDA 12 support, but you can adjust things as needed.
-  - Automatically downloads Whisper large-v3-turbo model and multiple Piper TTS voices on first run
+  - Automatically downloads `whisper-base` model and multiple Piper TTS voices on first run
   - Provides OpenAI-compatible endpoints for seamless integration
   - No API keys required since everything runs locally
   - Includes automatic model initialization via dedicated init container
