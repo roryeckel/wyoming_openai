@@ -13,7 +13,7 @@ services:
       STT_MODELS: "whisper-base"
       STT_BACKEND: "LOCALAI"
       TTS_OPENAI_URL: http://localai:8080/v1
-      TTS_MODELS: "en-us-amy-low.onnx en-us-amy-medium.onnx en-us-arctic-medium.onnx en-us-bryce-medium.onnx en-us-danny-low.onnx en-us-hfc_female-medium.onnx en-us-hfc_male-medium.onnx en-us-joe-medium.onnx en-us-john-medium.onnx en-us-kathleen-low.onnx en-us-kristin-medium.onnx en-us-kusal-medium.onnx en-us-l2arctic-medium.onnx en-us-lessac-high.onnx en-us-lessac-low.onnx en-us-lessac-medium.onnx en-us-libritts-high.onnx en-us-libritts_r-medium.onnx en-us-ljspeech-high.onnx en-us-ljspeech-medium.onnx en-us-norman-medium.onnx en-us-reza_ibrahim-medium.onnx en-us-ryan-high.onnx en-us-ryan-low.onnx en-us-ryan-medium.onnx en-us-sam-medium.onnx"
+      TTS_MODELS: "en-us-kathleen-low.onnx en-us-amy-low.onnx en-us-danny-low.onnx en-us-lessac-low.onnx en-us-lessac-medium.onnx en-us-libritts-high.onnx en-us-ryan-high.onnx en-us-ryan-low.onnx en-us-ryan-medium.onnx"
       TTS_BACKEND: "LOCALAI"
     depends_on:
       localai:
@@ -53,7 +53,7 @@ services:
     environment:
       LOCALAI_URL: http://localai:8080
       WHISPER_MODEL: "whisper-base"
-      PIPER_VOICES: "voice-en-us-amy-low voice-en-us-amy-medium voice-en-us-arctic-medium voice-en-us-bryce-medium voice-en-us-danny-low voice-en-us-hfc_female-medium voice-en-us-hfc_male-medium voice-en-us-joe-medium voice-en-us-john-medium voice-en-us-kathleen-low voice-en-us-kristin-medium voice-en-us-kusal-medium voice-en-us-l2arctic-medium voice-en-us-lessac-high voice-en-us-lessac-low voice-en-us-lessac-medium voice-en-us-libritts-high voice-en-us-libritts_r-medium voice-en-us-ljspeech-high voice-en-us-ljspeech-medium voice-en-us-norman-medium voice-en-us-reza_ibrahim-medium voice-en-us-ryan-high voice-en-us-ryan-low voice-en-us-ryan-medium voice-en-us-sam-medium"
+      PIPER_VOICES: "voice-en-us-kathleen-low voice-en-us-amy-low voice-en-us-danny-low voice-en-us-lessac-low voice-en-us-lessac-medium voice-en-us-libritts-high voice-en-us-ryan-high voice-en-us-ryan-low voice-en-us-ryan-medium"
     volumes:
       - localai-models:/models
     command: >
