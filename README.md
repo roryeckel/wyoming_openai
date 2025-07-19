@@ -175,6 +175,7 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
   - It uses a local port (8000) to expose the Speaches service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
   - Note: wyoming_openai disables Speaches VAD (Voice Activity Detection) by default, as it is not yet compatible with the Wyoming protocol.
+  - [Learn more about Speaches](https://speaches.ai/)
 
 - **Command**:
   
@@ -192,6 +193,7 @@ LocalAI is a drop-in replacement for OpenAI API that runs completely locally, su
   - Provides OpenAI-compatible endpoints for seamless integration
   - No API keys required since everything runs locally
   - Includes automatic model initialization via dedicated init container
+  - [Learn more about LocalAI](https://localai.io/)
 
 - **Docker Compose Configuration**: Use the `docker-compose.localai.yml` template which includes configuration for both the Wyoming OpenAI proxy and LocalAI service.
 
@@ -214,6 +216,7 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
   - The Kokoro-FastAPI container provides TTS capabilities.
   - It uses a local port (8880) to expose the Kokoro service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
+  - [Learn more about Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI)
 
 - **Command**:
 
