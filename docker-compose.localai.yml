@@ -10,10 +10,10 @@ services:
       WYOMING_LOG_LEVEL: INFO
       WYOMING_LANGUAGES: en
       STT_OPENAI_URL: http://localai:8080/v1
-      STT_MODELS: "whisper-large-v3-turbo-q8_0.bin"
+      STT_MODELS: "whisper-base"
       STT_BACKEND: "LOCALAI"
       TTS_OPENAI_URL: http://localai:8080/v1
-      TTS_MODELS: "en_US-amy-low.onnx en_US-amy-medium.onnx en_US-arctic-medium.onnx en_US-bryce-medium.onnx en_US-danny-low.onnx en_US-hfc_female-medium.onnx en_US-hfc_male-medium.onnx en_US-joe-medium.onnx en_US-john-medium.onnx en_US-kathleen-low.onnx en_US-kristin-medium.onnx en_US-kusal-medium.onnx en_US-l2arctic-medium.onnx en_US-lessac-high.onnx en_US-lessac-low.onnx en_US-lessac-medium.onnx en_US-libritts-high.onnx en_US-libritts_r-medium.onnx en_US-ljspeech-high.onnx en_US-ljspeech-medium.onnx en_US-norman-medium.onnx en_US-reza_ibrahim-medium.onnx en_US-ryan-high.onnx en_US-ryan-low.onnx en_US-ryan-medium.onnx en_US-sam-medium.onnx"
+      TTS_MODELS: "en-us-amy-low.onnx en-us-amy-medium.onnx en-us-arctic-medium.onnx en-us-bryce-medium.onnx en-us-danny-low.onnx en-us-hfc_female-medium.onnx en-us-hfc_male-medium.onnx en-us-joe-medium.onnx en-us-john-medium.onnx en-us-kathleen-low.onnx en-us-kristin-medium.onnx en-us-kusal-medium.onnx en-us-l2arctic-medium.onnx en-us-lessac-high.onnx en-us-lessac-low.onnx en-us-lessac-medium.onnx en-us-libritts-high.onnx en-us-libritts_r-medium.onnx en-us-ljspeech-high.onnx en-us-ljspeech-medium.onnx en-us-norman-medium.onnx en-us-reza_ibrahim-medium.onnx en-us-ryan-high.onnx en-us-ryan-low.onnx en-us-ryan-medium.onnx en-us-sam-medium.onnx"
       TTS_BACKEND: "LOCALAI"
     depends_on:
       localai:
@@ -28,10 +28,7 @@ services:
     environment:
       - DEBUG=true
       - MODELS_PATH=/models
-      - THREADS=4
-      - BUILD_TYPE=""
       - GO_TAGS=tts
-      - GALLERIES='[{"name":"localai-gallery", "url":"https://localai.io/gallery.html"}]'
     volumes:
       - localai-models:/models
       - localai-config:/config
@@ -54,53 +51,38 @@ services:
     image: alpine:latest
     restart: "no"
     environment:
-      - LOCALAI_URL=http://localai:8080
+      LOCALAI_URL: http://localai:8080
+      WHISPER_MODEL: "whisper-base"
+      PIPER_VOICES: "voice-en-us-amy-low voice-en-us-amy-medium voice-en-us-arctic-medium voice-en-us-bryce-medium voice-en-us-danny-low voice-en-us-hfc_female-medium voice-en-us-hfc_male-medium voice-en-us-joe-medium voice-en-us-john-medium voice-en-us-kathleen-low voice-en-us-kristin-medium voice-en-us-kusal-medium voice-en-us-l2arctic-medium voice-en-us-lessac-high voice-en-us-lessac-low voice-en-us-lessac-medium voice-en-us-libritts-high voice-en-us-libritts_r-medium voice-en-us-ljspeech-high voice-en-us-ljspeech-medium voice-en-us-norman-medium voice-en-us-reza_ibrahim-medium voice-en-us-ryan-high voice-en-us-ryan-low voice-en-us-ryan-medium voice-en-us-sam-medium"
     volumes:
       - localai-models:/models
     command: >
       /bin/sh -c '
-        apk add --no-cache curl jq
+        apk add --no-cache curl
         
         # Wait for LocalAI to be ready
         until curl -sf $$LOCALAI_URL/readyz > /dev/null; do
+          echo "Waiting for LocalAI..."
           sleep 10
         done
         
-        # Download actual Whisper GGML model weights
-        echo "Downloading whisper model weights..."
-        cd /models
+        # Install whisper model
+        echo "Installing $$WHISPER_MODEL..."
+        curl -sf "$$LOCALAI_URL/models/apply" \
+          -H "Content-Type: application/json" \
+          -d "{\"id\": \"localai@$$WHISPER_MODEL\"}"
         
-        # Download whisper large-v3-turbo model (better quality)
-        echo "Downloading ggml-large-v3-turbo-q8_0.bin..."
-        curl -L -o whisper-large-v3-turbo-q8_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin
+        # Install piper voices
+        echo "Installing piper voices: $$PIPER_VOICES"
+        for voice in $$PIPER_VOICES; do
+          echo "Installing $$voice..."
+          curl -sf "$$LOCALAI_URL/models/apply" \
+            -H "Content-Type: application/json" \
+            -d "{\"id\": \"localai@$$voice\"}"
+          sleep 2
+        done
         
-        echo "Whisper model installation completed"
-        ls -la /models/
-        
-        # Get list of en_US voices
-        curl -s "https://huggingface.co/api/models/rhasspy/piper-voices/tree/main/en/en_US" | \
-          jq -r "map(select(.type == \"directory\") | .path)[]" > /tmp/voice_list.txt
-        
-        # Download each voice with available qualities
-        while IFS= read -r voice_dir; do
-          voice_name=$$(basename "$$voice_dir")
-          
-          # Get available qualities for this voice
-          curl -s "https://huggingface.co/api/models/rhasspy/piper-voices/tree/main/$$voice_dir" | \
-            jq -r "map(select(.type == \"directory\") | .path)[]" | \
-          while IFS= read -r quality_dir; do
-            quality=$$(basename "$$quality_dir")
-            base_name="en_US-$${voice_name}-$${quality}.onnx"
-            
-            # Download model and config files
-            for ext in "" ".json"; do
-              curl -sL -o "/models/$$base_name$$ext" \
-                "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/$$quality_dir/$$base_name$$ext"
-            done
-          done
-        done < /tmp/voice_list.txt
-        
-        echo "LocalAI initialization complete!"
+        echo "LocalAI initialization complete"
       '
     depends_on:
       localai:
