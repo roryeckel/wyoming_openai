@@ -2,7 +2,7 @@
 
 OpenAI-Compatible Proxy Middleware for the Wyoming Protocol
 
-[![License](https://img.shields.io/github/license/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/blob/main/LICENSE) [![Python version](https://img.shields.io/pypi/pyversions/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/) [![GitHub issues](https://img.shields.io/github/issues/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/issues) [![GitHub release (latest by date)](https://img.shields.io/github/v/release/roryeckel/wyoming-openai?label=ghcr.io)](https://github.com/roryeckel/wyoming-openai/pkgs/container/wyoming-openai) [![PyPI version](https://badge.fury.io/py/wyoming-openai.svg)](https://badge.fury.io/py/wyoming-openai)
+[![License](https://img.shields.io/github/license/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/blob/main/LICENSE) [![Python version](https://img.shields.io/pypi/pyversions/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/) [![GitHub issues](https://img.shields.io/github/issues/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/issues) [![Docker](https://img.shields.io/github/v/release/roryeckel/wyoming-openai?label=ghcr.io&logo=docker&logoColor=white&color=2496ED)](https://github.com/roryeckel/wyoming-openai/pkgs/container/wyoming_openai) [![PyPI version](https://badge.fury.io/py/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/)
 
 **Author:** Rory Eckel
 
