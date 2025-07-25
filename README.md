@@ -2,6 +2,8 @@
 
 OpenAI-Compatible Proxy Middleware for the Wyoming Protocol
 
+[![License](https://img.shields.io/github/license/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/blob/main/LICENSE) [![Python version](https://img.shields.io/pypi/pyversions/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/) [![GitHub issues](https://img.shields.io/github/issues/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/issues) [![GitHub release (latest by date)](https://img.shields.io/github/v/release/roryeckel/wyoming-openai?label=ghcr.io)](https://github.com/roryeckel/wyoming-openai/pkgs/container/wyoming-openai) [![PyPI version](https://badge.fury.io/py/wyoming-openai.svg)](https://badge.fury.io/py/wyoming-openai)
+
 **Author:** Rory Eckel
 
 Note: This project is not affiliated with OpenAI or the Wyoming project.
@@ -72,7 +74,7 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 
 4. **Configure Environment Variables or Command Line Arguments**
 
-## Installation from PyPI
+## Installation from PyPI [![Publish to PyPI](https://github.com/roryeckel/wyoming-openai/actions/workflows/publish-to-pypi.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/publish-to-pypi.yml)
 
 Since v0.3.2, `wyoming-openai` is now available on [PyPI](https://pypi.org/project/wyoming-openai/). To install the latest release, run:
 
@@ -140,7 +142,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
 
-## Docker (Recommended)
+## Docker (Recommended) [![Docker Image CI](https://github.com/roryeckel/wyoming-openai/actions/workflows/docker-image.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/docker-image.yml)
 
 ### Prerequisites
 
@@ -355,7 +357,7 @@ Contributions are welcome! Please feel free to open issues or submit pull reques
 
 ## Quality Assurance
 
-### Linting (Ruff)
+### Linting (Ruff) [![Lint](https://github.com/roryeckel/wyoming-openai/actions/workflows/lint.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/lint.yml)
 
 This project uses [Ruff](https://github.com/astral-sh/ruff) for linting and code quality checks. Ruff is a fast Python linter written in Rust that can replace multiple tools like flake8, isort, and more.
 
@@ -373,7 +375,7 @@ To use Ruff during development:
 
 A GitHub Action automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
 
-### Testing (Pytest)
+### Testing (Pytest) [![Test](https://github.com/roryeckel/wyoming-openai/actions/workflows/test.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/test.yml)
 
 This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
 
