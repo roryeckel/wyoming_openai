@@ -1,0 +1,18 @@
+services:
+  wyoming_openai:
+    image: ghcr.io/roryeckel/wyoming_openai:latest
+    container_name: wyoming_openai
+    ports:
+      - "10300:10300"
+    restart: unless-stopped
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
+      STT_OPENAI_URL: https://api.mistral.ai/v1
+      STT_MODELS: "voxtral-mini-latest"
+      STT_BACKEND: "MISTRAL"
+      # Voxtral doesn't provide TTS capabilities, only transcription
+      # You can combine this with other services for TTS if needed
+    env_file:
+      - .env
