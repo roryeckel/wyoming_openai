@@ -381,17 +381,17 @@ This project uses [pytest](https://pytest.org/) for unit testing. Tests are loca
 
 #### Running Tests
 
-1. **Install development dependencies**:
+1. Install development dependencies:
    ```bash
    pip install -e ".[dev]"
    ```
 
-2. **Run all tests**:
+2. In the [`tests/`](tests/) folder, run all tests with:
    ```bash
    pytest
    ```
 
-3. **Run with coverage**:
+3. Check the test coverage with:
    ```bash
    pytest --cov=wyoming_openai
    ```
