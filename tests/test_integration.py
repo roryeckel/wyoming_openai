@@ -18,6 +18,18 @@ from wyoming_openai.compatibility import (
 from wyoming_openai.handler import OpenAIEventHandler
 
 
+def create_test_wav_data(frame_count: int = 2000, sample_rate: int = 24000) -> bytes:
+    """Create test WAV data with specified parameters."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"\x00\x01" * frame_count)
+    wav_buffer.seek(0)
+    return wav_buffer.read()
+
+
 class TestIntegration:
     """Integration tests that test component interactions."""
 
@@ -64,11 +76,11 @@ class TestIntegration:
         assert handler._is_recording is True
 
         # 3. Send audio data
-        audio_data = b"\\x00\\x01" * 500
+        test_audio_data = b"\x00\x01" * 500
         chunk_event = Event(
             type="audio-chunk",
             data={"rate": 16000, "width": 2, "channels": 1},
-            payload=audio_data
+            payload=test_audio_data
         )
         await handler.handle_event(chunk_event)
 
@@ -114,14 +126,7 @@ class TestIntegration:
         tts_client = AsyncMock()
 
         # Create proper WAV data for TTS response
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(24000)
-            wav_file.writeframes(b"\\x00\\x01" * 2000)
-        wav_buffer.seek(0)
-        mock_audio_data = wav_buffer.read()
+        mock_audio_data = create_test_wav_data(2000)
 
         # Mock streaming response
         class MockAsyncIterator:
@@ -228,13 +233,7 @@ class TestIntegration:
         ]
 
         # Mock TTS response for synthesis
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(24000)
-            wav_file.writeframes(b"\\x00\\x01" * 100)
-        wav_buffer.seek(0)
+        test_wav_data = create_test_wav_data(100)
 
         class MockAsyncIterator:
             def __init__(self, data):
@@ -251,7 +250,7 @@ class TestIntegration:
                 return self.data
 
         mock_response = Mock()
-        mock_response.iter_bytes = Mock(return_value=MockAsyncIterator(wav_buffer.read()))
+        mock_response.iter_bytes = Mock(return_value=MockAsyncIterator(test_wav_data))
 
         mock_stream_response = AsyncMock()
         mock_stream_response.__aenter__ = AsyncMock(return_value=mock_response)
