@@ -218,8 +218,8 @@ class TestHelperFunctions:
 
     def test_create_asr_programs_detailed(self):
         """Test creating ASR programs with streaming and non-streaming models."""
-        models = ["whisper-1", "whisper-2"]
-        streaming_models = ["whisper-2"]
+        models = ["whisper-1", "gpt-4o-mini-transcribe"]
+        streaming_models = ["gpt-4o-mini-transcribe"]
         base_url = "https://api.openai.com"
         languages = ["en", "fr"]
 
@@ -233,7 +233,7 @@ class TestHelperFunctions:
 
         # Check streaming program
         assert len(streaming_prog.models) == 1
-        assert streaming_prog.models[0].name == "whisper-2"
+        assert streaming_prog.models[0].name == "gpt-4o-mini-transcribe"
         assert streaming_prog.supports_transcript_streaming
         assert streaming_prog.attribution.name == ATTRIBUTION_NAME_PROGRAM_STREAMING
 
