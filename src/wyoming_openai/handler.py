@@ -117,8 +117,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self.write_event(self._wyoming_info.event())
             return True
 
-        _LOGGER.warning("Unhandled event type: %s", event.type)
-        return False
+        _LOGGER.info("Ignoring unhandled event type: %s", event.type)
+        return True
 
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
