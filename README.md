@@ -379,17 +379,22 @@ A GitHub Action automatically runs Ruff on all pull requests and branch pushes t
 
 This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
 
-To run the tests:
+#### Running Tests
 
-1. Install development dependencies (if not already done):
-    ```bash
-    pip install -e ".[dev]"
-    ```
+1. Install development dependencies:
+   ```bash
+   pip install -e ".[dev]"
+   ```
 
 2. In the [`tests/`](tests/) folder, run all tests with:
-    ```bash
-    pytest
-    ```
+   ```bash
+   pytest
+   ```
+
+3. Check the test coverage with:
+   ```bash
+   pytest --cov=wyoming_openai
+   ```
 
 All new code should include appropriate tests.
 A GitHub Action automatically runs pytest on all pull requests and branch pushes to ensure tests pass.
