@@ -5,13 +5,13 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies (if any)
-# build-essential and libssl-dev might be needed for some dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# No system dependencies needed - all Python packages have pre-compiled wheels
+# Uncomment the following lines if you need to install system dependencies
+# RUN apt-get update && \
+#     apt-get install -y --no-install-recommends \
+#         build-essential \
+#         libssl-dev \
+#     && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
 WORKDIR /app
