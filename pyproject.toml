@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wyoming_openai"
-version = "0.3.5"
+version = "0.3.6"
 description = "OpenAI-Compatible Proxy Middleware for the Wyoming Protocol"
 authors = [
     { name = "Rory Eckel" }

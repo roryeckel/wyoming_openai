@@ -18,9 +18,10 @@ This project features a variety of examples for using cutting-edge models in bot
 
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
-- **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#3-deploying-with-kokoro-fastapi-and-speaches-local-services).
+- **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
+- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#5-deploying-with-microsoft-openai-edge-tts).
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
@@ -226,7 +227,27 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
   docker compose -f docker-compose.speaches.yml -f docker-compose.kokoro-fastapi.yml up -d
   ```
 
-#### 5. Development with Docker
+#### 5. Deploying with Microsoft OpenAI Edge TTS
+
+For users who want high-quality text-to-speech without API costs, Microsoft Edge TTS provides excellent neural voices through a free cloud service. This setup requires no API keys and offers a wide variety of natural-sounding voices.
+
+- **OpenAI Edge TTS Setup**:
+  - Uses Microsoft's free cloud TTS service (no API key required)
+  - Provides access to high-quality neural voices across multiple languages
+  - The OpenAI Edge TTS container runs locally and proxies requests to Microsoft's service
+  - Includes 17 English (US) voices by default, with support for many more languages
+  - OpenAI-compatible API endpoints for seamless integration
+  - [Learn more about the OpenAI-Compatible Edge-TTS API](https://github.com/travisvn/openai-edge-tts)
+
+- **Docker Compose Configuration**: Use the `docker-compose.openai-edge-tts.yml` template which includes configuration for both the Wyoming OpenAI proxy and OpenAI Edge TTS service.
+
+- **Command**:
+  
+  ```bash
+  docker compose -f docker-compose.openai-edge-tts.yml up -d
+  ```
+
+#### 6. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -236,9 +257,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 6. Example: Development with Additional Local Service
+#### 7. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml` and `docker-compose.localai.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, and `docker-compose.openai-edge-tts.yml`.
 
 - **Command**:
   
@@ -246,7 +267,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 7. Docker Tags
+#### 8. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -254,7 +275,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.5`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.6`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
 - **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.3`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 

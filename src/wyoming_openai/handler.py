@@ -312,60 +312,60 @@ class OpenAIEventHandler(AsyncEventHandler):
                 instructions=self._tts_instructions or NOT_GIVEN
             ) as response:
 
-                    # Buffer first chunk to parse WAV header
-                    first_chunk = None
-                    audio_rate = TTS_AUDIO_RATE
-                    audio_width = DEFAULT_AUDIO_WIDTH
-                    audio_channels = DEFAULT_AUDIO_CHANNELS
-                    timestamp = 0
+                # Buffer first chunk to parse WAV header
+                first_chunk = None
+                audio_rate = TTS_AUDIO_RATE
+                audio_width = DEFAULT_AUDIO_WIDTH
+                audio_channels = DEFAULT_AUDIO_CHANNELS
+                timestamp = 0
 
-                    async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
-                        if first_chunk is None:
-                            first_chunk = chunk
-                            audio_data = chunk
+                async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
+                    if first_chunk is None:
+                        first_chunk = chunk
+                        audio_data = chunk
 
-                            # Try to parse WAV header from first chunk
-                            wav_params = self._parse_wav_header(chunk)
-                            if wav_params:
-                                audio_rate, audio_channels, audio_width, data_offset = wav_params
-                                # Strip WAV header from audio data
-                                audio_data = chunk[data_offset:]
-                                _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
-                                            audio_rate, audio_channels, audio_width, data_offset)
-                            else:
-                                _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
-
-                            # Send audio start with detected parameters
-                            await self.write_event(
-                                AudioStart(
-                                    rate=audio_rate,
-                                    width=audio_width,
-                                    channels=audio_channels
-                                ).event()
-                            )
+                        # Try to parse WAV header from first chunk
+                        wav_params = self._parse_wav_header(chunk)
+                        if wav_params:
+                            audio_rate, audio_channels, audio_width, data_offset = wav_params
+                            # Strip WAV header from audio data
+                            audio_data = chunk[data_offset:]
+                            _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                                        audio_rate, audio_channels, audio_width, data_offset)
                         else:
-                            audio_data = chunk
+                            _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
 
-                        # Send audio chunk (header stripped for first chunk)
-                        if audio_data:  # Only send if there's actual audio data
-                            await self.write_event(
-                                AudioChunk(
-                                    audio=audio_data,
-                                    rate=audio_rate,
-                                    width=audio_width,
-                                    channels=audio_channels,
-                                    timestamp=int(timestamp)
-                                ).event()
-                            )
-                            # Calculate timestamp increment based on actual audio data length
-                            actual_samples = len(audio_data) // audio_width
-                            timestamp += (actual_samples / audio_rate) * 1000
+                        # Send audio start with detected parameters
+                        await self.write_event(
+                            AudioStart(
+                                rate=audio_rate,
+                                width=audio_width,
+                                channels=audio_channels
+                            ).event()
+                        )
+                    else:
+                        audio_data = chunk
 
-                    # Send audio stop
-                    await self.write_event(AudioStop(timestamp=timestamp).event())
+                    # Send audio chunk (header stripped for first chunk)
+                    if audio_data:  # Only send if there's actual audio data
+                        await self.write_event(
+                            AudioChunk(
+                                audio=audio_data,
+                                rate=audio_rate,
+                                width=audio_width,
+                                channels=audio_channels,
+                                timestamp=int(timestamp)
+                            ).event()
+                        )
+                        # Calculate timestamp increment based on actual audio data length
+                        actual_samples = len(audio_data) // audio_width
+                        timestamp += (actual_samples / audio_rate) * 1000
 
-                    _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
-                    return True
+                # Send audio stop
+                await self.write_event(AudioStop(timestamp=timestamp).event())
+
+                _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
+                return True
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
