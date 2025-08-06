@@ -76,6 +76,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._wav_write_buffer: wave.Wave_write | None = None
         self._is_recording: bool = False
         self._current_asr_model: AsrModel | None = None
+        
+        # State for event logging
+        self._last_event_type: str | None = None
+        self._event_counter: int = 0
 
     async def handle_event(self, event: Event) -> bool:
         """
@@ -304,6 +308,13 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._log_unsupported_voice(requested_voice)
                 return False
 
+            # Buffer first chunk to parse WAV header
+            first_chunk = None
+            audio_rate = TTS_AUDIO_RATE
+            audio_width = DEFAULT_AUDIO_WIDTH
+            audio_channels = DEFAULT_AUDIO_CHANNELS
+            timestamp = 0
+
             async with self._client_lock, self._tts_client.audio.speech.with_streaming_response.create(
                 model=voice.model_name,
                 voice=voice.name,
@@ -311,13 +322,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                 speed=self._tts_speed or NOT_GIVEN,
                 instructions=self._tts_instructions or NOT_GIVEN
             ) as response:
-
-                # Buffer first chunk to parse WAV header
-                first_chunk = None
-                audio_rate = TTS_AUDIO_RATE
-                audio_width = DEFAULT_AUDIO_WIDTH
-                audio_channels = DEFAULT_AUDIO_CHANNELS
-                timestamp = 0
 
                 async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                     if first_chunk is None:
@@ -361,11 +365,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                         actual_samples = len(audio_data) // audio_width
                         timestamp += (actual_samples / audio_rate) * 1000
 
-                # Send audio stop
-                await self.write_event(AudioStop(timestamp=timestamp).event())
+            # Send audio stop after closing the streaming response context
+            await self.write_event(AudioStop(timestamp=timestamp).event())
 
-                _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
-                return True
+            _LOGGER.info("Successfully synthesized: %s", synthesize.text[:100])
+            return True
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
@@ -393,6 +397,27 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.debug("Failed to parse WAV header: %s", e)
             return None
+
+    async def write_event(self, event: Event) -> None:
+        """Override write_event to add debug logging with AudioChunk filtering"""
+        # Check if this is a new event type
+        if self._last_event_type != event.type:
+            self._last_event_type = event.type
+            self._event_counter = 1
+        else:
+            self._event_counter += 1
+        
+        # Handle AudioChunk logging specially
+        if event.type == "audio-chunk":
+            if self._event_counter == 1:
+                _LOGGER.debug("Outgoing event type %s", event.type)
+            elif self._event_counter == 2:
+                _LOGGER.debug("Outgoing event type %s (subsequent audio chunks will be not be logged)", event.type)
+            # Subsequent AudioChunk events are silenced
+        else:
+            _LOGGER.debug("Outgoing event type %s", event.type)
+        
+        await super().write_event(event)
 
     async def stop(self) -> None:
         """Stop the handler and close the clients"""
