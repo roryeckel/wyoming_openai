@@ -76,7 +76,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._wav_write_buffer: wave.Wave_write | None = None
         self._is_recording: bool = False
         self._current_asr_model: AsrModel | None = None
-        
+
         # State for event logging
         self._last_event_type: str | None = None
         self._event_counter: int = 0
@@ -406,7 +406,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             self._event_counter = 1
         else:
             self._event_counter += 1
-        
+
         # Handle AudioChunk logging specially
         if event.type == "audio-chunk":
             if self._event_counter == 1:
@@ -416,7 +416,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Subsequent AudioChunk events are silenced
         else:
             _LOGGER.debug("Outgoing event type %s", event.type)
-        
+
         await super().write_event(event)
 
     async def stop(self) -> None:
