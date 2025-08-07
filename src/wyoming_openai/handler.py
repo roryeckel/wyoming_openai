@@ -493,7 +493,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             if self._event_counter == 1:
                 _LOGGER.debug("Outgoing event type %s", event.type)
             elif self._event_counter == 2:
-                _LOGGER.debug("Outgoing event type %s (subsequent audio chunks will be not be logged)", event.type)
+                _LOGGER.debug("Outgoing event type %s (subsequent audio chunks will not be logged)", event.type)
             # Subsequent AudioChunk events are silenced
         else:
             _LOGGER.debug("Outgoing event type %s", event.type)
