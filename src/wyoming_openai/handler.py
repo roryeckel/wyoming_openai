@@ -16,7 +16,14 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import AsrModel, Describe, Info, TtsVoice
 from wyoming.server import AsyncEventHandler
-from wyoming.tts import Synthesize
+from wyoming.tts import (
+    Synthesize,
+    SynthesizeChunk,
+    SynthesizeStart,
+    SynthesizeStop,
+    SynthesizeStopped,
+    SynthesizeVoice,
+)
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .utilities import NamedBytesIO
@@ -81,6 +88,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._last_event_type: str | None = None
         self._event_counter: int = 0
 
+        # State for streaming synthesis
+        self._synthesis_buffer: list[str] = []
+        self._synthesis_voice: SynthesizeVoice | None = None
+        self._is_synthesizing: bool = False
+
     async def handle_event(self, event: Event) -> bool:
         """
         Handle incoming events
@@ -116,6 +128,15 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if Synthesize.is_type(event.type):
             return await self._handle_synthesize(Synthesize.from_event(event))
+
+        if SynthesizeStart.is_type(event.type):
+            return await self._handle_synthesize_start(SynthesizeStart.from_event(event))
+
+        if SynthesizeChunk.is_type(event.type):
+            return await self._handle_synthesize_chunk(SynthesizeChunk.from_event(event))
+
+        if SynthesizeStop.is_type(event.type):
+            return await self._handle_synthesize_stop()
 
         if Describe.is_type(event.type):
             await self.write_event(self._wyoming_info.event())
@@ -374,6 +395,66 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
+
+    async def _handle_synthesize_start(self, synthesize_start: SynthesizeStart) -> bool:
+        """Handle start of streaming synthesis"""
+        _LOGGER.debug("Handling synthesize-start event: %s", synthesize_start)
+
+        # Reset synthesis state
+        self._synthesis_buffer = []
+        self._is_synthesizing = True
+
+        # Store voice information if provided
+        if synthesize_start.voice:
+            self._synthesis_voice = synthesize_start.voice
+            requested_voice = synthesize_start.voice.name
+            requested_language = synthesize_start.voice.language
+
+            # Validate voice
+            voice = self._get_voice(requested_voice)
+            if voice:
+                if not self._validate_tts_language(requested_language, voice):
+                    self._is_synthesizing = False
+                    return False
+            else:
+                self._log_unsupported_voice(requested_voice)
+                self._is_synthesizing = False
+                return False
+        else:
+            self._synthesis_voice = None
+
+        return True
+
+    async def _handle_synthesize_chunk(self, synthesize_chunk: SynthesizeChunk) -> bool:
+        """Handle text chunk during streaming synthesis"""
+        if not self._is_synthesizing:
+            _LOGGER.warning("Received synthesize-chunk without active synthesis")
+            return False
+
+        _LOGGER.debug("Received synthesis chunk: %s", synthesize_chunk.text[:50] if synthesize_chunk.text else "")
+        self._synthesis_buffer.append(synthesize_chunk.text)
+        return True
+
+    async def _handle_synthesize_stop(self) -> bool:
+        """Handle end of streaming synthesis"""
+        if not self._is_synthesizing:
+            _LOGGER.warning("Received synthesize-stop without active synthesis")
+            return False
+
+        self._is_synthesizing = False
+
+        # Log the accumulated text for debugging
+        full_text = "".join(self._synthesis_buffer)
+        _LOGGER.debug("Streaming synthesis completed with text: %s", full_text[:100])
+
+        # Send SynthesizeStopped event to confirm completion
+        await self.write_event(SynthesizeStopped().event())
+
+        # Clear synthesis state
+        self._synthesis_buffer = []
+        self._synthesis_voice = None
+
+        return True
 
     def _parse_wav_header(self, wav_data: bytes) -> tuple[int, int, int, int] | None:
         """

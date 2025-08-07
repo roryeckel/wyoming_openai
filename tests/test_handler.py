@@ -371,6 +371,85 @@ class TestOpenAIEventHandlerComprehensive:
         assert "audio-stop" in event_types
 
     @pytest.mark.asyncio
+    async def test_handle_streaming_synthesis(self, enhanced_handler, mock_clients):
+        """Test handling of streaming synthesis events."""
+        _, tts_client = mock_clients
+
+        # Create proper WAV data with header
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
+            wav_file.writeframes(b"\x00\x01" * 1000)
+        wav_buffer.seek(0)
+        mock_audio_data = wav_buffer.read()
+
+        # Mock the streaming response
+        class MockAsyncIterator:
+            def __init__(self, data):
+                self.data = data
+                self.chunks = [data[i:i+2048] for i in range(0, len(data), 2048)]
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.chunks):
+                    raise StopAsyncIteration
+                chunk = self.chunks[self.index]
+                self.index += 1
+                return chunk
+
+        mock_response = Mock()
+        mock_response.iter_bytes = Mock(return_value=MockAsyncIterator(mock_audio_data))
+
+        mock_stream_response = AsyncMock()
+        mock_stream_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream_response.__aexit__ = AsyncMock(return_value=None)
+
+        tts_client.audio.speech.with_streaming_response.create = Mock(return_value=mock_stream_response)
+
+        # Start synthesis
+        start_event = Event(
+            type="synthesize-start",
+            data={"voice": {"name": "alloy"}}
+        )
+        result = await enhanced_handler.handle_event(start_event)
+        assert result is True
+
+        # Send text chunks
+        chunk1_event = Event(
+            type="synthesize-chunk",
+            data={"text": "Hello "}
+        )
+        result = await enhanced_handler.handle_event(chunk1_event)
+        assert result is True
+
+        chunk2_event = Event(
+            type="synthesize-chunk",
+            data={"text": "world"}
+        )
+        result = await enhanced_handler.handle_event(chunk2_event)
+        assert result is True
+
+        # Clear previous write_event calls
+        enhanced_handler.write_event.reset_mock()
+
+        # Stop synthesis - just confirms completion
+        stop_event = Event(type="synthesize-stop")
+        result = await enhanced_handler.handle_event(stop_event)
+        assert result is True
+
+        # TTS client should NOT be called since audio is handled by the synthesize event
+        tts_client.audio.speech.with_streaming_response.create.assert_not_called()
+
+        # Verify only the completion event was written
+        event_types = [call[0][0].type for call in enhanced_handler.write_event.call_args_list]
+        assert "synthesize-stopped" in event_types  # Confirms streaming synthesis completion
+
+    @pytest.mark.asyncio
     async def test_handle_transcribe_with_streaming(self, enhanced_handler, mock_clients, mock_info):
         """Test handling of Transcribe event with streaming model."""
         stt_client, _ = mock_clients
