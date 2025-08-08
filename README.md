@@ -308,43 +308,58 @@ Home Assistant uses the Wyoming Protocol integration to communicate with the Wyo
 ```mermaid
 sequenceDiagram
   participant HA as Home Assistant
-  participant WY as wyoming_openai
-  participant OAPI as OpenAI API
-  Note over HA,OAPI: Speech-to-Text (STT/ASR) Flow
-  HA->>WY: Transcribe event
-  HA->>WY: AudioStart event
-  loop Audio Streaming
-  HA->>WY: AudioChunk events
-  Note over WY: Buffers WAV data
+  participant WY as wyoming_openai Proxy
+  participant OAPI as OpenAI-Compatible API
+  
+  Note over HA,OAPI: **Speech-to-Text (STT/ASR) Flow**
+  HA->>WY: Transcribe event (initiate transcription)
+  HA->>WY: AudioStart event (begin sending audio)
+  loop While capturing microphone audio
+    HA->>WY: AudioChunk events (WAV data)
+    Note over WY: Accumulates/buffers WAV PCM chunks
   end
-  HA->>WY: AudioStop event
+  HA->>WY: AudioStop event (end of input)
   
   alt Non-Streaming Transcription
-    WY->>OAPI: Send complete audio file
-    OAPI-->>WY: Text transcript response
+    WY->>OAPI: Upload complete audio file
+    OAPI-->>WY: Full text transcript
     WY->>HA: TranscriptStart event
-    WY->>HA: Transcript event (complete text)
+    WY->>HA: Transcript event (full text result)
     WY->>HA: TranscriptStop event
   else Streaming Transcription
-    WY->>OAPI: Send audio file with stream=true
+    WY->>OAPI: Send audio with `stream=true`
     WY->>HA: TranscriptStart event
-    loop
-      OAPI-->>WY: Transcript chunk delta
-      WY-->>HA: TranscriptChunk event (partial text)
+    loop As partial results are returned
+      OAPI-->>WY: Transcript delta (partial text)
+      WY-->>HA: TranscriptChunk event
     end
-    WY->>HA: Transcript event (complete text)
+    WY->>HA: Transcript event (final text)
     WY->>HA: TranscriptStop event
   end
   
-  Note over HA,OAPI: Text-to-Speech (TTS) Flow
-  HA->>WY: Synthesize event (text + voice)
-  WY->>OAPI: Speech synthesis request
-  WY->>HA: AudioStart event
-  loop Audio Streaming
-  OAPI-->>WY: Audio stream chunks
-  WY-->>HA: AudioChunk events
+  Note over HA,OAPI: **Text-to-Speech (TTS) Flow**
+  
+  alt Non-Streaming TTS (Synthesize)
+    HA->>WY: Synthesize event (text + voice)
+    WY->>OAPI: Speech synthesis request
+    WY->>HA: AudioStart event
+    loop While receiving audio data
+      OAPI-->>WY: Audio stream chunks
+      WY-->>HA: AudioChunk events
+    end
+    WY->>HA: AudioStop event
+  else Streaming TTS (SynthesizeStart/Chunk/Stop)
+    HA->>WY: SynthesizeStart event (voice config)
+    Note over WY: Initialize synthesis buffer
+    loop Sending text chunks
+      HA->>WY: SynthesizeChunk events
+      Note over WY: Append to synthesis buffer
+    end
+    HA->>WY: SynthesizeStop event
+    Note over WY: No-op — OpenAI `/v1/audio/speech`<br/>does not support streaming text input
+    WY->>HA: SynthesizeStopped event
+    Note over WY: Streaming flow is handled<br/>but not advertised in capabilities
   end
-  WY->>HA: AudioStop event
 ```
 
 #### Open WebUI
