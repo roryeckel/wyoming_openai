@@ -260,12 +260,11 @@ class TestIntegration:
 
         # Execute all events
         results = []
-        for event in events:
+        expected_results = [True, True, True]  # describe returns True, transcribe returns True, synthesize returns True
+        for event, expected in zip(events, expected_results, strict=False):
             result = await handler.handle_event(event)
             results.append(result)
-
-        # Verify all events were handled successfully
-        assert all(results)
+            assert result == expected
 
         # Verify info event was written for describe
         info_events = [
