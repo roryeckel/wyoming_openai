@@ -442,12 +442,21 @@ class TestOpenAIEventHandlerComprehensive:
         result = await enhanced_handler.handle_event(stop_event)
         assert result is True
 
-        # TTS client should NOT be called since audio is handled by the synthesize event
-        tts_client.audio.speech.with_streaming_response.create.assert_not_called()
+        # For non-streaming TTS voices (default mock behavior), the TTS client should be called
+        # to synthesize the accumulated text using our non-streaming fallback
+        tts_client.audio.speech.with_streaming_response.create.assert_called_once_with(
+            model='tts-1',
+            voice='alloy',
+            input='Hello world',
+            speed=1.0,
+            instructions='Test instructions'
+        )
 
-        # Verify only the completion event was written
+        # Verify completion and audio events were written
         event_types = [call[0][0].type for call in enhanced_handler.write_event.call_args_list]
         assert "synthesize-stopped" in event_types  # Confirms streaming synthesis completion
+        assert "audio-start" in event_types  # Audio should be generated
+        assert "audio-stop" in event_types
 
     @pytest.mark.asyncio
     async def test_handle_transcribe_with_streaming(self, enhanced_handler, mock_clients, mock_info):

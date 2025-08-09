@@ -31,19 +31,19 @@ def test_create_asr_programs():
     assert all(isinstance(p, AsrProgram) for p in progs)
 
 def test_create_tts_voices():
-    voices = create_tts_voices(["m"], ["v"], "url", ["en"])
+    voices = create_tts_voices(["m"], [], ["v"], "url", ["en"])
     assert isinstance(voices, list)
     assert all(isinstance(v, TtsVoiceModel) for v in voices)
 
 def test_create_tts_programs():
-    voices = create_tts_voices(["m"], ["v"], "url", ["en"])
+    voices = create_tts_voices(["m"], [], ["v"], "url", ["en"])
     progs = create_tts_programs(voices)
     assert isinstance(progs, list)
     assert all(isinstance(p, TtsProgram) for p in progs)
 
 def test_create_info():
     asr = create_asr_programs(["m1"], ["m2"], "url", ["en"])
-    tts = create_tts_programs(create_tts_voices(["m"], ["v"], "url", ["en"]))
+    tts = create_tts_programs(create_tts_voices(["m"], [], ["v"], "url", ["en"]))
     info = create_info(asr, tts)
     assert isinstance(info, Info)
 
@@ -138,7 +138,7 @@ class TestCustomAsyncOpenAI:
         """Test listing supported voices for OpenAI backend."""
         custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.OPENAI)
 
-        voices = await custom_client.list_supported_voices(["tts-1", "tts-1-hd"], ["en", "fr"])
+        voices = await custom_client.list_supported_voices(["tts-1", "tts-1-hd"], [], ["en", "fr"])
 
         # Should return default OpenAI voices
         assert len(voices) == 18  # 9 voices * 2 models
@@ -152,7 +152,7 @@ class TestCustomAsyncOpenAI:
 
         # Mock the _list_speaches_voices method
         with patch.object(custom_client, '_list_speaches_voices', AsyncMock(return_value=["voice1", "voice2"])):
-            voices = await custom_client.list_supported_voices(["tts-1"], ["en"])
+            voices = await custom_client.list_supported_voices(["tts-1"], [], ["en"])
 
             assert len(voices) == 2
             assert voices[0].name == "voice1"
@@ -165,7 +165,7 @@ class TestCustomAsyncOpenAI:
 
         # Mock the _list_localai_voices method
         with patch.object(custom_client, '_list_localai_voices', AsyncMock(return_value=["tts-model"])):
-            voices = await custom_client.list_supported_voices(["tts-1"], ["en"])
+            voices = await custom_client.list_supported_voices(["tts-1"], [], ["en"])
 
             assert len(voices) == 1
             assert voices[0].name == "tts-model"
@@ -255,7 +255,7 @@ class TestHelperFunctions:
         base_url = "https://api.openai.com"
         languages = ["en", "fr"]
 
-        result = create_tts_voices(models, voices, base_url, languages)
+        result = create_tts_voices(models, [], voices, base_url, languages)
 
         assert len(result) == 4  # 2 models * 2 voices
         assert all(isinstance(v, TtsVoiceModel) for v in result)
@@ -313,7 +313,7 @@ class TestBackendSpecificBehavior:
 
         # Mock the Kokoro-specific voice listing
         with patch.object(custom_client, '_list_kokoro_fastapi_voices', AsyncMock(return_value=["af_sky", "bf_emma"])):
-            voices = await custom_client.list_supported_voices(["kokoro-v0_19"], ["en", "ja"])
+            voices = await custom_client.list_supported_voices(["kokoro-v0_19"], [], ["en", "ja"])
 
             # Should return Kokoro-specific voices
             assert len(voices) == 2
