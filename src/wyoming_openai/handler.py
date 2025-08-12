@@ -31,6 +31,12 @@ from .utilities import NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
 
+def _truncate_for_log(text: str, max_length: int = 100) -> str:
+    """Truncate text for logging, adding ellipsis only if truncated."""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "..."
+
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
@@ -99,6 +105,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer: list[str] = []
         self._synthesis_voice: SynthesizeVoice | None = None
         self._is_synthesizing: bool = False
+
+        # State for incremental sentence detection
+        self._text_accumulator: str = ""
+        self._ready_chunks: list[str] = []
+        self._pysbd_segmenters: dict[str, pysbd.Segmenter] = {}  # Cache segmenters per language
+        self._audio_started: bool = False  # Track if AudioStart has been sent
+        self._current_timestamp: float = 0  # Track timestamp continuity across chunks
 
     async def handle_event(self, event: Event) -> bool:
         """
@@ -241,7 +254,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     # Handle non-streaming response
                     _LOGGER.debug("Handling non-streaming transcription response")
                     if transcription.text:
-                        _LOGGER.info("Successfully transcribed: %s", transcription.text)
+                        _LOGGER.info("Successfully transcribed: %s", _truncate_for_log(transcription.text))
                     else:
                         _LOGGER.warning("Received empty transcription result")
                     await self.write_event(Transcript(text=transcription.text).event())
@@ -324,7 +337,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # Get pysbd-compatible language code
         pysbd_language = self._get_pysbd_language(language)
-        segmenter = pysbd.Segmenter(language=pysbd_language, clean=False)
+        segmenter = pysbd.Segmenter(language=pysbd_language, clean=True)
         sentences = segmenter.segment(text)
 
         chunks = []
@@ -357,6 +370,74 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Check if text chunk meets minimum word requirement."""
         word_count = len(text.split())
         return word_count >= min_words
+
+
+    async def _process_ready_sentences(self, sentences: list[str], language: str | None = None) -> None:
+        """
+        Process complete sentences for immediate TTS synthesis.
+        
+        This method handles incremental synthesis of complete sentences detected during
+        streaming text input. Each sentence is synthesized independently and streamed
+        to Wyoming as audio becomes available, maintaining timestamp continuity across
+        all audio chunks.
+        
+        Error Handling Strategy:
+        - If synthesis fails for a sentence, we log the error and continue with the next
+        - This ensures partial content delivery even if some sentences fail
+        - Audio timestamps remain continuous even when sentences are skipped
+
+        Args:
+            sentences (list[str]): Complete sentences ready for synthesis.
+            language (str | None): Language code for the sentences.
+        """
+        if not sentences or not self._synthesis_voice:
+            return
+
+        try:
+            # Validate voice and language
+            requested_voice = self._synthesis_voice.name
+            requested_language = self._synthesis_voice.language
+            voice = self._validate_tts_voice_and_language(requested_voice, requested_language)
+            if not voice:
+                _LOGGER.error("Failed to validate voice for incremental synthesis")
+                return
+
+            # Check if streaming is enabled for this voice
+            use_streaming = self._is_tts_voice_streaming(voice.name)
+
+            if use_streaming:
+                # Process each sentence as a separate synthesis task
+                for i, sentence in enumerate(sentences):
+                    if not sentence.strip():
+                        _LOGGER.debug("Skipping empty sentence at position %d", i + 1)
+                        continue
+
+                    _LOGGER.debug("Starting incremental synthesis for sentence %d: %s",
+                                i + 1, _truncate_for_log(sentence, 50))
+
+                    # Get audio stream for this sentence
+                    audio_stream = await self._get_tts_audio_stream(sentence, voice)
+                    if audio_stream is None:
+                        _LOGGER.error("Failed to synthesize sentence %d incrementally", i + 1)
+                        continue
+
+                    # Stream the audio to Wyoming
+                    # Only send AudioStart for the very first audio
+                    chunk_timestamp = await self._stream_audio_to_wyoming(
+                        audio_stream,
+                        is_first_chunk=(not self._audio_started),
+                        start_timestamp=self._current_timestamp  # Use accumulated timestamp
+                    )
+
+                    if chunk_timestamp is not None:
+                        self._current_timestamp = chunk_timestamp  # Update timestamp for next chunk
+                        self._audio_started = True  # Mark that we've started audio
+                        _LOGGER.debug("Successfully streamed incremental sentence %d, timestamp: %.2f", i + 1, chunk_timestamp)
+                    else:
+                        _LOGGER.error("Failed to stream sentence %d to Wyoming", i + 1)
+
+        except Exception as e:
+            _LOGGER.exception("Error processing ready sentences: %s", e)
 
     def _log_unsupported_asr_model(self, model_name: str | None = None):
         """Log an unsupported ASR model"""
@@ -452,7 +533,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             if final_timestamp is not None:
                 # Send audio stop after streaming completes
                 await self.write_event(AudioStop(timestamp=final_timestamp).event())
-                _LOGGER.info("Successfully synthesized: %s", synthesize.text[:100])
+                _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(synthesize.text))
                 return True
             return False
 
@@ -467,6 +548,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Reset synthesis state
         self._synthesis_buffer = []
         self._is_synthesizing = True
+
+        # Reset incremental detection state
+        self._text_accumulator = ""
+        self._ready_chunks = []
+        self._pysbd_segmenters.clear()  # Clear segmenter cache for new session
+        self._audio_started = False  # Reset audio started flag
+        self._current_timestamp = 0  # Reset timestamp for new synthesis session
 
         # Store voice information if provided
         if synthesize_start.voice:
@@ -485,13 +573,49 @@ class OpenAIEventHandler(AsyncEventHandler):
         return True
 
     async def _handle_synthesize_chunk(self, synthesize_chunk: SynthesizeChunk) -> bool:
-        """Handle text chunk during streaming synthesis"""
+        """Handle text chunk during streaming synthesis with incremental sentence detection"""
         if not self._is_synthesizing:
             _LOGGER.warning("Received synthesize-chunk without active synthesis")
             return False
 
-        _LOGGER.debug("Received synthesis chunk: %s", synthesize_chunk.text[:50] if synthesize_chunk.text else "")
+        chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
+        _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
+
+        # Store in buffer for fallback compatibility
         self._synthesis_buffer.append(synthesize_chunk.text)
+
+        # Add to accumulator for sentence detection across chunks
+        self._text_accumulator += chunk_text
+
+        # Get or create segmenter for the current language
+        requested_language = self._synthesis_voice.language if self._synthesis_voice else None
+        pysbd_language = self._get_pysbd_language(requested_language)
+        
+        # Use cached segmenter or create a new one
+        if pysbd_language not in self._pysbd_segmenters:
+            _LOGGER.debug("Creating new pysbd segmenter for language: %s", pysbd_language)
+            self._pysbd_segmenters[pysbd_language] = pysbd.Segmenter(language=pysbd_language, clean=True)
+        
+        segmenter = self._pysbd_segmenters[pysbd_language]
+        
+        # Segment the entire accumulated text
+        sentences = segmenter.segment(self._text_accumulator)
+
+        # Process complete sentences (all but the last one)
+        if len(sentences) > 1:
+            ready_sentences = sentences[:-1]
+
+            # Keep only the last sentence in the accumulator
+            self._text_accumulator = sentences[-1]
+
+            _LOGGER.info("Detected %d ready sentences for immediate synthesis: %s",
+                        len(ready_sentences),
+                        [_truncate_for_log(s, 30) for s in ready_sentences])
+            await self._process_ready_sentences(ready_sentences, requested_language)
+        else:
+            _LOGGER.debug("No complete sentences ready yet, accumulator has: '%s'",
+                         _truncate_for_log(self._text_accumulator))
+
         return True
 
     async def _handle_synthesize_stop(self) -> bool:
@@ -502,15 +626,36 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._is_synthesizing = False
 
-        # Get accumulated text and voice
+        # Process any remaining text in the accumulator (even if it's incomplete)
+        # This is the final text, so we process it regardless of sentence completion
+        if self._text_accumulator.strip():
+            _LOGGER.info("Processing final remaining text: '%s'",
+                        _truncate_for_log(self._text_accumulator))
+            requested_language = self._synthesis_voice.language if self._synthesis_voice else None
+            await self._process_ready_sentences([self._text_accumulator], requested_language)
+
+        # Get accumulated text and voice for fallback
         full_text = "".join(self._synthesis_buffer)
         voice_info = self._synthesis_voice
 
-        _LOGGER.debug("Streaming synthesis completed with text: %s", full_text[:100])
+        _LOGGER.debug("Streaming synthesis completed with text: %s", _truncate_for_log(full_text))
 
         # Clear synthesis state early
         self._synthesis_buffer = []
         self._synthesis_voice = None
+        self._text_accumulator = ""
+        self._ready_chunks = []
+        self._pysbd_segmenters.clear()  # Clear segmenter cache
+
+        # Send audio stop if we processed any audio incrementally
+        if self._audio_started:
+            await self.write_event(AudioStop(timestamp=int(self._current_timestamp)).event())
+            await self.write_event(SynthesizeStopped().event())
+            _LOGGER.info("Successfully completed incremental streaming synthesis, final timestamp: %.2f", self._current_timestamp)
+            self._audio_started = False  # Reset for next session
+            self._current_timestamp = 0  # Reset for next session
+            self._pysbd_segmenters.clear()  # Clear segmenter cache
+            return True  # Exit early to prevent duplicate events
 
         if not full_text.strip():
             _LOGGER.warning("No text to synthesize")
@@ -586,7 +731,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
                 # Send final audio stop
                 await self.write_event(AudioStop(timestamp=total_timestamp).event())
-                _LOGGER.info("Successfully completed parallel streaming synthesis: %s", full_text[:100])
+                _LOGGER.info("Successfully completed parallel streaming synthesis: %s", _truncate_for_log(full_text))
             else:
                 # Use non-streaming synthesis for non-streaming voices
                 _LOGGER.debug("Using non-streaming synthesis for voice: %s", voice.name)
@@ -626,7 +771,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                     audio_data += chunk
 
-            _LOGGER.debug("Completed synthesis for chunk: %s", text[:50])
+            _LOGGER.debug("Completed synthesis for chunk: %s", _truncate_for_log(text, 50))
             return audio_data
 
         except Exception as e:
@@ -698,21 +843,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.exception("Error streaming audio to Wyoming: %s", e)
             return None
 
-    async def _synthesize_chunk(self, text: str, voice: TtsVoiceModel, is_first_chunk: bool, start_timestamp: float) -> float | None:
-        """
-        Synthesize a single text chunk and stream the audio (legacy method for compatibility).
-
-        Args:
-            text (str): Text chunk to synthesize.
-            voice (TtsVoiceModel): Voice to use for synthesis.
-            is_first_chunk (bool): Whether this is the first chunk (sends AudioStart).
-            start_timestamp (float): Starting timestamp for this chunk.
-
-        Returns:
-            float | None: Final timestamp after this chunk, or None on error.
-        """
-        return await self._stream_tts_audio(voice, text, send_audio_start=is_first_chunk, start_timestamp=start_timestamp)
-
     async def _synthesize_non_streaming(self, text: str, voice: TtsVoiceModel) -> bool:
         """
         Synthesize text using the existing non-streaming approach.
@@ -729,7 +859,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if final_timestamp is not None:
             # Send audio stop after streaming completes
             await self.write_event(AudioStop(timestamp=final_timestamp).event())
-            _LOGGER.info("Successfully synthesized non-streaming: %s", text[:100])
+            _LOGGER.info("Successfully synthesized non-streaming: %s", _truncate_for_log(text))
             return True
         return False
 
