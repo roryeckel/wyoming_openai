@@ -10,7 +10,7 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 ## Overview
 
-This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant.
+This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries for responsive audio delivery.
 
 ## Featured Models
 
@@ -28,7 +28,8 @@ This project features a variety of examples for using cutting-edge models in bot
 2. **Service Consolidation**: Allow users of various programs to run inference on a single server without needing separate instances for each service.
 Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home Assistant](#usage-in-home-assistant).
 3. **Asynchronous Processing**: Enable efficient handling of multiple requests by supporting asynchronous processing of audio streams.
-4. **Simple Setup with Docker**: Provide a straightforward deployment process using [Docker and Docker Compose](#docker-recommended) for OpenAI and various popular open source projects.
+4. **Streaming Compatibility**: Bridge Wyoming's streaming TTS protocol with OpenAI-compatible APIs through intelligent sentence boundary chunking, enabling responsive incremental audio delivery even when the underlying API doesn't support streaming text input.
+5. **Simple Setup with Docker**: Provide a straightforward deployment process using [Docker and Docker Compose](#docker-recommended) for OpenAI and various popular open source projects.
 
 ## Terminology
 
@@ -354,15 +355,25 @@ sequenceDiagram
     WY->>HA: AudioStop event
   else Streaming TTS (SynthesizeStart/Chunk/Stop)
     HA->>WY: SynthesizeStart event (voice config)
-    Note over WY: Initialize synthesis buffer
+    Note over WY: Initialize incremental synthesis<br/>with sentence boundary detection
+    WY->>HA: AudioStart event
     loop Sending text chunks
       HA->>WY: SynthesizeChunk events
-      Note over WY: Append to synthesis buffer
+      Note over WY: Accumulate text and detect<br/>complete sentences using pysbd
+      alt Complete sentences detected
+        loop For each complete sentence
+          WY->>OAPI: Speech synthesis request
+          loop While receiving audio data
+            OAPI-->>WY: Audio stream chunks
+            WY-->>HA: AudioChunk events (incremental)
+          end
+        end
+      end
     end
     HA->>WY: SynthesizeStop event
-    Note over WY: No-op — OpenAI `/v1/audio/speech`<br/>does not support streaming text input
+    Note over WY: Process any remaining text<br/>and finalize synthesis
+    WY->>HA: AudioStop event
     WY->>HA: SynthesizeStopped event
-    Note over WY: Streaming flow is handled<br/>but not advertised in capabilities
   end
 ```
 
