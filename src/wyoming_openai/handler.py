@@ -375,12 +375,12 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _process_ready_sentences(self, sentences: list[str], language: str | None = None) -> None:
         """
         Process complete sentences for immediate TTS synthesis.
-        
+
         This method handles incremental synthesis of complete sentences detected during
         streaming text input. Each sentence is synthesized independently and streamed
         to Wyoming as audio becomes available, maintaining timestamp continuity across
         all audio chunks.
-        
+
         Error Handling Strategy:
         - If synthesis fails for a sentence, we log the error and continue with the next
         - This ensures partial content delivery even if some sentences fail
@@ -590,14 +590,14 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Get or create segmenter for the current language
         requested_language = self._synthesis_voice.language if self._synthesis_voice else None
         pysbd_language = self._get_pysbd_language(requested_language)
-        
+
         # Use cached segmenter or create a new one
         if pysbd_language not in self._pysbd_segmenters:
             _LOGGER.debug("Creating new pysbd segmenter for language: %s", pysbd_language)
             self._pysbd_segmenters[pysbd_language] = pysbd.Segmenter(language=pysbd_language, clean=True)
-        
+
         segmenter = self._pysbd_segmenters[pysbd_language]
-        
+
         # Segment the entire accumulated text
         sentences = segmenter.segment(self._text_accumulator)
 
