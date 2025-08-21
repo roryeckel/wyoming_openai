@@ -16,7 +16,14 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import AsrModel, Describe, Info, TtsVoice
 from wyoming.server import AsyncEventHandler
-from wyoming.tts import Synthesize
+from wyoming.tts import (
+    Synthesize,
+    SynthesizeChunk,
+    SynthesizeStart,
+    SynthesizeStop,
+    SynthesizeStopped,
+    SynthesizeVoice,
+)
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .utilities import NamedBytesIO
@@ -77,6 +84,15 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._is_recording: bool = False
         self._current_asr_model: AsrModel | None = None
 
+        # State for event logging
+        self._last_event_type: str | None = None
+        self._event_counter: int = 0
+
+        # State for streaming synthesis
+        self._synthesis_buffer: list[str] = []
+        self._synthesis_voice: SynthesizeVoice | None = None
+        self._is_synthesizing: bool = False
+
     async def handle_event(self, event: Event) -> bool:
         """
         Handle incoming events
@@ -113,12 +129,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         if Synthesize.is_type(event.type):
             return await self._handle_synthesize(Synthesize.from_event(event))
 
+        if SynthesizeStart.is_type(event.type):
+            return await self._handle_synthesize_start(SynthesizeStart.from_event(event))
+
+        if SynthesizeChunk.is_type(event.type):
+            return await self._handle_synthesize_chunk(SynthesizeChunk.from_event(event))
+
+        if SynthesizeStop.is_type(event.type):
+            return await self._handle_synthesize_stop()
+
         if Describe.is_type(event.type):
             await self.write_event(self._wyoming_info.event())
             return True
 
-        _LOGGER.warning("Unhandled event type: %s", event.type)
-        return False
+        _LOGGER.info("Ignoring unhandled event type: %s", event.type)
+        return True
 
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
@@ -304,6 +329,13 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._log_unsupported_voice(requested_voice)
                 return False
 
+            # Buffer first chunk to parse WAV header
+            first_chunk = None
+            audio_rate = TTS_AUDIO_RATE
+            audio_width = DEFAULT_AUDIO_WIDTH
+            audio_channels = DEFAULT_AUDIO_CHANNELS
+            timestamp = 0
+
             async with self._client_lock, self._tts_client.audio.speech.with_streaming_response.create(
                 model=voice.model_name,
                 voice=voice.name,
@@ -312,64 +344,117 @@ class OpenAIEventHandler(AsyncEventHandler):
                 instructions=self._tts_instructions or NOT_GIVEN
             ) as response:
 
-                    # Buffer first chunk to parse WAV header
-                    first_chunk = None
-                    audio_rate = TTS_AUDIO_RATE
-                    audio_width = DEFAULT_AUDIO_WIDTH
-                    audio_channels = DEFAULT_AUDIO_CHANNELS
-                    timestamp = 0
+                async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
+                    if first_chunk is None:
+                        first_chunk = chunk
+                        audio_data = chunk
 
-                    async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
-                        if first_chunk is None:
-                            first_chunk = chunk
-                            audio_data = chunk
-
-                            # Try to parse WAV header from first chunk
-                            wav_params = self._parse_wav_header(chunk)
-                            if wav_params:
-                                audio_rate, audio_channels, audio_width, data_offset = wav_params
-                                # Strip WAV header from audio data
-                                audio_data = chunk[data_offset:]
-                                _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
-                                            audio_rate, audio_channels, audio_width, data_offset)
-                            else:
-                                _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
-
-                            # Send audio start with detected parameters
-                            await self.write_event(
-                                AudioStart(
-                                    rate=audio_rate,
-                                    width=audio_width,
-                                    channels=audio_channels
-                                ).event()
-                            )
+                        # Try to parse WAV header from first chunk
+                        wav_params = self._parse_wav_header(chunk)
+                        if wav_params:
+                            audio_rate, audio_channels, audio_width, data_offset = wav_params
+                            # Strip WAV header from audio data
+                            audio_data = chunk[data_offset:]
+                            _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                                        audio_rate, audio_channels, audio_width, data_offset)
                         else:
-                            audio_data = chunk
+                            _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
 
-                        # Send audio chunk (header stripped for first chunk)
-                        if audio_data:  # Only send if there's actual audio data
-                            await self.write_event(
-                                AudioChunk(
-                                    audio=audio_data,
-                                    rate=audio_rate,
-                                    width=audio_width,
-                                    channels=audio_channels,
-                                    timestamp=int(timestamp)
-                                ).event()
-                            )
-                            # Calculate timestamp increment based on actual audio data length
-                            actual_samples = len(audio_data) // audio_width
-                            timestamp += (actual_samples / audio_rate) * 1000
+                        # Send audio start with detected parameters
+                        await self.write_event(
+                            AudioStart(
+                                rate=audio_rate,
+                                width=audio_width,
+                                channels=audio_channels
+                            ).event()
+                        )
+                    else:
+                        audio_data = chunk
 
-                    # Send audio stop
-                    await self.write_event(AudioStop(timestamp=timestamp).event())
+                    # Send audio chunk (header stripped for first chunk)
+                    if audio_data:  # Only send if there's actual audio data
+                        await self.write_event(
+                            AudioChunk(
+                                audio=audio_data,
+                                rate=audio_rate,
+                                width=audio_width,
+                                channels=audio_channels,
+                                timestamp=int(timestamp)
+                            ).event()
+                        )
+                        # Calculate timestamp increment based on actual audio data length
+                        actual_samples = len(audio_data) // audio_width
+                        timestamp += (actual_samples / audio_rate) * 1000
 
-                    _LOGGER.debug("Successfully synthesized: %s", synthesize.text[:100])
-                    return True
+            # Send audio stop after closing the streaming response context
+            await self.write_event(AudioStop(timestamp=timestamp).event())
+
+            _LOGGER.info("Successfully synthesized: %s", synthesize.text[:100])
+            return True
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
+
+    async def _handle_synthesize_start(self, synthesize_start: SynthesizeStart) -> bool:
+        """Handle start of streaming synthesis"""
+        _LOGGER.debug("Handling synthesize-start event: %s", synthesize_start)
+
+        # Reset synthesis state
+        self._synthesis_buffer = []
+        self._is_synthesizing = True
+
+        # Store voice information if provided
+        if synthesize_start.voice:
+            self._synthesis_voice = synthesize_start.voice
+            requested_voice = synthesize_start.voice.name
+            requested_language = synthesize_start.voice.language
+
+            # Validate voice
+            voice = self._get_voice(requested_voice)
+            if voice:
+                if not self._validate_tts_language(requested_language, voice):
+                    self._is_synthesizing = False
+                    return False
+            else:
+                self._log_unsupported_voice(requested_voice)
+                self._is_synthesizing = False
+                return False
+        else:
+            self._synthesis_voice = None
+
+        return True
+
+    async def _handle_synthesize_chunk(self, synthesize_chunk: SynthesizeChunk) -> bool:
+        """Handle text chunk during streaming synthesis"""
+        if not self._is_synthesizing:
+            _LOGGER.warning("Received synthesize-chunk without active synthesis")
+            return False
+
+        _LOGGER.debug("Received synthesis chunk: %s", synthesize_chunk.text[:50] if synthesize_chunk.text else "")
+        self._synthesis_buffer.append(synthesize_chunk.text)
+        return True
+
+    async def _handle_synthesize_stop(self) -> bool:
+        """Handle end of streaming synthesis"""
+        if not self._is_synthesizing:
+            _LOGGER.warning("Received synthesize-stop without active synthesis")
+            return False
+
+        self._is_synthesizing = False
+
+        # Log the accumulated text for debugging
+        full_text = "".join(self._synthesis_buffer)
+        _LOGGER.debug("Streaming synthesis completed with text: %s", full_text[:100])
+
+        # Send SynthesizeStopped event to confirm completion
+        await self.write_event(SynthesizeStopped().event())
+
+        # Clear synthesis state
+        self._synthesis_buffer = []
+        self._synthesis_voice = None
+
+        return True
 
     def _parse_wav_header(self, wav_data: bytes) -> tuple[int, int, int, int] | None:
         """
@@ -393,6 +478,27 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.debug("Failed to parse WAV header: %s", e)
             return None
+
+    async def write_event(self, event: Event) -> None:
+        """Override write_event to add debug logging with AudioChunk filtering"""
+        # Check if this is a new event type
+        if self._last_event_type != event.type:
+            self._last_event_type = event.type
+            self._event_counter = 1
+        else:
+            self._event_counter += 1
+
+        # Handle AudioChunk logging specially
+        if event.type == "audio-chunk":
+            if self._event_counter == 1:
+                _LOGGER.debug("Outgoing event type %s", event.type)
+            elif self._event_counter == 2:
+                _LOGGER.debug("Outgoing event type %s (subsequent audio chunks will not be logged)", event.type)
+            # Subsequent AudioChunk events are silenced
+        else:
+            _LOGGER.debug("Outgoing event type %s", event.type)
+
+        await super().write_event(event)
 
     async def stop(self) -> None:
         """Stop the handler and close the clients"""
