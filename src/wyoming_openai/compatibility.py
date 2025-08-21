@@ -1,6 +1,5 @@
 import logging
 from enum import Enum
-from typing import override
 
 from openai import AsyncOpenAI
 from wyoming.info import AsrModel, AsrProgram, Attribution, Info, TtsProgram, TtsVoice
@@ -277,16 +276,6 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         self.backend: OpenAIBackend = kwargs.pop("backend", OpenAIBackend.OPENAI)
         super().__init__(*args, **kwargs)
 
-    @property
-    @override
-    def auth_headers(self) -> dict[str, str]:
-        """
-        Override the auth_headers property to remove the Authorization header if no API key is provided.
-        """
-        super_headers = super().auth_headers
-        if not self.api_key:
-            del super_headers["Authorization"]
-        return super_headers
 
     # OpenAI
 
