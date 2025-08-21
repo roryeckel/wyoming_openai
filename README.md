@@ -18,10 +18,11 @@ This project features a variety of examples for using cutting-edge models in bot
 
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
+- **`voxtral-mini-latest`**: Mistral AI's high-quality multilingual speech transcription model, supporting up to 15 minutes of audio with excellent accuracy, available via [Mistral AI Voxtral](#5-deploying-with-mistral-ai-voxtral).
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
-- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#5-deploying-with-microsoft-openai-edge-tts).
+- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#6-deploying-with-microsoft-openai-edge-tts).
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
@@ -227,7 +228,27 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
   docker compose -f docker-compose.speaches.yml -f docker-compose.kokoro-fastapi.yml up -d
   ```
 
-#### 5. Deploying with Microsoft OpenAI Edge TTS
+#### 5. Deploying with Mistral AI Voxtral
+
+For users who want high-quality multilingual speech transcription using Mistral AI's Voxtral model, this setup provides an excellent STT-only solution with support for up to 15 minutes of audio and excellent accuracy across multiple languages.
+
+- **Mistral AI Voxtral Setup**:
+  - Uses Mistral AI's Voxtral speech transcription API (requires Mistral API key)
+  - Supports multilingual transcription with high accuracy
+  - Supports audio files up to 15 minutes in length
+  - STT-only service (no TTS capabilities - combine with other services for TTS)
+  - OpenAI-compatible API endpoints for seamless integration
+  - [Learn more about Mistral AI](https://mistral.ai/)
+
+- **Docker Compose Configuration**: Use the `docker-compose.voxtral.yml` template which includes configuration for the Wyoming OpenAI proxy with Mistral AI Voxtral backend.
+
+- **Command**:
+  
+  ```bash
+  docker compose -f docker-compose.voxtral.yml up -d
+  ```
+
+#### 6. Deploying with Microsoft OpenAI Edge TTS
 
 For users who want high-quality text-to-speech without API costs, Microsoft Edge TTS provides excellent neural voices through a free cloud service. This setup requires no API keys and offers a wide variety of natural-sounding voices.
 
@@ -247,7 +268,7 @@ For users who want high-quality text-to-speech without API costs, Microsoft Edge
   docker compose -f docker-compose.openai-edge-tts.yml up -d
   ```
 
-#### 6. Development with Docker
+#### 7. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -257,9 +278,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 7. Example: Development with Additional Local Service
+#### 8. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, and `docker-compose.openai-edge-tts.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, and `docker-compose.openai-edge-tts.yml`.
 
 - **Command**:
   
@@ -267,7 +288,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 8. Docker Tags
+#### 9. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
