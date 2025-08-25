@@ -32,12 +32,27 @@ jobs:
         
         echo "Attempting to delete tag: ${TAG_NAME} for package: ${PACKAGE_NAME}"
         
-        # Get all versions of the package
-        VERSIONS=$(curl -s \
+        # Determine the correct API base path based on repository owner type
+        OWNER_TYPE="${{ github.repository_owner_type }}"
+        OWNER="${{ github.repository_owner }}"
+        if [ "$OWNER_TYPE" = "Organization" ]; then
+          API_BASE="orgs/${OWNER}"
+        else
+          API_BASE="users/${OWNER}"
+        fi
+        
+        echo "Using API base path: ${API_BASE}"
+        
+        # Get all versions of the package with error handling
+        RESPONSE=$(curl -sSf \
           -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
           -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/user/packages/container/${PACKAGE_NAME}/versions" \
-          | jq -r '.[] | select(.metadata.container.tags[]? == "'${TAG_NAME}'") | .id')
+          "https://api.github.com/${API_BASE}/packages/container/${PACKAGE_NAME}/versions" 2>&1) || {
+          echo "Error: Failed to fetch package versions from GitHub API. Response:"
+          echo "$RESPONSE"
+          exit 1
+        }
+        VERSIONS=$(echo "$RESPONSE" | jq -r '.[] | select(.metadata.container.tags[]? == "'${TAG_NAME}'") | .id')
         
         if [ -n "$VERSIONS" ]; then
           for VERSION_ID in $VERSIONS; do
@@ -45,7 +60,7 @@ jobs:
             curl -X DELETE \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/user/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}"
+              "https://api.github.com/${API_BASE}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}"
             echo "Successfully deleted Docker image version: ${VERSION_ID}"
           done
         else
