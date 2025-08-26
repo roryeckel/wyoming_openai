@@ -279,6 +279,32 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.3`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 
+- **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
+
+#### 9. Pull Request Docker Images
+
+For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
+
+**How it works:**
+- When a pull request is opened or updated, a Docker image is automatically built and pushed with the tag `pr-{pr_number}`
+- Only pull requests from the main repository (not forks) will trigger image builds for security reasons
+- When a pull request is closed or merged, the corresponding Docker image is automatically deleted to save storage space
+
+**Using PR images:**
+```bash
+# Example: Test PR #123
+docker run --rm -p 10300:10300 ghcr.io/roryeckel/wyoming_openai:pr-123
+
+# Or with docker-compose, update your docker-compose.yml:
+# image: ghcr.io/roryeckel/wyoming_openai:pr-123
+```
+
+**For contributors:**
+- PR images are built automatically - no action needed
+- Images are available within minutes of opening/updating a PR
+- Check the Actions tab to see build status
+- Images are automatically cleaned up when the PR is closed
+
 ### General Deployment Steps
 
 1. **Start Services**: Run the appropriate Docker Compose command based on your deployment option.
