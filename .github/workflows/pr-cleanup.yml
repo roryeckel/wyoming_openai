@@ -48,7 +48,7 @@ jobs:
         API_URL="https://api.github.com/${API_BASE}/packages/container/${PACKAGE_NAME}/versions"
         RESPONSE=$(curl -sSf \
           -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github.v3+json" \
+          -H "Accept: application/vnd.github+json" \
           "${API_URL}" 2>&1)
         CURL_EXIT_CODE=$?
         if [ $CURL_EXIT_CODE -ne 0 ]; then
@@ -65,7 +65,7 @@ jobs:
             DELETE_URL="${API_URL}/${VERSION_ID}"
             DELETE_RESPONSE=$(curl -sSf -X DELETE \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
+              -H "Accept: application/vnd.github+json" \
               "${DELETE_URL}" 2>&1)
             DELETE_EXIT_CODE=$?
             if [ $DELETE_EXIT_CODE -eq 0 ]; then
