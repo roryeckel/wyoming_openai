@@ -26,12 +26,13 @@ jobs:
       continue-on-error: true
       run: |
         # Convert repository name to lowercase for Docker registry
-        REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        REPO_LOWER=$(echo "${{ github.repository }}" | \
+          tr '[:upper:]' '[:lower:]')
         PACKAGE_NAME=$(basename ${REPO_LOWER})
         TAG_NAME="pr-${{ github.event.number }}"
-        
+
         echo "Attempting to delete tag: ${TAG_NAME} for package: ${PACKAGE_NAME}"
-        
+
         # Determine the correct API base path based on repository owner type
         OWNER_TYPE="${{ github.repository_owner_type }}"
         OWNER="${{ github.repository_owner }}"
@@ -40,28 +41,39 @@ jobs:
         else
           API_BASE="users/${OWNER}"
         fi
-        
+
         echo "Using API base path: ${API_BASE}"
         
         # Get all versions of the package with error handling
+        API_URL="https://api.github.com/${API_BASE}/packages/container/${PACKAGE_NAME}/versions"
         RESPONSE=$(curl -sSf \
           -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
           -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/${API_BASE}/packages/container/${PACKAGE_NAME}/versions" 2>&1) || {
+          "${API_URL}" 2>&1)
+        CURL_EXIT_CODE=$?
+        if [ $CURL_EXIT_CODE -ne 0 ]; then
           echo "Error: Failed to fetch package versions from GitHub API. Response:"
           echo "$RESPONSE"
-          exit 1
-        }
-        VERSIONS=$(echo "$RESPONSE" | jq -r '.[] | select(.metadata.container.tags[]? == "'${TAG_NAME}'") | .id')
-        
+          exit $CURL_EXIT_CODE
+        fi
+        VERSIONS=$(echo "$RESPONSE" | \
+          jq -r '.[] | select(.metadata.container.tags[]? == "'${TAG_NAME}'") | .id')
+
         if [ -n "$VERSIONS" ]; then
           for VERSION_ID in $VERSIONS; do
             echo "Deleting version ID: $VERSION_ID with tag: ${TAG_NAME}"
-            curl -X DELETE \
+            DELETE_URL="${API_URL}/${VERSION_ID}"
+            DELETE_RESPONSE=$(curl -sSf -X DELETE \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/${API_BASE}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}"
-            echo "Successfully deleted Docker image version: ${VERSION_ID}"
+              "${DELETE_URL}" 2>&1)
+            DELETE_EXIT_CODE=$?
+            if [ $DELETE_EXIT_CODE -eq 0 ]; then
+              echo "Successfully deleted Docker image version: ${VERSION_ID}"
+            else
+              echo "Warning: Failed to delete version ID: $VERSION_ID. Response:"
+              echo "$DELETE_RESPONSE"
+            fi
           done
         else
           echo "No Docker image found for tag: ${TAG_NAME}, nothing to clean up"
