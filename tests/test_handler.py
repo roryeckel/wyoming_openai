@@ -1,4 +1,3 @@
-import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -56,7 +55,6 @@ def handler(dummy_info, dummy_clients, dummy_reader_writer):
         info=dummy_info,
         stt_client=stt_client,
         tts_client=tts_client,
-        client_lock=asyncio.Lock(),
     )
 
 @pytest.mark.asyncio
@@ -150,7 +148,6 @@ def enhanced_handler(mock_info, mock_clients, dummy_reader_writer):
         info=mock_info,
         stt_client=stt_client,
         tts_client=tts_client,
-        client_lock=asyncio.Lock(),
         stt_temperature=0.5,
         stt_prompt="Test prompt",
         tts_speed=1.0,
