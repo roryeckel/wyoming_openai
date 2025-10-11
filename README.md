@@ -10,7 +10,7 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 ## Overview
 
-This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant.
+This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries with [pySBD](https://github.com/nipunsadvilkar/pySBD) for responsive audio delivery. When streaming is enabled, Wyoming OpenAI prefetches up to three OpenAI synthesis requests in parallel while playing the audio sequentially, keeping latency low without breaking event order.
 
 ## Featured Models
 
@@ -23,13 +23,15 @@ This project features a variety of examples for using cutting-edge models in bot
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
 - **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#6-deploying-with-microsoft-openai-edge-tts).
+- **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#7-deploying-with-chatterbox-tts) for details.
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
 2. **Service Consolidation**: Allow users of various programs to run inference on a single server without needing separate instances for each service.
 Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home Assistant](#usage-in-home-assistant).
 3. **Asynchronous Processing**: Enable efficient handling of multiple requests by supporting asynchronous processing of audio streams.
-4. **Simple Setup with Docker**: Provide a straightforward deployment process using [Docker and Docker Compose](#docker-recommended) for OpenAI and various popular open source projects.
+4. **Streaming Compatibility**: Bridge Wyoming's streaming TTS protocol with OpenAI-compatible APIs through intelligent sentence boundary chunking powered by [pySBD](https://github.com/nipunsadvilkar/pySBD), enabling responsive incremental audio delivery even when the underlying API doesn't support streaming text input. Concurrent pipelining (default limit of three in-flight requests) keeps playback smooth while ensuring events remain ordered.
+5. **Simple Setup with Docker**: Provide a straightforward deployment process using [Docker and Docker Compose](#docker-recommended) for OpenAI and various popular open source projects.
 
 ## Terminology
 
@@ -113,6 +115,7 @@ python -m wyoming_openai \
   --tts-openai-key YOUR_TTS_API_KEY_HERE \
   --tts-openai-url https://api.openai.com/v1 \
   --tts-models gpt-4o-mini-tts tts-1-hd tts-1 \
+  --tts-streaming-models tts-1 \
   --tts-voices alloy ash coral echo fable onyx nova sage shimmer \
   --tts-backend OPENAI \
   --tts-speed 1.0
@@ -143,6 +146,9 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetected)                           | Enable unofficial API feature sets.          |
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
+| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [pySBD](https://github.com/nipunsadvilkar/pySBD) sentence chunking that powers the TTS streaming pipeline (e.g. `tts-1`) with up to three concurrent synthesis requests. |
+| `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
+| `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
 
 ## Docker (Recommended) [![Docker Image CI](https://github.com/roryeckel/wyoming-openai/actions/workflows/docker-image.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/docker-image.yml)
 
@@ -268,7 +274,28 @@ For users who want high-quality text-to-speech without API costs, Microsoft Edge
   docker compose -f docker-compose.openai-edge-tts.yml up -d
   ```
 
-#### 7. Development with Docker
+#### 7. Deploying with Chatterbox TTS
+
+For users who want high-quality local text-to-speech with voice cloning capabilities, Chatterbox TTS provides an OpenAI-compatible API with advanced voice cloning features. This setup runs completely locally and supports custom voice training.
+
+- **Chatterbox TTS Setup**:
+  - Local OpenAI-compatible text-to-speech API with voice cloning capabilities
+  - Supports custom voice samples for personalized speech generation
+  - Advanced voice library management with persistent storage
+  - FastAPI-powered with real-time status monitoring and streaming support
+  - GPU acceleration support for faster processing
+  - No external API dependencies - runs completely offline
+  - [Learn more about Chatterbox TTS API](https://github.com/travisvn/chatterbox-tts-api)
+
+- **Docker Compose Configuration**: Use the `docker-compose.chatterbox.yml` template which includes configuration for both the Wyoming OpenAI proxy and Chatterbox TTS service.
+
+- **Command**:
+  
+  ```bash
+  docker compose -f docker-compose.chatterbox.yml up -d
+  ```
+
+#### 8. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -278,9 +305,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 8. Example: Development with Additional Local Service
+#### 9. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, and `docker-compose.openai-edge-tts.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, and `docker-compose.chatterbox.yml`.
 
 - **Command**:
   
@@ -288,7 +315,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 9. Docker Tags
+#### 10. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -296,9 +323,35 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.6`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.8`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
 - **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.3`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
+
+- **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
+
+#### 11. Pull Request Docker Images
+
+For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
+
+**How it works:**
+- When a pull request is opened or updated, a Docker image is automatically built and pushed with the tag `pr-{pr_number}`
+- Only pull requests from the main repository (not forks) will trigger image builds for security reasons
+- When a pull request is closed or merged, the corresponding Docker image is automatically deleted to save storage space
+
+**Using PR images:**
+```bash
+# Example: Test PR #123
+docker run --rm -p 10300:10300 ghcr.io/roryeckel/wyoming_openai:pr-123
+
+# Or with docker-compose, update your docker-compose.yml:
+# image: ghcr.io/roryeckel/wyoming_openai:pr-123
+```
+
+**For contributors:**
+- PR images are built automatically - no action needed
+- Images are available within minutes of opening/updating a PR
+- Check the Actions tab to see build status
+- Images are automatically cleaned up when the PR is closed
 
 ### General Deployment Steps
 
@@ -371,15 +424,25 @@ sequenceDiagram
     WY->>HA: AudioStop event
   else Streaming TTS (SynthesizeStart/Chunk/Stop)
     HA->>WY: SynthesizeStart event (voice config)
-    Note over WY: Initialize synthesis buffer
+    Note over WY: Initialize incremental synthesis<br/>with pySBD-powered sentence boundary detection<br/>and up to three concurrent OpenAI TTS requests
+    WY->>HA: AudioStart event
     loop Sending text chunks
       HA->>WY: SynthesizeChunk events
-      Note over WY: Append to synthesis buffer
+      Note over WY: Accumulate text and detect<br/>complete sentences using pySBD sentence chunking<br/>while prefetching audio in parallel (max 3 concurrent requests)
+      alt Complete sentences detected
+        loop For each complete sentence
+          WY->>OAPI: Speech synthesis request
+          loop While receiving audio data
+            OAPI-->>WY: Audio stream chunks
+            WY-->>HA: AudioChunk events (incremental)
+          end
+        end
+      end
     end
     HA->>WY: SynthesizeStop event
-    Note over WY: No-op — OpenAI `/v1/audio/speech`<br/>does not support streaming text input
+    Note over WY: Process any remaining text<br/>and finalize synthesis
+    WY->>HA: AudioStop event
     WY->>HA: SynthesizeStopped event
-    Note over WY: Streaming flow is handled<br/>but not advertised in capabilities
   end
 ```
 

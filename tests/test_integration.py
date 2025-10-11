@@ -1,4 +1,3 @@
-import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, Mock, patch
@@ -60,7 +59,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
@@ -116,7 +114,7 @@ class TestIntegration:
         languages = ["en"]
         base_url = "https://api.openai.com/v1"
 
-        tts_voices = create_tts_voices(tts_models, tts_voice_names, base_url, languages)
+        tts_voices = create_tts_voices(tts_models, [], tts_voice_names, base_url, languages)
         tts_programs = create_tts_programs(tts_voices)
         asr_programs = create_asr_programs([], [], base_url, languages)  # No ASR for this test
         info = create_info(asr_programs, tts_programs)
@@ -158,7 +156,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
@@ -208,7 +205,7 @@ class TestIntegration:
         """Test handling multiple events in sequence."""
         # Setup comprehensive info
         asr_programs = create_asr_programs(["whisper-1"], [], "https://api.openai.com/v1", ["en"])
-        tts_voices = create_tts_voices(["tts-1"], ["alloy"], "https://api.openai.com/v1", ["en"])
+        tts_voices = create_tts_voices(["tts-1"], [], ["alloy"], "https://api.openai.com/v1", ["en"])
         tts_programs = create_tts_programs(tts_voices)
         info = create_info(asr_programs, tts_programs)
 
@@ -221,7 +218,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
@@ -288,7 +284,7 @@ class TestIntegration:
 
         # Build info structure
         asr_programs = create_asr_programs(asr_models, streaming_models, base_url, languages)
-        tts_voice_models = create_tts_voices(tts_models, tts_voices, base_url, languages)
+        tts_voice_models = create_tts_voices(tts_models, [], tts_voices, base_url, languages)
         tts_programs = create_tts_programs(tts_voice_models)
         info = create_info(asr_programs, tts_programs)
 
@@ -329,7 +325,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 

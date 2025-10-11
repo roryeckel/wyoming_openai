@@ -139,6 +139,24 @@ async def main():
         default=os.getenv("TTS_INSTRUCTIONS", None),
         help="Optional instructions for TTS requests"
     )
+    parser.add_argument(
+        "--tts-streaming-models",
+        nargs="+",
+        default=os.getenv("TTS_STREAMING_MODELS", '').split(),
+        help="Space-separated list of TTS model names that support streaming synthesis (e.g. tts-1)"
+    )
+    parser.add_argument(
+        "--tts-streaming-min-words",
+        type=int,
+        default=int(os.getenv("TTS_STREAMING_MIN_WORDS")) if os.getenv("TTS_STREAMING_MIN_WORDS") else None,
+        help="Minimum words per chunk for streaming TTS (optional)"
+    )
+    parser.add_argument(
+        "--tts-streaming-max-chars",
+        type=int,
+        default=int(os.getenv("TTS_STREAMING_MAX_CHARS")) if os.getenv("TTS_STREAMING_MAX_CHARS") else None,
+        help="Maximum characters per chunk for streaming TTS (optional)"
+    )
 
     args = parser.parse_args()
 
@@ -179,12 +197,12 @@ async def main():
 
         if args.tts_voices:
             # If TTS_VOICES is set, use that
-            tts_voices = create_tts_voices(args.tts_models, args.tts_voices, args.tts_openai_url, args.languages)
+            tts_voices = create_tts_voices(args.tts_models, args.tts_streaming_models, args.tts_voices, args.tts_openai_url, args.languages)
         else:
-            # Otherwise, list supported voices via defaults
-            tts_voices = await tts_client.list_supported_voices(args.tts_models, args.languages)
+            # Otherwise, list supported voices via backend (with streaming fallback)
+            tts_voices = await tts_client.list_supported_voices(args.tts_models, args.tts_streaming_models, args.languages)
 
-        tts_programs = create_tts_programs(tts_voices)
+        tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 
         # Ensure at least one model is specified
         if not asr_programs and not tts_programs:
@@ -218,8 +236,25 @@ async def main():
             _logger.warning("No ASR models specified")
 
         if tts_programs:
-            all_tts_voices = [voice for prog in tts_programs for voice in prog.voices]
-            _logger.info("*** TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in all_tts_voices))
+            streaming_tts_voices_for_logging = []
+            non_streaming_tts_voices_for_logging = []
+
+            for prog in tts_programs:
+                for voice in prog.voices:
+                    if getattr(prog, 'supports_synthesize_streaming', False):
+                        streaming_tts_voices_for_logging.append(voice)
+                    else:
+                        non_streaming_tts_voices_for_logging.append(voice)
+
+            if streaming_tts_voices_for_logging:
+                _logger.info("*** Streaming TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in streaming_tts_voices_for_logging))
+            else:
+                _logger.info("No Streaming TTS voices specified")
+
+            if non_streaming_tts_voices_for_logging:
+                _logger.info("*** Non-Streaming TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in non_streaming_tts_voices_for_logging))
+            else:
+                _logger.info("No Non-Streaming TTS voices specified")
         else:
             _logger.warning("No TTS models specified")
 
@@ -234,11 +269,12 @@ async def main():
                 info=info,
                 stt_client=stt_client,
                 tts_client=tts_client,
-                client_lock=asyncio.Lock(),
                 stt_temperature=args.stt_temperature,
                 tts_speed=args.tts_speed,
                 tts_instructions=args.tts_instructions,
-                stt_prompt=args.stt_prompt
+                stt_prompt=args.stt_prompt,
+                tts_streaming_min_words=args.tts_streaming_min_words,
+                tts_streaming_max_chars=args.tts_streaming_max_chars
             )
         )
 
