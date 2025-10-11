@@ -1,4 +1,3 @@
-import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -6,9 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from wyoming.asr import Transcript
 from wyoming.event import Event
+from wyoming.tts import SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
 from wyoming_openai.handler import (
     OpenAIEventHandler,
+    TtsStreamError,
 )
 
 
@@ -56,7 +57,6 @@ def handler(dummy_info, dummy_clients, dummy_reader_writer):
         info=dummy_info,
         stt_client=stt_client,
         tts_client=tts_client,
-        client_lock=asyncio.Lock(),
     )
 
 @pytest.mark.asyncio
@@ -87,6 +87,141 @@ def test_is_asr_language_supported(handler):
 def test_validate_tts_language(handler):
     voice = handler._get_voice("voice1")
     assert handler._validate_tts_language("en", voice)
+
+
+@pytest.mark.asyncio
+async def test_streaming_chunk_failure_aborts(handler):
+    handler._wyoming_info.tts[0].supports_synthesize_streaming = True
+    handler.write_event = AsyncMock()
+
+    start_voice = SynthesizeVoice(name="voice1", language="en")
+    await handler.handle_event(SynthesizeStart(voice=start_voice).event())
+
+    failing_stream = AsyncMock(side_effect=TtsStreamError("Forced failure", "Failure chunk.", "voice1"))
+    with patch.object(handler, "_get_tts_audio_stream", failing_stream):
+        result = await handler.handle_event(SynthesizeChunk(text="Failure chunk. Another sentence.").event())
+
+    assert result is False
+    event_types = [call.args[0].type for call in handler.write_event.call_args_list]
+    assert "synthesize-stopped" in event_types
+    assert handler._is_synthesizing is False
+    assert handler._allow_streaming_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_buffered_synthesis_failure_aborts(handler):
+    """Test that buffered synthesis failures (parallel tasks) properly abort synthesis."""
+    handler._wyoming_info.tts[0].supports_synthesize_streaming = True
+    handler.write_event = AsyncMock()
+
+    start_voice = SynthesizeVoice(name="voice1", language="en")
+    await handler.handle_event(SynthesizeStart(voice=start_voice).event())
+
+    # Mock _get_tts_audio_stream to fail for buffered synthesis
+    # (task_id exists but not currently allowed to stream)
+    from wyoming_openai.handler import TtsStreamResult
+
+    call_count = 0
+    async def mock_buffered_failure(text, voice, task_id=None):
+        nonlocal call_count
+        call_count += 1
+        # First task succeeds (but buffered - will wait to stream)
+        # Second task fails to simulate a partial failure in parallel processing
+        if call_count == 1:
+            return TtsStreamResult(streamed=False, audio=b"\x00\x01" * 1000)
+        raise TtsStreamError("Buffered synthesis failed", text[:50], voice.name)
+
+    with patch.object(handler, "_get_tts_audio_stream", side_effect=mock_buffered_failure):
+        # Send chunk with three sentences. Handler processes all but last,
+        # so first two will be processed (first succeeds, second fails)
+        result = await handler.handle_event(
+            SynthesizeChunk(text="First sentence. Second sentence fails. Third sentence.").event()
+        )
+
+    # The chunk processing should fail when the second sentence fails
+    assert result is False
+    event_types = [call.args[0].type for call in handler.write_event.call_args_list]
+    assert "synthesize-stopped" in event_types
+    assert handler._is_synthesizing is False
+    assert handler._synthesis_buffer == []
+    assert handler._text_accumulator == ""
+
+
+@pytest.mark.asyncio
+async def test_empty_audio_data_aborts(handler):
+    """Test that empty audio data from synthesis properly aborts the session."""
+    handler._wyoming_info.tts[0].supports_synthesize_streaming = True
+    handler.write_event = AsyncMock()
+
+    start_voice = SynthesizeVoice(name="voice1", language="en")
+    await handler.handle_event(SynthesizeStart(voice=start_voice).event())
+
+    # Mock _get_tts_audio_stream to return empty audio (buffered mode)
+    from wyoming_openai.handler import TtsStreamResult
+
+    async def mock_empty_audio(text, voice, task_id=None):
+        # Return result with no audio data
+        return TtsStreamResult(streamed=False, audio=b"")
+
+    with patch.object(handler, "_get_tts_audio_stream", side_effect=mock_empty_audio):
+        # Send two sentences so first one gets processed (and returns empty audio)
+        result = await handler.handle_event(
+            SynthesizeChunk(text="Test sentence. Another one.").event()
+        )
+
+    assert result is False
+    event_types = [call.args[0].type for call in handler.write_event.call_args_list]
+    assert "synthesize-stopped" in event_types
+    assert handler._is_synthesizing is False
+    # Verify state was fully reset
+    assert handler._audio_started is False
+    assert handler._current_timestamp == 0
+    assert handler._synthesis_voice is None
+
+
+@pytest.mark.asyncio
+async def test_multiple_consecutive_chunk_failures(handler):
+    """Test that multiple consecutive synthesis failures are handled gracefully."""
+    handler._wyoming_info.tts[0].supports_synthesize_streaming = True
+    handler.write_event = AsyncMock()
+
+    start_voice = SynthesizeVoice(name="voice1", language="en")
+    await handler.handle_event(SynthesizeStart(voice=start_voice).event())
+
+    # Mock to always fail
+    failing_stream = AsyncMock(
+        side_effect=TtsStreamError("Persistent failure", "Test chunk", "voice1")
+    )
+
+    with patch.object(handler, "_get_tts_audio_stream", failing_stream):
+        # First failure - send two sentences so first gets processed
+        result1 = await handler.handle_event(
+            SynthesizeChunk(text="First chunk. Second one.").event()
+        )
+        assert result1 is False
+
+        # Verify state was reset after first failure
+        assert handler._is_synthesizing is False
+
+        # Try to start again - should work
+        await handler.handle_event(SynthesizeStart(voice=start_voice).event())
+        assert handler._is_synthesizing is True
+
+        # Second failure
+        result2 = await handler.handle_event(
+            SynthesizeChunk(text="Another chunk. And another.").event()
+        )
+        assert result2 is False
+
+        # Verify state is consistently reset
+        assert handler._is_synthesizing is False
+        assert handler._synthesis_buffer == []
+        assert handler._allow_streaming_task_id is None
+
+    # Verify synthesize-stopped was called for each failure
+    event_types = [call.args[0].type for call in handler.write_event.call_args_list]
+    stopped_count = event_types.count("synthesize-stopped")
+    assert stopped_count >= 2, f"Expected at least 2 synthesize-stopped events, got {stopped_count}"
 
 
 @pytest.fixture
@@ -150,7 +285,6 @@ def enhanced_handler(mock_info, mock_clients, dummy_reader_writer):
         info=mock_info,
         stt_client=stt_client,
         tts_client=tts_client,
-        client_lock=asyncio.Lock(),
         stt_temperature=0.5,
         stt_prompt="Test prompt",
         tts_speed=1.0,

@@ -6,7 +6,6 @@ and the `synthesize-stop` event can trigger audio synthesis, leading to
 duplicate audio output.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -79,7 +78,6 @@ class TestDuplicateAudioFix:
             info=mock_info,
             stt_client=AsyncMock(spec=CustomAsyncOpenAI),
             tts_client=mock_tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
         return handler
