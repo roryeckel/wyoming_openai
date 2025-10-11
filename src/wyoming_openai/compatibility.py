@@ -1,6 +1,5 @@
 import logging
 from enum import Enum
-from typing import override
 
 from openai import AsyncOpenAI
 from wyoming.info import AsrModel, AsrProgram, Attribution, Info, TtsProgram, TtsVoice
@@ -117,15 +116,18 @@ def create_asr_programs(
 
 def create_tts_voices(
     tts_models: list[str],
+    tts_streaming_models: list[str],
     tts_voices: list[str],
     tts_url: str,
     languages: list[str]
 ) -> list[TtsVoiceModel]:
     """
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
+    Uses streaming models as fallback if regular models not specified (consistent with ASR behavior).
 
     Args:
         tts_models (list[str]): A list of TTS model identifiers.
+        tts_streaming_models (list[str]): A list of TTS streaming model identifiers.
         tts_voices (list[str]): A list of voice identifiers.
         tts_url (str): The URL for the TTS service attribution.
         languages (list[str]): A list of supported languages.
@@ -133,8 +135,25 @@ def create_tts_voices(
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
     """
-    voices = []
+    # Create ordered list: streaming models first, then non-streaming, preserving natural order and deduplicating
+    # (same pattern as create_asr_programs)
+    seen = set()
+    ordered_models = []
+
+    # Add streaming models first
+    for model_name in tts_streaming_models:
+        if model_name not in seen:
+            ordered_models.append(model_name)
+            seen.add(model_name)
+
+    # Add non-streaming models
     for model_name in tts_models:
+        if model_name not in seen:
+            ordered_models.append(model_name)
+            seen.add(model_name)
+
+    voices = []
+    for model_name in ordered_models:
         for voice in tts_voices:
             voices.append(TtsVoiceModel(
                 name=voice,
@@ -150,12 +169,13 @@ def create_tts_voices(
             ))
     return voices
 
-def create_tts_programs(tts_voices: list[TtsVoiceModel]) -> list[TtsProgram]:
+def create_tts_programs(tts_voices: list[TtsVoiceModel], tts_streaming_models: list[str] = None) -> list[TtsProgram]:
     """
-    Create TTS programs from a list of voices.
+    Create TTS programs from a list of voices, separating voices based on streaming model support.
 
     Args:
         tts_voices (list[TtsVoiceModel]): A list of TTS voice models.
+        tts_streaming_models (list[str]): List of TTS model names that support streaming.
 
     Returns:
         list[TtsProgram]: A list of Wyoming TTS programs.
@@ -163,19 +183,50 @@ def create_tts_programs(tts_voices: list[TtsVoiceModel]) -> list[TtsProgram]:
     if not tts_voices:
         return []
 
-    return [
-        TtsProgram(
+    if tts_streaming_models is None:
+        tts_streaming_models = []
+
+    # Separate streaming and non-streaming voices based on their models
+    streaming_tts_voices = []
+    non_streaming_tts_voices = []
+
+    for voice in tts_voices:
+        if voice.model_name in tts_streaming_models:
+            streaming_tts_voices.append(voice)
+        else:
+            non_streaming_tts_voices.append(voice)
+
+    programs = []
+
+    if streaming_tts_voices:
+        programs.append(TtsProgram(
+            name="openai-streaming",
+            description="OpenAI (Streaming)",
+            attribution=Attribution(
+                name=ATTRIBUTION_NAME_PROGRAM_STREAMING,
+                url=ATTRIBUTION_URL,
+            ),
+            installed=True,
+            version=__version__,
+            voices=streaming_tts_voices,
+            supports_synthesize_streaming=True,
+        ))
+
+    if non_streaming_tts_voices:
+        programs.append(TtsProgram(
             name="openai",
-            description="OpenAI",
+            description="OpenAI (Non-Streaming)",
             attribution=Attribution(
                 name=ATTRIBUTION_NAME_PROGRAM,
                 url=ATTRIBUTION_URL,
             ),
             installed=True,
             version=__version__,
-            voices=tts_voices,
-        )
-    ]
+            voices=non_streaming_tts_voices,
+            supports_synthesize_streaming=False,
+        ))
+
+    return programs
 
 
 def create_info(asr_programs: list[AsrProgram], tts_programs: list[TtsProgram]) -> Info:
@@ -265,6 +316,7 @@ class OpenAIBackend(Enum):
     OPENAI = 0 # "Official"
     SPEACHES = 1
     KOKORO_FASTAPI = 2
+    LOCALAI = 3
 
 class CustomAsyncOpenAI(AsyncOpenAI):
     """
@@ -276,16 +328,6 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         self.backend: OpenAIBackend = kwargs.pop("backend", OpenAIBackend.OPENAI)
         super().__init__(*args, **kwargs)
 
-    @property
-    @override
-    def auth_headers(self) -> dict[str, str]:
-        """
-        Override the auth_headers property to remove the Authorization header if no API key is provided.
-        """
-        super_headers = super().auth_headers
-        if not self.api_key:
-            del super_headers["Authorization"]
-        return super_headers
 
     # OpenAI
 
@@ -327,6 +369,27 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         except Exception as e:
             _LOGGER.exception(e, "Failed to fetch /audio/voices")
             raise
+
+    # LocalAI
+
+    async def _is_localai(self) -> bool:
+        """
+        Checks if the backend is LocalAI by sending a request to /readyz
+        LocalAI returns a 200 OK status on /readyz when ready
+        """
+        try:
+            response = await self._client.get("/readyz")
+            response.raise_for_status()
+            return True
+        except Exception:
+            return False
+
+    async def _list_localai_voices(self, model_name: str) -> list[str]:
+        """
+        LocalAI doesn't require voice specification - the voice is optional.
+        Returns the model name as the voice name for compatibility.
+        """
+        return [model_name]
 
     # Speaches
 
@@ -393,34 +456,52 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
     # Unified API
 
-    async def list_supported_voices(self, model_names: str | list[str], languages: list[str]) -> list[TtsVoiceModel]:
+    async def list_supported_voices(self, model_names: list[str], streaming_model_names: list[str], languages: list[str]) -> list[TtsVoiceModel]:
         """
-        Fetches the available voices via unofficial specs.
+        Fetches the available voices via unofficial specs with streaming model fallback (consistent with ASR behavior).
+        Uses streaming models if regular models not specified.
         Note: this is not the list of CONFIGURED voices.
         """
-        if isinstance(model_names, str):
-            model_names = [model_names]
+        # Use the same fallback pattern as create_asr_programs
+        seen = set()
+        ordered_models = []
+
+        # Add streaming models first
+        for model_name in streaming_model_names:
+            if model_name not in seen:
+                ordered_models.append(model_name)
+                seen.add(model_name)
+
+        # Add non-streaming models
+        for model_name in model_names:
+            if model_name not in seen:
+                ordered_models.append(model_name)
+                seen.add(model_name)
 
         tts_voice_models = []
-        for model_name in model_names:
+        for model_name in ordered_models:
             if self.backend == OpenAIBackend.OPENAI:
                 tts_voices = await self.list_openai_voices()
             elif self.backend == OpenAIBackend.SPEACHES:
                 tts_voices = await self._list_speaches_voices(model_name)
             elif self.backend == OpenAIBackend.KOKORO_FASTAPI:
                 tts_voices = await self._list_kokoro_fastapi_voices()
+            elif self.backend == OpenAIBackend.LOCALAI:
+                tts_voices = await self._list_localai_voices(model_name)
             else:
                 _LOGGER.warning("Unknown backend: %s", self.backend)
                 continue
 
-            # Create TTS voices in Wyoming Protocol format
+            # Create TTS voices in Wyoming Protocol format, preserving streaming model info
             tts_voice_models.extend(create_tts_voices(
                 tts_models=[model_name],
+                tts_streaming_models=streaming_model_names,
                 tts_voices=tts_voices,
                 tts_url=str(self.base_url),
                 languages=languages
             ))
         return tts_voice_models
+
 
     @classmethod
     def create_autodetected_factory(cls):
@@ -430,7 +511,9 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         async def factory(*args, **kwargs):
             client = cls(*args, **kwargs)
-            if await client._is_speaches():
+            if await client._is_localai():
+                client.backend = OpenAIBackend.LOCALAI
+            elif await client._is_speaches():
                 client.backend = OpenAIBackend.SPEACHES
             elif await client._is_kokoro_fastapi():
                 client.backend = OpenAIBackend.KOKORO_FASTAPI
