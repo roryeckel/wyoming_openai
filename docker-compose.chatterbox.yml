@@ -10,7 +10,7 @@ services:
       WYOMING_LOG_LEVEL: INFO
       WYOMING_LANGUAGES: en
       TTS_OPENAI_URL: http://chatterbox-tts:4123/v1
-      TTS_MODELS: "tts-1"
+      TTS_MODELS: "tts-1-hd"
       TTS_BACKEND: "OPENAI"
       TTS_VOICES: "default"
       TTS_SPEED: "1.0"
@@ -39,10 +39,10 @@ services:
       - MAX_TOTAL_LENGTH=3000
 
       # Voice and Model Settings
-      - VOICE_SAMPLE_PATH=/app/voice-sample.mp3
+      # - VOICE_SAMPLE_PATH=/app/voice-sample.mp3
       - DEVICE=auto
       - MODEL_CACHE_DIR=/cache
-      - VOICE_LIBRARY_DIR=/voices
+      # - VOICE_LIBRARY_DIR=/voices
 
       # Memory Settings
       - MEMORY_CLEANUP_INTERVAL=5
@@ -53,7 +53,7 @@ services:
       - chatterbox-models:/cache
 
       # Mount voice library for persistence
-      - chatterbox-voices:/voices
+      # - chatterbox-voices:/voices
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4123/health"]
       interval: 30s
@@ -63,4 +63,4 @@ services:
 
 volumes:
   chatterbox-models:
-  chatterbox-voices:
+  # chatterbox-voices:
