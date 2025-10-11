@@ -269,7 +269,6 @@ async def main():
                 info=info,
                 stt_client=stt_client,
                 tts_client=tts_client,
-                client_lock=asyncio.Lock(),
                 stt_temperature=args.stt_temperature,
                 tts_speed=args.tts_speed,
                 tts_instructions=args.tts_instructions,

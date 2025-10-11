@@ -10,7 +10,7 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 ## Overview
 
-This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries for responsive audio delivery.
+This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries with [pySBD](https://github.com/nipunsadvilkar/pySBD) for responsive audio delivery. When streaming is enabled, Wyoming OpenAI prefetches up to three OpenAI synthesis requests in parallel while playing the audio sequentially, keeping latency low without breaking event order.
 
 ## Featured Models
 
@@ -28,7 +28,7 @@ This project features a variety of examples for using cutting-edge models in bot
 2. **Service Consolidation**: Allow users of various programs to run inference on a single server without needing separate instances for each service.
 Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home Assistant](#usage-in-home-assistant).
 3. **Asynchronous Processing**: Enable efficient handling of multiple requests by supporting asynchronous processing of audio streams.
-4. **Streaming Compatibility**: Bridge Wyoming's streaming TTS protocol with OpenAI-compatible APIs through intelligent sentence boundary chunking, enabling responsive incremental audio delivery even when the underlying API doesn't support streaming text input.
+4. **Streaming Compatibility**: Bridge Wyoming's streaming TTS protocol with OpenAI-compatible APIs through intelligent sentence boundary chunking powered by [pySBD](https://github.com/nipunsadvilkar/pySBD), enabling responsive incremental audio delivery even when the underlying API doesn't support streaming text input. Concurrent pipelining (default limit of three in-flight requests) keeps playback smooth while ensuring events remain ordered.
 5. **Simple Setup with Docker**: Provide a straightforward deployment process using [Docker and Docker Compose](#docker-recommended) for OpenAI and various popular open source projects.
 
 ## Terminology
@@ -144,7 +144,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetected)                           | Enable unofficial API feature sets.          |
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
-| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via pysbd text chunking (e.g. `tts-1`). |
+| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [pySBD](https://github.com/nipunsadvilkar/pySBD) sentence chunking that powers the TTS streaming pipeline (e.g. `tts-1`) with up to three concurrent synthesis requests. |
 | `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
 | `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
 
@@ -402,11 +402,11 @@ sequenceDiagram
     WY->>HA: AudioStop event
   else Streaming TTS (SynthesizeStart/Chunk/Stop)
     HA->>WY: SynthesizeStart event (voice config)
-    Note over WY: Initialize incremental synthesis<br/>with sentence boundary detection
+    Note over WY: Initialize incremental synthesis<br/>with pySBD-powered sentence boundary detection<br/>and up to three concurrent OpenAI TTS requests
     WY->>HA: AudioStart event
     loop Sending text chunks
       HA->>WY: SynthesizeChunk events
-      Note over WY: Accumulate text and detect<br/>complete sentences using pysbd
+      Note over WY: Accumulate text and detect<br/>complete sentences using pySBD sentence chunking<br/>while prefetching audio in parallel (max 3 concurrent requests)
       alt Complete sentences detected
         loop For each complete sentence
           WY->>OAPI: Speech synthesis request

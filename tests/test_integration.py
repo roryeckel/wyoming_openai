@@ -1,4 +1,3 @@
-import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, Mock, patch
@@ -60,7 +59,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
@@ -158,7 +156,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
@@ -221,7 +218,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
@@ -329,7 +325,6 @@ class TestIntegration:
         writer = AsyncMock()
         handler = OpenAIEventHandler(
             reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
-            client_lock=asyncio.Lock()
         )
         handler.write_event = AsyncMock()
 
