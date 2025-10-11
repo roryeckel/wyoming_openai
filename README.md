@@ -252,7 +252,28 @@ For users who want high-quality text-to-speech without API costs, Microsoft Edge
   docker compose -f docker-compose.openai-edge-tts.yml up -d
   ```
 
-#### 6. Development with Docker
+#### 6. Deploying with Chatterbox TTS
+
+For users who want high-quality local text-to-speech with voice cloning capabilities, Chatterbox TTS provides an OpenAI-compatible API with advanced voice cloning features. This setup runs completely locally and supports custom voice training.
+
+- **Chatterbox TTS Setup**:
+  - Local OpenAI-compatible text-to-speech API with voice cloning capabilities
+  - Supports custom voice samples for personalized speech generation
+  - Advanced voice library management with persistent storage
+  - FastAPI-powered with real-time status monitoring and streaming support
+  - GPU acceleration support for faster processing
+  - No external API dependencies - runs completely offline
+  - [Learn more about Chatterbox TTS API](https://github.com/travisvn/chatterbox-tts-api)
+
+- **Docker Compose Configuration**: Use the `docker-compose.chatterbox.yml` template which includes configuration for both the Wyoming OpenAI proxy and Chatterbox TTS service.
+
+- **Command**:
+  
+  ```bash
+  docker compose -f docker-compose.chatterbox.yml up -d
+  ```
+
+#### 7. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -262,9 +283,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 7. Example: Development with Additional Local Service
+#### 8. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, and `docker-compose.openai-edge-tts.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.openai-edge-tts.yml`, and `docker-compose.chatterbox.yml`.
 
 - **Command**:
   
@@ -272,7 +293,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 8. Docker Tags
+#### 9. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -286,7 +307,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
 
-#### 9. Pull Request Docker Images
+#### 10. Pull Request Docker Images
 
 For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
 
