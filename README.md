@@ -22,6 +22,7 @@ This project features a variety of examples for using cutting-edge models in bot
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
 - **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#5-deploying-with-microsoft-openai-edge-tts).
+- **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#6-deploying-with-chatterbox-tts) for details.
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
