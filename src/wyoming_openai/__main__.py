@@ -71,7 +71,7 @@ async def main():
     )
     parser.add_argument(
         "--stt-backend",
-        type=OpenAIBackend,
+        type=lambda x: OpenAIBackend[x.upper()],
         required=False,
         choices=list(OpenAIBackend),
         default=OpenAIBackend[env_stt_backend] if env_stt_backend else None,
@@ -122,7 +122,7 @@ async def main():
     )
     parser.add_argument(
         "--tts-backend",
-        type=OpenAIBackend,
+        type=lambda x: OpenAIBackend[x.upper()],
         required=False,
         choices=list(OpenAIBackend),
         default=OpenAIBackend[env_tts_backend] if env_tts_backend else None,
