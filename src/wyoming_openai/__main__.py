@@ -74,7 +74,7 @@ async def main():
         type=lambda x: OpenAIBackend[x.upper()],
         required=False,
         choices=list(OpenAIBackend),
-        default=OpenAIBackend[env_stt_backend] if env_stt_backend else None,
+        default=OpenAIBackend[env_stt_backend.upper()] if env_stt_backend else None,
         help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
@@ -125,7 +125,7 @@ async def main():
         type=lambda x: OpenAIBackend[x.upper()],
         required=False,
         choices=list(OpenAIBackend),
-        default=OpenAIBackend[env_tts_backend] if env_tts_backend else None,
+        default=OpenAIBackend[env_tts_backend.upper()] if env_tts_backend else None,
         help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
