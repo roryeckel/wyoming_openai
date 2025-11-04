@@ -18,6 +18,7 @@ from .compatibility import (
 )
 from .const import __version__
 from .handler import OpenAIEventHandler
+from .utilities import create_enum_parser
 
 
 def configure_logging(level):
@@ -29,9 +30,10 @@ def configure_logging(level):
 
 async def main():
     """Main entry point for the Wyoming OpenAI server."""
-    env_stt_backend = os.getenv("STT_BACKEND")
-    env_tts_backend = os.getenv("TTS_BACKEND")
     parser = argparse.ArgumentParser()
+
+    # Create reusable enum parser for backend arguments
+    backend_parser = create_enum_parser(OpenAIBackend)
 
     # General configuration
     parser.add_argument(
@@ -71,10 +73,10 @@ async def main():
     )
     parser.add_argument(
         "--stt-backend",
-        type=lambda x: OpenAIBackend[x.upper()],
+        type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=OpenAIBackend[env_stt_backend.upper()] if env_stt_backend else None,
+        default=backend_parser(os.getenv("STT_BACKEND")) if os.getenv("STT_BACKEND") else None,
         help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
@@ -122,10 +124,10 @@ async def main():
     )
     parser.add_argument(
         "--tts-backend",
-        type=lambda x: OpenAIBackend[x.upper()],
+        type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=OpenAIBackend[env_tts_backend.upper()] if env_tts_backend else None,
+        default=backend_parser(os.getenv("TTS_BACKEND")) if os.getenv("TTS_BACKEND") else None,
         help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
