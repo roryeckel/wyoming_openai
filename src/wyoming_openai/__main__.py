@@ -35,6 +35,22 @@ async def main():
     # Create reusable enum parser for backend arguments
     backend_parser = create_enum_parser(OpenAIBackend)
 
+    stt_backend_env = os.getenv("STT_BACKEND")
+    stt_backend_default = None
+    if stt_backend_env:
+        try:
+            stt_backend_default = backend_parser(stt_backend_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+
+    tts_backend_env = os.getenv("TTS_BACKEND")
+    tts_backend_default = None
+    if tts_backend_env:
+        try:
+            tts_backend_default = backend_parser(tts_backend_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+
     # General configuration
     parser.add_argument(
         "--uri",
@@ -76,7 +92,7 @@ async def main():
         type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=backend_parser(os.getenv("STT_BACKEND")) if os.getenv("STT_BACKEND") else None,
+        default=stt_backend_default,
         help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
@@ -127,7 +143,7 @@ async def main():
         type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=backend_parser(os.getenv("TTS_BACKEND")) if os.getenv("TTS_BACKEND") else None,
+        default=tts_backend_default,
         help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
