@@ -18,6 +18,7 @@ from .compatibility import (
 )
 from .const import __version__
 from .handler import OpenAIEventHandler
+from .utilities import create_enum_parser
 
 
 def configure_logging(level):
@@ -29,9 +30,26 @@ def configure_logging(level):
 
 async def main():
     """Main entry point for the Wyoming OpenAI server."""
-    env_stt_backend = os.getenv("STT_BACKEND")
-    env_tts_backend = os.getenv("TTS_BACKEND")
     parser = argparse.ArgumentParser()
+
+    # Create reusable enum parser for backend arguments
+    backend_parser = create_enum_parser(OpenAIBackend)
+
+    stt_backend_env = os.getenv("STT_BACKEND")
+    stt_backend_default = None
+    if stt_backend_env:
+        try:
+            stt_backend_default = backend_parser(stt_backend_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+
+    tts_backend_env = os.getenv("TTS_BACKEND")
+    tts_backend_default = None
+    if tts_backend_env:
+        try:
+            tts_backend_default = backend_parser(tts_backend_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
 
     # General configuration
     parser.add_argument(
@@ -71,10 +89,10 @@ async def main():
     )
     parser.add_argument(
         "--stt-backend",
-        type=OpenAIBackend,
+        type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=OpenAIBackend[env_stt_backend] if env_stt_backend else None,
+        default=stt_backend_default,
         help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
@@ -122,10 +140,10 @@ async def main():
     )
     parser.add_argument(
         "--tts-backend",
-        type=OpenAIBackend,
+        type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=OpenAIBackend[env_tts_backend] if env_tts_backend else None,
+        default=tts_backend_default,
         help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
     )
     parser.add_argument(
