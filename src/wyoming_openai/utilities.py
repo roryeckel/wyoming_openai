@@ -1,7 +1,8 @@
 import argparse
+from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 E = TypeVar('E', bound=Enum)
 
