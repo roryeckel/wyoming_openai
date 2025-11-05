@@ -2,12 +2,9 @@ import argparse
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
-from typing import TypeVar
-
-E = TypeVar('E', bound=Enum)
 
 
-def create_enum_parser(enum_class: type[E], case_insensitive: bool = True) -> Callable[[str], E]:
+def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = True) -> Callable[[str], E]:
     """
     Create a type-safe parser function for argparse that converts strings to enum members.
 
