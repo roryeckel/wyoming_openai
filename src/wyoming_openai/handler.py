@@ -5,7 +5,7 @@ import wave
 from dataclasses import dataclass
 
 import pysbd
-from openai import NOT_GIVEN, AsyncStream
+from openai import AsyncStream, omit
 from openai.resources.audio.transcriptions import TranscriptionCreateResponse
 from wyoming.asr import (
     Transcribe,
@@ -240,10 +240,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             transcription = await self._stt_client.audio.transcriptions.create(
                 file=self._wav_buffer,
                 model=self._current_asr_model.name,
-                temperature=self._stt_temperature or NOT_GIVEN,
-                prompt=self._stt_prompt or NOT_GIVEN,
+                temperature=self._stt_temperature if self._stt_temperature is not None else omit,
+                prompt=self._stt_prompt if self._stt_prompt is not None else omit,
                 response_format="json",
-                stream=use_streaming,
+                stream=use_streaming if use_streaming else omit,
                 extra_body=extra_body if extra_body else None
             )
 
@@ -938,8 +938,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     model=voice.model_name,
                     voice=voice.name,
                     input=text,
-                    speed=self._tts_speed or NOT_GIVEN,
-                    instructions=self._tts_instructions or NOT_GIVEN
+                    speed=self._tts_speed if self._tts_speed is not None else omit,
+                    instructions=self._tts_instructions if self._tts_instructions is not None else omit
                 ) as response:
                     async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                         audio_data += chunk
@@ -1061,8 +1061,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     model=voice.model_name,
                     voice=voice.name,
                     input=text,
-                    speed=self._tts_speed or NOT_GIVEN,
-                    instructions=self._tts_instructions or NOT_GIVEN
+                    speed=self._tts_speed if self._tts_speed is not None else omit,
+                    instructions=self._tts_instructions if self._tts_instructions is not None else omit
                 ) as response:
 
                     async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):

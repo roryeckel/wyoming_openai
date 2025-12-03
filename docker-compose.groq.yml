@@ -1,0 +1,21 @@
+services:
+  wyoming_openai:
+    image: ghcr.io/roryeckel/wyoming_openai:latest
+    container_name: wyoming_openai
+    ports:
+      - "10300:10300"
+    restart: unless-stopped
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
+      STT_OPENAI_URL: https://api.groq.com/openai/v1
+      STT_MODELS: "whisper-large-v3"
+      STT_BACKEND: "OPENAI"
+      TTS_OPENAI_URL: https://api.groq.com/openai/v1
+      TTS_MODELS: "playai-tts"
+      TTS_BACKEND: "OPENAI"
+      TTS_VOICES: "Arista-PlayAI Atlas-PlayAI Basil-PlayAI Briggs-PlayAI Calum-PlayAI Celeste-PlayAI Cheyenne-PlayAI Chip-PlayAI Cillian-PlayAI Deedee-PlayAI Fritz-PlayAI Gail-PlayAI Indigo-PlayAI Mamaw-PlayAI Mason-PlayAI Mikail-PlayAI Mitch-PlayAI Quinn-PlayAI Thunder-PlayAI"
+      TTS_SPEED: "1.0"
+    env_file:
+      - .env
