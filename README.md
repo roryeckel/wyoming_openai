@@ -18,7 +18,7 @@ This project features a variety of examples for using cutting-edge models in bot
 
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
-- **`voxtral-mini-latest`**: Mistral AI's high-quality multilingual speech transcription model, supporting up to 15 minutes of audio with excellent accuracy, available via [Mistral AI Voxtral](#5-deploying-with-mistral-ai-voxtral).
+- **`voxtral-mini-latest`**: Mistral AI's multilingual Voxtral ASR, built for long-form audio (32k token context) and tested on up to ~30 minutes per file, available via [Mistral AI](#5-deploying-with-mistral-ai-voxtral) or self-hosted open weights.
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
@@ -236,12 +236,12 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
 
 #### 5. Deploying with Mistral AI Voxtral
 
-For users who want high-quality multilingual speech transcription using Mistral AI's Voxtral model, this setup provides an excellent STT-only solution with support for up to 15 minutes of audio and excellent accuracy across multiple languages.
+For users who want high-quality multilingual speech transcription using Mistral AI's Voxtral model, this setup provides an excellent STT-only solution and strong multilingual accuracy with an option for self-hosting the model weights.
 
 - **Mistral AI Voxtral Setup**:
-  - Uses Mistral AI's Voxtral speech transcription API (requires Mistral API key)
+  - Uses Mistral AI's Voxtral speech transcription API (requires Mistral API key, free tier available)
   - Supports multilingual transcription with high accuracy
-  - Supports audio files up to 15 minutes in length
+  - Designed for long-form inputs (32k token context)
   - STT-only service (no TTS capabilities - combine with other services for TTS)
   - OpenAI-compatible API endpoints for seamless integration
   - [Learn more about Mistral AI](https://mistral.ai/)

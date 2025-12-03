@@ -11,7 +11,7 @@ services:
       WYOMING_LANGUAGES: en
       STT_OPENAI_URL: https://api.mistral.ai/v1
       STT_MODELS: "voxtral-mini-latest"
-      STT_BACKEND: "MISTRAL"
+      STT_BACKEND: "OPENAI"
       # Voxtral doesn't provide TTS capabilities, only transcription
       # You can combine this with other services for TTS if needed
     env_file:
