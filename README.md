@@ -18,12 +18,14 @@ This project features a variety of examples for using cutting-edge models in bot
 
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
+- **`voxtral-mini-latest`**: Mistral AI's multilingual Voxtral ASR, built for long-form audio (32k token context) and tested on up to ~30 minutes per file, available via [Mistral AI](#5-deploying-with-mistral-ai-voxtral) or self-hosted open weights.
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
-- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#5-deploying-with-microsoft-openai-edge-tts).
-- **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#6-deploying-with-chatterbox-tts) for details.
-- **`playai-tts`**: PlayAI Dialog v1.0, a transformer-based neural TTS model with support for diverse accents and styles, available via [Groq](#7-deploying-with-groq) for ultra-fast inference.
+- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#6-deploying-with-microsoft-openai-edge-tts).
+- **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#7-deploying-with-chatterbox-tts) for details.
+- **`playai-tts`**: PlayAI Dialog v1.0, a transformer-based neural TTS model with support for diverse accents and styles, available via [Groq](#8-deploying-with-groq) for ultra-fast inference.
+
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
@@ -234,7 +236,27 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
   docker compose -f docker-compose.speaches.yml -f docker-compose.kokoro-fastapi.yml up -d
   ```
 
-#### 5. Deploying with Microsoft OpenAI Edge TTS
+#### 5. Deploying with Mistral AI Voxtral
+
+For users who want high-quality multilingual speech transcription using Mistral AI's Voxtral model, this setup provides an excellent STT-only solution and strong multilingual accuracy with an option for self-hosting the model weights.
+
+- **Mistral AI Voxtral Setup**:
+  - Uses Mistral AI's Voxtral speech transcription API (requires Mistral API key, free tier available)
+  - Supports multilingual transcription with high accuracy
+  - Designed for long-form inputs (32k token context)
+  - STT-only service (no TTS capabilities - combine with other services for TTS)
+  - OpenAI-compatible API endpoints for seamless integration
+  - [Learn more about Mistral AI](https://docs.mistral.ai/capabilities/audio_transcription)
+
+- **Docker Compose Configuration**: Use the `docker-compose.voxtral.yml` template which includes configuration for the Wyoming OpenAI proxy with Mistral AI Voxtral backend.
+
+- **Command**:
+  
+  ```bash
+  docker compose -f docker-compose.voxtral.yml up -d
+  ```
+
+#### 6. Deploying with Microsoft OpenAI Edge TTS
 
 For users who want high-quality text-to-speech without API costs, Microsoft Edge TTS provides excellent neural voices through a free cloud service. This setup requires no API keys and offers a wide variety of natural-sounding voices.
 
@@ -254,7 +276,7 @@ For users who want high-quality text-to-speech without API costs, Microsoft Edge
   docker compose -f docker-compose.openai-edge-tts.yml up -d
   ```
 
-#### 6. Deploying with Chatterbox TTS
+#### 7. Deploying with Chatterbox TTS
 
 For users who want high-quality local text-to-speech with voice cloning capabilities, Chatterbox TTS provides an OpenAI-compatible API with advanced voice cloning features. This setup runs completely locally and supports custom voice training.
 
@@ -275,7 +297,7 @@ For users who want high-quality local text-to-speech with voice cloning capabili
   docker compose -f docker-compose.chatterbox.yml up -d
   ```
 
-#### 7. Deploying with Groq
+#### 8. Deploying with Groq
 
 For users who want to use Groq's fast inference cloud API, this setup provides access to high-performance Whisper models for speech recognition and PlayAI voices for text-to-speech. Groq offers extremely fast inference speeds with their LPU (Language Processing Unit) architecture and a generous free tier that supports up to 2,000 STT requests and 100 TTS requests per day.
 
@@ -298,7 +320,7 @@ For users who want to use Groq's fast inference cloud API, this setup provides a
   docker compose -f docker-compose.groq.yml up -d
   ```
 
-#### 8. Development with Docker
+#### 9. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -308,9 +330,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 9. Example: Development with Additional Local Service
+#### 10. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, and `docker-compose.chatterbox.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, and `docker-compose.chatterbox.yml`.
 
 - **Command**:
   
@@ -318,7 +340,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 10. Docker Tags
+#### 11. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -332,7 +354,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
 
-#### 11. Pull Request Docker Images
+#### 12. Pull Request Docker Images
 
 For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
 
