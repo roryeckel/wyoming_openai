@@ -244,7 +244,7 @@ For users who want high-quality multilingual speech transcription using Mistral 
   - Designed for long-form inputs (32k token context)
   - STT-only service (no TTS capabilities - combine with other services for TTS)
   - OpenAI-compatible API endpoints for seamless integration
-  - [Learn more about Mistral AI](https://mistral.ai/)
+  - [Learn more about Mistral AI](https://docs.mistral.ai/capabilities/audio_transcription)
 
 - **Docker Compose Configuration**: Use the `docker-compose.voxtral.yml` template which includes configuration for the Wyoming OpenAI proxy with Mistral AI Voxtral backend.
 
