@@ -191,7 +191,7 @@ class TestHelperFunctions:
         assert "whisper-1" in result
         assert "OpenAI Whisper" in result
         assert "OpenAI" in result
-        assert "https://openai.com" in result
+        assert model.attribution.url == "https://openai.com"
         assert "en, fr" in result
         assert "Yes" in result  # Streaming: Yes
 
@@ -212,7 +212,7 @@ class TestHelperFunctions:
         assert "alloy" in result
         assert "Alloy voice" in result
         assert "OpenAI" in result
-        assert "https://openai.com" in result
+        assert voice.attribution.url == "https://openai.com"
         assert "en" in result
         assert "tts-1" in result
 
