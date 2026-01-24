@@ -24,7 +24,7 @@ This project features a variety of examples for using cutting-edge models in bot
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
 - **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#6-deploying-with-microsoft-openai-edge-tts).
 - **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#7-deploying-with-chatterbox-tts) for details.
-- **`playai-tts`**: PlayAI Dialog v1.0, a transformer-based neural TTS model with support for diverse accents and styles, available via [Groq](#8-deploying-with-groq) for ultra-fast inference.
+- **`orpheus`**: Canopy Labs' open-source LLM-based TTS built on Llama 3B, trained on 100,000+ hours of English speech with human-like intonation and emotion control via tags like `[cheerful]` or `[whisper]`, available via [Groq](#8-deploying-with-groq) for ultra-fast inference.
 
 ## Objectives
 
@@ -299,12 +299,13 @@ For users who want high-quality local text-to-speech with voice cloning capabili
 
 #### 8. Deploying with Groq
 
-For users who want to use Groq's fast inference cloud API, this setup provides access to high-performance Whisper models for speech recognition and PlayAI voices for text-to-speech. Groq offers extremely fast inference speeds with their LPU (Language Processing Unit) architecture and a generous free tier that supports up to 2,000 STT requests and 100 TTS requests per day.
+For users who want to use Groq's fast inference cloud API, this setup provides access to high-performance Whisper models for speech recognition and Orpheus TTS for text-to-speech. Groq offers extremely fast inference speeds with their LPU (Language Processing Unit) architecture and a generous free tier that supports up to 2,000 STT requests and 100 TTS requests per day.
 
 - **Groq Setup**:
   - Cloud-based OpenAI-compatible API with ultra-fast inference
   - Supports Whisper Large V3 for highly accurate speech recognition
-  - Provides access to PlayAI's natural-sounding TTS voices
+  - Provides access to [Orpheus TTS](https://github.com/canopyai/Orpheus-TTS) by Canopy Labs - an open-source LLM-based TTS with human-like intonation
+  - Orpheus supports emotion control via inline tags like `[cheerful]` or `[whisper]` embedded in the input text; for Home Assistant, this means prompting your LLM to include these tags in its responses
   - Generous free tier: 2,000 STT requests/day (up to 8 hours of audio) and 100 TTS requests/day
   - Requires Groq API key (sign up at [groq.com](https://groq.com))
   - No local infrastructure required
