@@ -175,4 +175,5 @@ cython_debug/
 !.vscode/launch.json
 
 # AI
-.claude/
+.claude/*
+!.claude/skills/
