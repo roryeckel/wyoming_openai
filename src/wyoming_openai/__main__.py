@@ -26,7 +26,7 @@ def configure_logging(level):
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f'Invalid log level: {level}')
-    logging.basicConfig(level=numeric_level)
+    logging.basicConfig(level=numeric_level, force=True)
 
 async def main():
     """Main entry point for the Wyoming OpenAI server."""

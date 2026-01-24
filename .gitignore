@@ -171,7 +171,8 @@ cython_debug/
 .pypirc
 
 # VSCode settings
-.vscode/
+.vscode/*
+!.vscode/launch.json
 
 # AI
 .claude/

@@ -582,6 +582,7 @@ class TestOpenAIEventHandlerComprehensive:
             model='tts-1',
             voice='alloy',
             input='Hello world',
+            response_format='wav',
             speed=1.0,
             instructions='Test instructions'
         )
