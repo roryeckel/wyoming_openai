@@ -18,11 +18,14 @@ This project features a variety of examples for using cutting-edge models in bot
 
 - **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
+- **`voxtral-mini-latest`**: Mistral AI's multilingual Voxtral ASR, built for long-form audio (32k token context) and tested on up to ~30 minutes per file, available via [Mistral AI](#5-deploying-with-mistral-ai-voxtral) or self-hosted open weights.
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
-- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#5-deploying-with-microsoft-openai-edge-tts).
-- **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#6-deploying-with-chatterbox-tts) for details.
+- **`Microsoft Edge TTS`**: High-quality neural voices from Microsoft's free cloud TTS API, no API key required, available via [OpenAI Edge TTS](#6-deploying-with-microsoft-openai-edge-tts).
+- **`Chatterbox TTS`**: Self-hosted neural speech synthesis with voice cloning, easily deployable via included Docker Compose. See [Chatterbox TTS deployment guide](#7-deploying-with-chatterbox-tts) for details.
+- **`orpheus`**: Canopy Labs' open-source LLM-based TTS built on Llama 3B, trained on 100,000+ hours of English speech with human-like intonation and emotion control via tags like `[cheerful]` or `[whisper]`, available via [Groq](#8-deploying-with-groq) for ultra-fast inference.
+
 ## Objectives
 
 1. **Wyoming Server, OpenAI-compatible Client**: Function as an intermediary between the Wyoming protocol and OpenAI's ASR and TTS services.
@@ -233,7 +236,27 @@ For users preferring a setup that leverages Kokoro-FastAPI for TTS and Speaches 
   docker compose -f docker-compose.speaches.yml -f docker-compose.kokoro-fastapi.yml up -d
   ```
 
-#### 5. Deploying with Microsoft OpenAI Edge TTS
+#### 5. Deploying with Mistral AI Voxtral
+
+For users who want high-quality multilingual speech transcription using Mistral AI's Voxtral model, this setup provides an excellent STT-only solution and strong multilingual accuracy with an option for self-hosting the model weights.
+
+- **Mistral AI Voxtral Setup**:
+  - Uses Mistral AI's Voxtral speech transcription API (requires Mistral API key, free tier available)
+  - Supports multilingual transcription with high accuracy
+  - Designed for long-form inputs (32k token context)
+  - STT-only service (no TTS capabilities - combine with other services for TTS)
+  - OpenAI-compatible API endpoints for seamless integration
+  - [Learn more about Mistral AI](https://docs.mistral.ai/capabilities/audio_transcription)
+
+- **Docker Compose Configuration**: Use the `docker-compose.voxtral.yml` template which includes configuration for the Wyoming OpenAI proxy with Mistral AI Voxtral backend.
+
+- **Command**:
+  
+  ```bash
+  docker compose -f docker-compose.voxtral.yml up -d
+  ```
+
+#### 6. Deploying with Microsoft OpenAI Edge TTS
 
 For users who want high-quality text-to-speech without API costs, Microsoft Edge TTS provides excellent neural voices through a free cloud service. This setup requires no API keys and offers a wide variety of natural-sounding voices.
 
@@ -253,7 +276,7 @@ For users who want high-quality text-to-speech without API costs, Microsoft Edge
   docker compose -f docker-compose.openai-edge-tts.yml up -d
   ```
 
-#### 6. Deploying with Chatterbox TTS
+#### 7. Deploying with Chatterbox TTS
 
 For users who want high-quality local text-to-speech with voice cloning capabilities, Chatterbox TTS provides an OpenAI-compatible API with advanced voice cloning features. This setup runs completely locally and supports custom voice training.
 
@@ -274,7 +297,31 @@ For users who want high-quality local text-to-speech with voice cloning capabili
   docker compose -f docker-compose.chatterbox.yml up -d
   ```
 
-#### 7. Development with Docker
+#### 8. Deploying with Groq
+
+For users who want to use Groq's fast inference cloud API, this setup provides access to high-performance Whisper models for speech recognition and Orpheus TTS for text-to-speech. Groq offers extremely fast inference speeds with their LPU (Language Processing Unit) architecture and a generous free tier that supports up to 2,000 STT requests and 100 TTS requests per day.
+
+- **Groq Setup**:
+  - Cloud-based OpenAI-compatible API with ultra-fast inference
+  - Supports Whisper Large V3 for highly accurate speech recognition
+  - Provides access to [Orpheus TTS](https://github.com/canopyai/Orpheus-TTS) by Canopy Labs - an open-source LLM-based TTS with human-like intonation
+  - Orpheus supports emotion control via inline tags like `[cheerful]` or `[whisper]` embedded in the input text; for Home Assistant, this means prompting your LLM to include these tags in its responses
+  - Generous free tier: 2,000 STT requests/day (up to 8 hours of audio) and 100 TTS requests/day
+  - Requires Groq API key (sign up at [groq.com](https://groq.com))
+  - No local infrastructure required
+  - [Learn more about Groq](https://groq.com/)
+
+- **Docker Compose Configuration**: Use the `docker-compose.groq.yml` template which includes configuration for the Wyoming OpenAI proxy connecting to Groq's API endpoints.
+
+- **Environment Variables**: Create a `.env` file with your Groq API key as `STT_OPENAI_KEY` and/or `TTS_OPENAI_KEY`.
+
+- **Command**:
+
+  ```bash
+  docker compose -f docker-compose.groq.yml up -d
+  ```
+
+#### 9. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -284,9 +331,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 8. Example: Development with Additional Local Service
+#### 10. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.openai-edge-tts.yml`, and `docker-compose.chatterbox.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, and `docker-compose.chatterbox.yml`.
 
 - **Command**:
   
@@ -294,7 +341,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 9. Docker Tags
+#### 11. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -302,13 +349,13 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`main`**: This tag points to the latest commit on the main code branch. It is suitable for users who want to experiment with the most up-to-date features and changes, but may include unstable or experimental code.
 
-- **`major.minor.patch version`**: Specific version tags (e.g., `0.3.8`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
+- **`major.minor.patch version`**: Specific version tags (e.g., `0.4.0`) correspond to specific stable releases of the Wyoming OpenAI proxy server. These tags are ideal for users who need a consistent, reproducible environment and want to avoid breaking changes introduced in newer versions.
 
-- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.3`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
+- **`major.minor version`**: Tags that follow the `major.minor` format (e.g., `0.4`) represent a range of patch-level updates within the same minor version series. These tags are useful for users who want to stay updated with bug fixes and minor improvements without upgrading to a new major or minor version.
 
 - **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
 
-#### 10. Pull Request Docker Images
+#### 12. Pull Request Docker Images
 
 For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
 
