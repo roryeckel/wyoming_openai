@@ -22,7 +22,7 @@ services:
 
   speaches:
     container_name: speaches
-    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
     restart: unless-stopped
     ports:
       - "8000:8000"
