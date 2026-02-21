@@ -176,4 +176,4 @@ cython_debug/
 
 # AI
 .claude/*
-!.claude/skills/
+!.claude/skills
