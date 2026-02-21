@@ -20,42 +20,19 @@ services:
       speaches:
         condition: service_healthy
 
-  # https://speaches.ai/usage/text-to-speech/
-  init-speaches:
-    image: ghcr.io/speaches-ai/speaches:latest-cuda
-    container_name: init-speaches
-    environment:
-      - SPEACHES_BASE_URL=http://speaches:8000
-    command: >
-      /bin/bash -c '
-        curl -LsSf https://astral.sh/uv/install.sh | sh # https://github.com/speaches-ai/speaches/issues/416
-        uvx speaches-cli model download speaches-ai/Kokoro-82M-v1.0-ONNX
-        uvx speaches-cli model download Systran/faster-distil-whisper-large-v3
-      '
-    volumes:
-      - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
-    runtime: nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [ gpu ]
-    depends_on:
-      speaches: # Seems backwards but the API is not yet available
-          condition: service_healthy
-
   speaches:
     container_name: speaches
-    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      - enable_ui=False
-      - log_level=info
-      - WHISPER__MODEL=Systran/faster-distil-whisper-large-v3
-      - WHISPER__compute_type=int8_float32
+      enable_ui: False
+      log_level: info
+      WHISPER__MODEL: Systran/faster-distil-whisper-large-v3
+      WHISPER__compute_type: int8_float32
+      preload_models: '["Systran/faster-distil-whisper-large-v3", "speaches-ai/Kokoro-82M-v1.0-ONNX"]'
+      SPEACHES_BASE_URL: http://speaches:8000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
