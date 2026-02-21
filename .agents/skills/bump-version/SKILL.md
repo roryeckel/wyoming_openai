@@ -3,7 +3,6 @@ name: bump-version
 description: Bump the version number of wyoming-openai.
 argument-hint: "[patch|minor|major|estimate]"
 disable-model-invocation: true
-allowed-tools: Read, Edit, AskUserQuestion, Bash, Grep
 ---
 
 Bump version $ARGUMENTS.

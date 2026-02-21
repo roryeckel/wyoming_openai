@@ -80,6 +80,31 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 
 4. **Configure Environment Variables or Command Line Arguments**
 
+### Note on Symlinks
+
+This repository uses symbolic links to keep AI agent configuration files tool-agnostic:
+
+- `CLAUDE.md` → `AGENTS.md`
+- `.claude/skills` → `.agents/skills`
+
+On **Linux and macOS**, symlinks work out of the box. On **Windows**, git may check out symlinks as plain text files containing the target path instead of actual symlinks. If this happens, the AI agent configuration files will not function correctly.
+
+To enable symlink support on Windows:
+
+1. Enable **Developer Mode** in Windows Settings (Settings → System → For developers)
+2. Either clone with symlinks enabled:
+   ```bash
+   git clone -c core.symlinks=true https://github.com/roryeckel/wyoming-openai.git
+   ```
+   Or, if you've already cloned, enable symlinks and re-checkout:
+   ```bash
+   git config core.symlinks true
+   git checkout -- .
+   ```
+   > **Warning:** `git checkout -- .` will reset all working tree files — commit or stash any uncommitted changes first.
+
+You can verify symlinks are working by checking that `CLAUDE.md` contains the full project instructions rather than just the text `AGENTS.md`.
+
 ## Installation from PyPI [![Publish to PyPI](https://github.com/roryeckel/wyoming-openai/actions/workflows/publish-to-pypi.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/publish-to-pypi.yml)
 
 Since v0.3.2, `wyoming-openai` is now available on [PyPI](https://pypi.org/project/wyoming-openai/). To install the latest release, run:
