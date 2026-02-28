@@ -97,7 +97,7 @@ async def main():
     parser.add_argument(
         "--stt-temperature",
         type=float,
-        default=float(os.getenv("STT_TEMPERATURE")) if os.getenv("STT_TEMPERATURE") else None,
+        default=float(_v) if (_v := os.getenv("STT_TEMPERATURE")) else None,
         help="Sampling temperature for speech-to-text (0.0 to 1.0, default is None for OpenAI default)",
     )
     parser.add_argument("--stt-prompt", default=os.getenv("STT_PROMPT", None), help="Optional prompt for STT requests")
@@ -141,7 +141,7 @@ async def main():
     parser.add_argument(
         "--tts-speed",
         type=float,
-        default=float(os.getenv("TTS_SPEED")) if os.getenv("TTS_SPEED") else None,
+        default=float(_v) if (_v := os.getenv("TTS_SPEED")) else None,
         help="Speed of the TTS output (0.25 to 4.0, default is None for OpenAI default)",
     )
     parser.add_argument(
@@ -156,13 +156,13 @@ async def main():
     parser.add_argument(
         "--tts-streaming-min-words",
         type=int,
-        default=int(os.getenv("TTS_STREAMING_MIN_WORDS")) if os.getenv("TTS_STREAMING_MIN_WORDS") else None,
+        default=int(_v) if (_v := os.getenv("TTS_STREAMING_MIN_WORDS")) else None,
         help="Minimum words per chunk for streaming TTS (optional)",
     )
     parser.add_argument(
         "--tts-streaming-max-chars",
         type=int,
-        default=int(os.getenv("TTS_STREAMING_MAX_CHARS")) if os.getenv("TTS_STREAMING_MAX_CHARS") else None,
+        default=int(_v) if (_v := os.getenv("TTS_STREAMING_MAX_CHARS")) else None,
         help="Maximum characters per chunk for streaming TTS (optional)",
     )
 

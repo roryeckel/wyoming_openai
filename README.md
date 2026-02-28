@@ -546,6 +546,24 @@ To use Ruff during development:
 
 A GitHub Action automatically runs Ruff on all pull requests and branch pushes to ensure code quality.
 
+### Type Checking (Pyright)
+
+This project uses [Pyright](https://github.com/microsoft/pyright) for static type checking. Pyright is a fast, full-featured Python type checker from Microsoft that helps catch type errors before runtime.
+
+To use Pyright during development:
+
+1. Install development dependencies:
+   ```bash
+   pip install -e ".[dev]"
+   ```
+
+2. Run Pyright to type-check your code:
+   ```bash
+   pyright
+   ```
+
+Pyright configuration is defined in `pyproject.toml` under `[tool.pyright]`.
+
 ### Testing (Pytest) [![Test](https://github.com/roryeckel/wyoming-openai/actions/workflows/test.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/test.yml)
 
 This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
