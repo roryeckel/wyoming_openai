@@ -34,15 +34,15 @@ def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = Tr
         >>> args.color == Color.RED
         True
     """
+
     def parse_enum(value: str) -> E:
         lookup_value = value.upper() if case_insensitive else value
         try:
             return enum_class[lookup_value]
         except KeyError as exc:
-            valid_options = ', '.join(member.name for member in enum_class)
+            valid_options = ", ".join(member.name for member in enum_class)
             raise argparse.ArgumentTypeError(
-                f"Invalid {enum_class.__name__}: '{value}'. "
-                f"Valid options are: {valid_options}"
+                f"Invalid {enum_class.__name__}: '{value}'. Valid options are: {valid_options}"
             ) from exc
 
     return parse_enum
@@ -52,7 +52,8 @@ class NamedBytesIO(BytesIO):
     """
     A subclass of BytesIO that adds a 'name' attribute to the file-like object.
     """
-    def __init__(self, *args, name='audio.wav', **kwargs):
+
+    def __init__(self, *args, name="audio.wav", **kwargs):
         """
         Initialize a new NamedBytesIO instance.
 

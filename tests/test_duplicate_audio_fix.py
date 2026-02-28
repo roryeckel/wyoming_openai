@@ -17,7 +17,6 @@ from wyoming_openai.handler import OpenAIEventHandler
 
 
 class TestDuplicateAudioFix:
-
     @pytest.fixture
     def mock_tts_client(self):
         """Mock TTS client that tracks how many times synthesis is called."""
@@ -25,9 +24,11 @@ class TestDuplicateAudioFix:
 
         # Mock the streaming response
         mock_response = AsyncMock()
+
         async def async_iter_bytes(*args, **kwargs):
             for chunk in [b"fake_audio_chunk_1", b"fake_audio_chunk_2", b"fake_audio_chunk_3"]:
                 yield chunk
+
         mock_response.iter_bytes = async_iter_bytes
 
         # Mock the async context manager properly
@@ -50,7 +51,7 @@ class TestDuplicateAudioFix:
             attribution=Attribution(name="Test", url="http://test.com"),
             installed=True,
             languages=["en"],
-            version="1.0"
+            version="1.0",
         )
 
         tts_program = TtsProgram(
@@ -60,7 +61,7 @@ class TestDuplicateAudioFix:
             installed=True,
             version="1.0",
             voices=[voice],
-            supports_synthesize_streaming=False  # Non-streaming voice
+            supports_synthesize_streaming=False,  # Non-streaming voice
         )
 
         return Info(tts=[tts_program])
@@ -117,7 +118,9 @@ class TestDuplicateAudioFix:
 
         # ASSERTION: TTS synthesis should only be called ONCE, not twice
         synthesis_calls = mock_tts_client.audio.speech.with_streaming_response.create.call_count
-        assert synthesis_calls == 1, f"Expected 1 synthesis call, but got {synthesis_calls}. This indicates duplicate audio synthesis!"
+        assert synthesis_calls == 1, (
+            f"Expected 1 synthesis call, but got {synthesis_calls}. This indicates duplicate audio synthesis!"
+        )
 
     @pytest.mark.asyncio
     async def test_standalone_synthesize_works_normally(self, handler, mock_tts_client):

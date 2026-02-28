@@ -32,11 +32,13 @@ from .utilities import NamedBytesIO
 
 _LOGGER = logging.getLogger(__name__)
 
+
 def _truncate_for_log(text: str, max_length: int = 100) -> str:
     """Truncate text for logging, adding ellipsis only if truncated."""
     if len(text) <= max_length:
         return text
     return text[:max_length] + "..."
+
 
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
@@ -49,12 +51,14 @@ TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when str
 @dataclass(frozen=True)
 class TtsStreamResult:
     """Container for TTS streaming outcomes."""
+
     streamed: bool
     audio: bytes | None = None
 
 
 class TtsStreamError(Exception):
     """Raised when TTS streaming fails for a specific text chunk."""
+
     def __init__(self, message: str, chunk_preview: str, voice: str):
         super().__init__(message)
         self.chunk_preview = chunk_preview
@@ -150,12 +154,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
             if event.data:
-                if 'rate' in event.data:
-                    sample_rate = event.data['rate']
-                if 'width' in event.data:
-                    audio_width = event.data['width']
-                if 'channels' in event.data:
-                    audio_channels = event.data['channels']
+                if "rate" in event.data:
+                    sample_rate = event.data["rate"]
+                if "width" in event.data:
+                    audio_width = event.data["width"]
+                if "channels" in event.data:
+                    audio_channels = event.data["channels"]
             await self._handle_audio_start(sample_rate, audio_width, audio_channels)
             return True
 
@@ -196,13 +200,14 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
         """Handle start of audio stream"""
         self._is_recording = True
-        self._wav_buffer = NamedBytesIO(name='recording.wav')
+        self._wav_buffer = NamedBytesIO(name="recording.wav")
         self._wav_write_buffer = wave.open(self._wav_buffer, "wb")
         self._wav_write_buffer.setnchannels(audio_channels)
         self._wav_write_buffer.setsampwidth(audio_width)
         self._wav_write_buffer.setframerate(sample_rate)
-        _LOGGER.info("Recording started at %d Hz, %d channels, %d bytes per sample",
-                     sample_rate, audio_channels, audio_width)
+        _LOGGER.info(
+            "Recording started at %d Hz, %d channels, %d bytes per sample", sample_rate, audio_channels, audio_width
+        )
 
     async def _handle_audio_chunk(self, chunk: AudioChunk) -> None:
         """Handle audio chunk"""
@@ -233,7 +238,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             # Prepare extra_body for SPEACHES backend
             extra_body = {}
-            if hasattr(self._stt_client, 'backend') and self._stt_client.backend == OpenAIBackend.SPEACHES:
+            if hasattr(self._stt_client, "backend") and self._stt_client.backend == OpenAIBackend.SPEACHES:
                 extra_body["vad_filter"] = False
                 _LOGGER.debug("Adding vad_filter=False for SPEACHES backend")
 
@@ -244,7 +249,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 prompt=self._stt_prompt if self._stt_prompt is not None else omit,
                 response_format="json",
                 stream=use_streaming if use_streaming else omit,
-                extra_body=extra_body if extra_body else None
+                extra_body=extra_body if extra_body else None,
             )
 
             await self.write_event(TranscriptStart().event())
@@ -257,13 +262,13 @@ class OpenAIEventHandler(AsyncEventHandler):
                         if chunk.delta:
                             full_text += chunk.delta
                             _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
-                            await self.write_event(
-                                TranscriptChunk(text=chunk.delta).event()
-                            )
+                            await self.write_event(TranscriptChunk(text=chunk.delta).event())
                 if full_text:
                     _LOGGER.info("Successfully transcribed stream: %s", full_text)
                 else:
-                    _LOGGER.warning("Received empty transcription from stream. If this is unexpected, please check your STT_STREAMING_MODELS configuration.")
+                    _LOGGER.warning(
+                        "Received empty transcription from stream. If this is unexpected, please check your STT_STREAMING_MODELS configuration."
+                    )
                 await self.write_event(Transcript(text=full_text).event())
 
             elif isinstance(transcription, TranscriptionCreateResponse):
@@ -308,7 +313,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         for program in self._wyoming_info.tts:
             for voice in program.voices:
                 if voice.name == voice_name:
-                    return getattr(program, 'supports_synthesize_streaming', False)
+                    return getattr(program, "supports_synthesize_streaming", False)
         return False
 
     def _get_pysbd_language(self, language: str | None) -> str:
@@ -322,10 +327,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             str: pysbd-compatible language code, defaults to 'en' if unsupported
         """
         if not language:
-            return 'en'
+            return "en"
 
         # Extract base language code from potential BCP-47 tags (e.g., 'en-US' -> 'en')
-        base_lang = language[:2].lower() if len(language) >= 2 else 'en'
+        base_lang = language[:2].lower() if len(language) >= 2 else "en"
 
         # Test if the language is supported by trying to create a segmenter
         try:
@@ -333,9 +338,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             return base_lang
         except (ValueError, KeyError):
             _LOGGER.warning(f"Language '{base_lang}' not supported by pysbd, using English")
-            return 'en'
+            return "en"
 
-    def _chunk_text_for_streaming(self, text: str, min_words: int | None = None, max_chars: int | None = None, language: str | None = None) -> list[str]:
+    def _chunk_text_for_streaming(
+        self, text: str, min_words: int | None = None, max_chars: int | None = None, language: str | None = None
+    ) -> list[str]:
         """
         Chunk text into meaningful segments using pySBD sentence segmentation.
 
@@ -387,7 +394,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         word_count = len(text.split())
         return word_count >= min_words
 
-
     async def _process_ready_sentences(self, sentences: list[str], language: str | None = None) -> bool:
         """
         Process complete sentences for immediate TTS synthesis with concurrent requests.
@@ -436,8 +442,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                         f"sentence_{i}",
                         asyncio.create_task(
                             self._get_tts_audio_stream(sentence, voice, task_id=f"sentence_{i}"),
-                            name=f"incremental_sentence_{i}"
-                        )
+                            name=f"incremental_sentence_{i}",
+                        ),
                     )
                     for i, sentence in enumerate(valid_sentences)
                 ]
@@ -509,7 +515,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.exception("Error processing ready sentences: %s", e)
             return await self._abort_synthesis()
 
-
     async def _stream_tts_audio_incremental(self, text: str, voice: TtsVoiceModel) -> float | None:
         """
         Stream TTS audio directly to Wyoming for incremental synthesis.
@@ -525,10 +530,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             float | None: Final timestamp after streaming, or None on error.
         """
         timestamp = await self._stream_tts_audio(
-            voice=voice,
-            text=text,
-            send_audio_start=(not self._audio_started),
-            start_timestamp=self._current_timestamp
+            voice=voice, text=text, send_audio_start=(not self._audio_started), start_timestamp=self._current_timestamp
         )
 
         if timestamp is not None:
@@ -536,7 +538,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             self._audio_started = True
 
         return timestamp
-
 
     async def _abort_synthesis(self) -> bool:
         """Abort the current synthesis session, emitting stop events and resetting state."""
@@ -584,7 +585,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Check if a language is supported by a TTS voice"""
         return not voice.languages or language in voice.languages
 
-    def _validate_tts_voice_and_language(self, requested_voice: str | None, requested_language: str | None) -> TtsVoiceModel | None:
+    def _validate_tts_voice_and_language(
+        self, requested_voice: str | None, requested_language: str | None
+    ) -> TtsVoiceModel | None:
         """
         Validate and get a TTS voice by name and language.
 
@@ -610,14 +613,18 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _validate_tts_language(self, language: str | None, voice: TtsVoice) -> bool:
         """Validate if a language is supported by a TTS voice. Returns True if supported. If no language is specified, also returns True."""
         if language and not self._is_tts_language_supported(language, voice):
-            _LOGGER.error(f"Language {language} is not supported for voice {voice.name}. Available languages: {voice.languages}")
+            _LOGGER.error(
+                f"Language {language} is not supported for voice {voice.name}. Available languages: {voice.languages}"
+            )
             return False
         return True
 
     def _log_unsupported_voice(self, requested_voice: str | None) -> None:
         """Log an error message if a voice is not supported"""
         if requested_voice:
-            _LOGGER.error(f"Voice {requested_voice} is not supported. Available voices: {[voice.name for program in self._wyoming_info.tts for voice in program.voices]}")
+            _LOGGER.error(
+                f"Voice {requested_voice} is not supported. Available voices: {[voice.name for program in self._wyoming_info.tts for voice in program.voices]}"
+            )
         else:
             _LOGGER.error("No TTS voices specified")
 
@@ -726,14 +733,17 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Keep only the last sentence in the accumulator
             self._text_accumulator = sentences[-1]
 
-            _LOGGER.info("Detected %d ready sentences for immediate synthesis: %s",
-                        len(ready_sentences),
-                        [_truncate_for_log(s, 30) for s in ready_sentences])
+            _LOGGER.info(
+                "Detected %d ready sentences for immediate synthesis: %s",
+                len(ready_sentences),
+                [_truncate_for_log(s, 30) for s in ready_sentences],
+            )
             if not await self._process_ready_sentences(ready_sentences, requested_language):
                 return False
         else:
-            _LOGGER.debug("No complete sentences ready yet, accumulator has: '%s'",
-                         _truncate_for_log(self._text_accumulator))
+            _LOGGER.debug(
+                "No complete sentences ready yet, accumulator has: '%s'", _truncate_for_log(self._text_accumulator)
+            )
 
         return True
 
@@ -748,8 +758,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Process any remaining text in the accumulator (even if it's incomplete)
         # This is the final text, so we process it regardless of sentence completion
         if self._text_accumulator.strip():
-            _LOGGER.info("Processing final remaining text: '%s'",
-                        _truncate_for_log(self._text_accumulator))
+            _LOGGER.info("Processing final remaining text: '%s'", _truncate_for_log(self._text_accumulator))
             requested_language = self._synthesis_voice.language if self._synthesis_voice else None
             if not await self._process_ready_sentences([self._text_accumulator], requested_language):
                 return False
@@ -771,7 +780,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         if self._audio_started:
             await self.write_event(AudioStop(timestamp=int(self._current_timestamp)).event())
             await self.write_event(SynthesizeStopped().event())
-            _LOGGER.info("Successfully completed incremental streaming synthesis, final timestamp: %.2f", self._current_timestamp)
+            _LOGGER.info(
+                "Successfully completed incremental streaming synthesis, final timestamp: %.2f", self._current_timestamp
+            )
             self._audio_started = False  # Reset for next session
             self._current_timestamp = 0  # Reset for next session
             self._pysbd_segmenters.clear()  # Clear segmenter cache
@@ -803,10 +814,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             if use_streaming:
                 # Chunk text for streaming synthesis
                 chunks = self._chunk_text_for_streaming(
-                    full_text,
-                    self._tts_streaming_min_words,
-                    self._tts_streaming_max_chars,
-                    requested_language
+                    full_text, self._tts_streaming_min_words, self._tts_streaming_max_chars, requested_language
                 )
                 _LOGGER.debug("Text chunked into %d parts for streaming synthesis", len(chunks))
 
@@ -817,9 +825,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     (
                         f"fallback_chunk_{i}",
                         asyncio.create_task(
-                            self._get_tts_audio_stream(chunk, voice, task_id=f"fallback_chunk_{i}"),
-                            name=f"chunk_{i}"
-                        )
+                            self._get_tts_audio_stream(chunk, voice, task_id=f"fallback_chunk_{i}"), name=f"chunk_{i}"
+                        ),
                     )
                     for i, chunk in enumerate(chunks)
                 ]
@@ -901,7 +908,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self.write_event(SynthesizeStopped().event())
             return False
 
-    async def _get_tts_audio_stream(self, text: str, voice: TtsVoiceModel, task_id: str | None = None) -> TtsStreamResult:
+    async def _get_tts_audio_stream(
+        self, text: str, voice: TtsVoiceModel, task_id: str | None = None
+    ) -> TtsStreamResult:
         """
         Get TTS audio stream from OpenAI for a text chunk (parallel-safe).
 
@@ -940,7 +949,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     input=text,
                     response_format="wav",
                     speed=self._tts_speed if self._tts_speed is not None else omit,
-                    instructions=self._tts_instructions if self._tts_instructions is not None else omit
+                    instructions=self._tts_instructions if self._tts_instructions is not None else omit,
                 ) as response:
                     async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                         audio_data += chunk
@@ -957,8 +966,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.exception("Error getting TTS audio stream for %s: %s", chunk_preview, exc)
             raise TtsStreamError("Unexpected error while retrieving TTS audio", chunk_preview, voice.name) from exc
 
-
-    async def _stream_audio_to_wyoming(self, audio_data: bytes, is_first_chunk: bool, start_timestamp: float) -> float | None:
+    async def _stream_audio_to_wyoming(
+        self, audio_data: bytes, is_first_chunk: bool, start_timestamp: float
+    ) -> float | None:
         """
         Stream audio data to Wyoming with proper timestamp calculation.
 
@@ -981,20 +991,19 @@ class OpenAIEventHandler(AsyncEventHandler):
             if wav_params:
                 audio_rate, audio_channels, audio_width, data_offset = wav_params
                 audio_data = audio_data[data_offset:]
-                _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
-                              audio_rate, audio_channels, audio_width, data_offset)
+                _LOGGER.debug(
+                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                    audio_rate,
+                    audio_channels,
+                    audio_width,
+                    data_offset,
+                )
             else:
                 _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
 
             # Send audio start if requested
             if is_first_chunk:
-                await self.write_event(
-                    AudioStart(
-                        rate=audio_rate,
-                        width=audio_width,
-                        channels=audio_channels
-                    ).event()
-                )
+                await self.write_event(AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event())
 
             # Send audio chunk (header stripped if present)
             if audio_data:
@@ -1004,7 +1013,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         rate=audio_rate,
                         width=audio_width,
                         channels=audio_channels,
-                        timestamp=int(timestamp)
+                        timestamp=int(timestamp),
                     ).event()
                 )
                 # Calculate timestamp increment based on actual audio data length
@@ -1037,7 +1046,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             return True
         return False
 
-    async def _stream_tts_audio(self, voice: TtsVoiceModel, text: str, send_audio_start: bool = True, start_timestamp: float = 0) -> float | None:
+    async def _stream_tts_audio(
+        self, voice: TtsVoiceModel, text: str, send_audio_start: bool = True, start_timestamp: float = 0
+    ) -> float | None:
         """
         Stream TTS audio for the given text and voice.
 
@@ -1064,9 +1075,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     input=text,
                     response_format="wav",
                     speed=self._tts_speed if self._tts_speed is not None else omit,
-                    instructions=self._tts_instructions if self._tts_instructions is not None else omit
+                    instructions=self._tts_instructions if self._tts_instructions is not None else omit,
                 ) as response:
-
                     async for chunk in response.iter_bytes(chunk_size=TTS_CHUNK_SIZE):
                         if first_chunk is None:
                             # First chunk: parse WAV header and send AudioStart
@@ -1077,8 +1087,13 @@ class OpenAIEventHandler(AsyncEventHandler):
                             if wav_params:
                                 audio_rate, audio_channels, audio_width, data_offset = wav_params
                                 audio_data = chunk[data_offset:]
-                                _LOGGER.debug("Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
-                                            audio_rate, audio_channels, audio_width, data_offset)
+                                _LOGGER.debug(
+                                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                                    audio_rate,
+                                    audio_channels,
+                                    audio_width,
+                                    data_offset,
+                                )
                             else:
                                 _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
                                 audio_data = chunk
@@ -1086,11 +1101,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                             # Send audio start only once
                             if send_audio_start:
                                 await self.write_event(
-                                    AudioStart(
-                                        rate=audio_rate,
-                                        width=audio_width,
-                                        channels=audio_channels
-                                    ).event()
+                                    AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
                                 )
                                 send_audio_start = False  # Prevent re-sending AudioStart
                         else:
@@ -1105,7 +1116,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                                     rate=audio_rate,
                                     width=audio_width,
                                     channels=audio_channels,
-                                    timestamp=int(timestamp)
+                                    timestamp=int(timestamp),
                                 ).event()
                             )
                             # Calculate timestamp increment based on actual audio data length
@@ -1128,7 +1139,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             wav_io = io.BytesIO(wav_data)
 
             # Open with wave module
-            with wave.open(wav_io, 'rb') as wav_file:
+            with wave.open(wav_io, "rb") as wav_file:
                 sample_rate = wav_file.getframerate()
                 channels = wav_file.getnchannels()
                 sample_width = wav_file.getsampwidth()

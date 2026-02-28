@@ -21,19 +21,30 @@ from wyoming_openai.const import (
 
 
 def test_tts_voice_model_inherits_ttsvoice():
-    v = TtsVoiceModel("model-x", name="voice1", description="desc", attribution=Attribution(name="n", url="u"), installed=True, languages=["en"], version="1.0")
+    v = TtsVoiceModel(
+        "model-x",
+        name="voice1",
+        description="desc",
+        attribution=Attribution(name="n", url="u"),
+        installed=True,
+        languages=["en"],
+        version="1.0",
+    )
     assert isinstance(v, TtsVoice)
     assert v.model_name == "model-x"
+
 
 def test_create_asr_programs():
     progs = create_asr_programs(["m1"], ["m2"], "url", ["en"])
     assert isinstance(progs, list)
     assert all(isinstance(p, AsrProgram) for p in progs)
 
+
 def test_create_tts_voices():
     voices = create_tts_voices(["m"], [], ["v"], "url", ["en"])
     assert isinstance(voices, list)
     assert all(isinstance(v, TtsVoiceModel) for v in voices)
+
 
 def test_create_tts_programs():
     voices = create_tts_voices(["m"], [], ["v"], "url", ["en"])
@@ -41,27 +52,47 @@ def test_create_tts_programs():
     assert isinstance(progs, list)
     assert all(isinstance(p, TtsProgram) for p in progs)
 
+
 def test_create_info():
     asr = create_asr_programs(["m1"], ["m2"], "url", ["en"])
     tts = create_tts_programs(create_tts_voices(["m"], [], ["v"], "url", ["en"]))
     info = create_info(asr, tts)
     assert isinstance(info, Info)
 
+
 def test_asr_model_to_string_and_tts_voice_to_string():
-    asr = AsrModel(name="n", description="d", attribution=Attribution(name="n", url="u"), installed=True, languages=["en"], version="1.0")
-    tts = TtsVoiceModel("model-x", name="voice1", description="desc", attribution=Attribution(name="n", url="u"), installed=True, languages=["en"], version="1.0")
+    asr = AsrModel(
+        name="n",
+        description="d",
+        attribution=Attribution(name="n", url="u"),
+        installed=True,
+        languages=["en"],
+        version="1.0",
+    )
+    tts = TtsVoiceModel(
+        "model-x",
+        name="voice1",
+        description="desc",
+        attribution=Attribution(name="n", url="u"),
+        installed=True,
+        languages=["en"],
+        version="1.0",
+    )
     assert isinstance(asr_model_to_string(asr, True), str)
     assert isinstance(tts_voice_to_string(tts), str)
+
 
 def test_openai_backend_enum():
     assert OpenAIBackend.OPENAI.name == "OPENAI"
     assert isinstance(OpenAIBackend.SPEACHES.value, int)
+
 
 def test_custom_async_openai_init_sets_backend(monkeypatch):
     # Patch AsyncOpenAI to avoid real network
     class DummyAsyncOpenAI:
         def __init__(self, *args, **kwargs):
             pass
+
     monkeypatch.setattr("wyoming_openai.compatibility.AsyncOpenAI", DummyAsyncOpenAI)
     c = CustomAsyncOpenAI(backend=OpenAIBackend.SPEACHES)
     assert c.backend == OpenAIBackend.SPEACHES
@@ -77,7 +108,7 @@ class TestOpenAIBackend:
         assert OpenAIBackend.KOKORO_FASTAPI.value == 2
         assert OpenAIBackend.LOCALAI.value == 3
         # Check if VOXTRAL exists
-        if hasattr(OpenAIBackend, 'VOXTRAL'):
+        if hasattr(OpenAIBackend, "VOXTRAL"):
             assert OpenAIBackend.VOXTRAL.value == 4
 
 
@@ -111,27 +142,55 @@ class TestCustomAsyncOpenAI:
         """Test creating autodetected backend factory."""
         factory = CustomAsyncOpenAI.create_autodetected_factory()
 
-        # Mock the detection methods
-        with patch.object(CustomAsyncOpenAI, '_is_localai', return_value=False):
-            with patch.object(CustomAsyncOpenAI, '_is_speaches', return_value=False):
-                with patch.object(CustomAsyncOpenAI, '_is_kokoro_fastapi', return_value=False):
-                    # Test OpenAI detection (default)
-                    client = await factory(api_key="test-key", base_url="https://api.openai.com/v1")
-                    assert client.backend == OpenAIBackend.OPENAI
+        # Test OpenAI domain skips detection probes entirely
+        with (
+            patch.object(CustomAsyncOpenAI, "_is_localai", return_value=False) as mock_localai,
+            patch.object(CustomAsyncOpenAI, "_is_speaches", return_value=False) as mock_speaches,
+            patch.object(CustomAsyncOpenAI, "_is_kokoro_fastapi", return_value=False) as mock_kokoro,
+        ):
+            client = await factory(api_key="test-key", base_url="https://api.openai.com/v1")
+            assert client.backend == OpenAIBackend.OPENAI
+            # Verify no detection probes were made
+            mock_localai.assert_not_called()
+            mock_speaches.assert_not_called()
+            mock_kokoro.assert_not_called()
 
-        # Test Speaches detection
-        with patch.object(CustomAsyncOpenAI, '_is_localai', return_value=False):
-            with patch.object(CustomAsyncOpenAI, '_is_speaches', return_value=True):
-                with patch.object(CustomAsyncOpenAI, '_is_kokoro_fastapi', return_value=False):
+        # Test Speaches detection (non-OpenAI URL, probes should run)
+        with patch.object(CustomAsyncOpenAI, "_is_localai", return_value=False):
+            with patch.object(CustomAsyncOpenAI, "_is_speaches", return_value=True):
+                with patch.object(CustomAsyncOpenAI, "_is_kokoro_fastapi", return_value=False):
                     client = await factory(api_key="test-key", base_url="https://api.speaches.com")
                     assert client.backend == OpenAIBackend.SPEACHES
 
         # Test LocalAI detection
-        with patch.object(CustomAsyncOpenAI, '_is_localai', return_value=True):
-            with patch.object(CustomAsyncOpenAI, '_is_speaches', return_value=False):
-                with patch.object(CustomAsyncOpenAI, '_is_kokoro_fastapi', return_value=False):
+        with patch.object(CustomAsyncOpenAI, "_is_localai", return_value=True):
+            with patch.object(CustomAsyncOpenAI, "_is_speaches", return_value=False):
+                with patch.object(CustomAsyncOpenAI, "_is_kokoro_fastapi", return_value=False):
                     client = await factory(api_key="test-key", base_url="http://localhost:8080")
                     assert client.backend == OpenAIBackend.LOCALAI
+
+    @pytest.mark.asyncio
+    async def test_autodetected_factory_skips_probes_for_openai_domain_variants(self):
+        """Test that autodetection is skipped for all OpenAI domain variants."""
+        factory = CustomAsyncOpenAI.create_autodetected_factory()
+
+        openai_urls = [
+            "https://api.openai.com/v1",
+            "https://api.openai.com",
+            "https://api.openai.com/v1/",
+        ]
+
+        for url in openai_urls:
+            with (
+                patch.object(CustomAsyncOpenAI, "_is_localai") as mock_localai,
+                patch.object(CustomAsyncOpenAI, "_is_speaches") as mock_speaches,
+                patch.object(CustomAsyncOpenAI, "_is_kokoro_fastapi") as mock_kokoro,
+            ):
+                client = await factory(api_key="test-key", base_url=url)
+                assert client.backend == OpenAIBackend.OPENAI, f"Failed for URL: {url}"
+                mock_localai.assert_not_called()
+                mock_speaches.assert_not_called()
+                mock_kokoro.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_list_supported_voices_openai(self):
@@ -143,7 +202,9 @@ class TestCustomAsyncOpenAI:
         # Should return default OpenAI voices
         assert len(voices) == 18  # 9 voices * 2 models
         assert all(isinstance(v, TtsVoiceModel) for v in voices)
-        assert all(v.name in ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"] for v in voices)
+        assert all(
+            v.name in ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"] for v in voices
+        )
 
     @pytest.mark.asyncio
     async def test_list_supported_voices_speaches(self):
@@ -151,7 +212,7 @@ class TestCustomAsyncOpenAI:
         custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.SPEACHES)
 
         # Mock the _list_speaches_voices method
-        with patch.object(custom_client, '_list_speaches_voices', AsyncMock(return_value=["voice1", "voice2"])):
+        with patch.object(custom_client, "_list_speaches_voices", AsyncMock(return_value=["voice1", "voice2"])):
             voices = await custom_client.list_supported_voices(["tts-1"], [], ["en"])
 
             assert len(voices) == 2
@@ -164,7 +225,7 @@ class TestCustomAsyncOpenAI:
         custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.LOCALAI)
 
         # Mock the _list_localai_voices method
-        with patch.object(custom_client, '_list_localai_voices', AsyncMock(return_value=["tts-model"])):
+        with patch.object(custom_client, "_list_localai_voices", AsyncMock(return_value=["tts-model"])):
             voices = await custom_client.list_supported_voices(["tts-1"], [], ["en"])
 
             assert len(voices) == 1
@@ -183,7 +244,7 @@ class TestHelperFunctions:
             attribution=Attribution(name="OpenAI", url="https://openai.com"),
             installed=True,
             version="1.0",
-            languages=["en", "fr"]
+            languages=["en", "fr"],
         )
 
         result = asr_model_to_string(model, is_streaming=True)
@@ -204,7 +265,7 @@ class TestHelperFunctions:
             installed=True,
             version="1.0",
             languages=["en"],
-            model_name="tts-1"
+            model_name="tts-1",
         )
 
         result = tts_voice_to_string(voice)
@@ -276,7 +337,7 @@ class TestHelperFunctions:
                 installed=True,
                 version="1.0",
                 languages=["en"],
-                model_name="tts-1"
+                model_name="tts-1",
             )
         ]
 
@@ -303,6 +364,28 @@ class TestHelperFunctions:
         assert info.tts == tts_programs
 
 
+class TestIsOpenAIDomain:
+    """Test the _is_openai_domain class method."""
+
+    def test_openai_domain(self):
+        assert CustomAsyncOpenAI._is_openai_domain("https://api.openai.com/v1") is True
+
+    def test_openai_domain_no_path(self):
+        assert CustomAsyncOpenAI._is_openai_domain("https://api.openai.com") is True
+
+    def test_non_openai_domain(self):
+        assert CustomAsyncOpenAI._is_openai_domain("http://localhost:8080") is False
+
+    def test_custom_domain(self):
+        assert CustomAsyncOpenAI._is_openai_domain("https://my-speaches.example.com/v1") is False
+
+    def test_none_is_not_openai_domain(self):
+        assert CustomAsyncOpenAI._is_openai_domain(None) is False
+
+    def test_empty_string(self):
+        assert CustomAsyncOpenAI._is_openai_domain("") is False
+
+
 class TestBackendSpecificBehavior:
     """Test backend-specific behavior."""
 
@@ -312,7 +395,7 @@ class TestBackendSpecificBehavior:
         custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.KOKORO_FASTAPI)
 
         # Mock the Kokoro-specific voice listing
-        with patch.object(custom_client, '_list_kokoro_fastapi_voices', AsyncMock(return_value=["af_sky", "bf_emma"])):
+        with patch.object(custom_client, "_list_kokoro_fastapi_voices", AsyncMock(return_value=["af_sky", "bf_emma"])):
             voices = await custom_client.list_supported_voices(["kokoro-v0_19"], [], ["en", "ja"])
 
             # Should return Kokoro-specific voices
