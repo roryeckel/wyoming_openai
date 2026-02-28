@@ -267,7 +267,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                     _LOGGER.info("Successfully transcribed stream: %s", full_text)
                 else:
                     _LOGGER.warning(
-                        "Received empty transcription from stream. If this is unexpected, please check your STT_STREAMING_MODELS configuration."
+                        "Received empty transcription from stream."
+                        " If this is unexpected, please check your"
+                        " STT_STREAMING_MODELS configuration."
                     )
                 await self.write_event(Transcript(text=full_text).event())
 
@@ -611,7 +613,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         return voice
 
     def _validate_tts_language(self, language: str | None, voice: TtsVoice) -> bool:
-        """Validate if a language is supported by a TTS voice. Returns True if supported. If no language is specified, also returns True."""
+        """Validate if a language is supported by a TTS voice.
+
+        Returns True if supported. If no language is specified, also returns True.
+        """
         if language and not self._is_tts_language_supported(language, voice):
             _LOGGER.error(
                 f"Language {language} is not supported for voice {voice.name}. Available languages: {voice.languages}"
@@ -622,8 +627,14 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _log_unsupported_voice(self, requested_voice: str | None) -> None:
         """Log an error message if a voice is not supported"""
         if requested_voice:
+            available = [
+                voice.name
+                for program in self._wyoming_info.tts
+                for voice in program.voices
+            ]
             _LOGGER.error(
-                f"Voice {requested_voice} is not supported. Available voices: {[voice.name for program in self._wyoming_info.tts for voice in program.voices]}"
+                f"Voice {requested_voice} is not supported."
+                f" Available voices: {available}"
             )
         else:
             _LOGGER.error("No TTS voices specified")

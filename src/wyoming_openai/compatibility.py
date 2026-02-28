@@ -176,7 +176,10 @@ def create_tts_voices(
     return voices
 
 
-def create_tts_programs(tts_voices: list[TtsVoiceModel], tts_streaming_models: list[str] = None) -> list[TtsProgram]:
+def create_tts_programs(
+    tts_voices: list[TtsVoiceModel],
+    tts_streaming_models: list[str] | None = None,
+) -> list[TtsProgram]:
     """
     Create TTS programs from a list of voices, separating voices based on streaming model support.
 
