@@ -108,8 +108,9 @@ class TestOpenAIBackend:
         assert OpenAIBackend.KOKORO_FASTAPI.value == 2
         assert OpenAIBackend.LOCALAI.value == 3
         # Check if VOXTRAL exists
-        if hasattr(OpenAIBackend, "VOXTRAL"):
-            assert OpenAIBackend.VOXTRAL.value == 4
+        voxtral = getattr(OpenAIBackend, "VOXTRAL", None)
+        if voxtral is not None:
+            assert voxtral.value == 4
 
 
 class TestCustomAsyncOpenAI:
@@ -355,8 +356,8 @@ class TestHelperFunctions:
 
     def test_create_info_detailed(self):
         """Test creating Info object with actual programs."""
-        asr_programs = [Mock(spec=AsrProgram)]
-        tts_programs = [Mock(spec=TtsProgram)]
+        asr_programs: list[AsrProgram] = [Mock(spec=AsrProgram)]
+        tts_programs: list[TtsProgram] = [Mock(spec=TtsProgram)]
 
         info = create_info(asr_programs, tts_programs)
 

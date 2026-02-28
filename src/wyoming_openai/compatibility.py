@@ -435,7 +435,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         if self.backend != OpenAIBackend.SPEACHES:
             _LOGGER.debug(
-                "Skipping /models/{model_name} request because backend is not SPEACHES", model_name=model_name
+                "Skipping /models/%s request because backend is not SPEACHES", model_name
             )
             return []
 

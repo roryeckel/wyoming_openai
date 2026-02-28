@@ -30,6 +30,9 @@ ruff check .
 
 # Auto-fix linting issues
 ruff check . --fix
+
+# Run type checking with Pyright
+pyright
 ```
 
 ### Local Development Setup

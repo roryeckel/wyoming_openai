@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import pysbd
 from openai import AsyncStream, omit
-from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
 from wyoming.asr import (
     Transcribe,
     Transcript,
@@ -232,6 +232,10 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             # Reset buffer position to start
             self._wav_buffer.seek(0)
+
+            if not self._current_asr_model:
+                _LOGGER.warning("No ASR model set for transcription")
+                return
 
             # Send to OpenAI for transcription
             use_streaming = self._is_asr_model_streaming(self._current_asr_model.name)
@@ -567,11 +571,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         else:
             _LOGGER.warning("No ASR models specified")
 
-    def _is_asr_language_supported(self, language: str, model: AsrModel) -> bool:
+    def _is_asr_language_supported(self, language: str | None, model: AsrModel) -> bool:
         """Check if a language is supported by an ASR model"""
-        return not model.languages or language in model.languages
+        return not language or not model.languages or language in model.languages
 
-    def _log_unsupported_asr_language(self, model_name: str, language: str):
+    def _log_unsupported_asr_language(self, model_name: str | None, language: str | None):
         """Log an unsupported ASR language"""
         _LOGGER.error("Unsupported ASR model %s for language %s", model_name, language)
 
@@ -580,7 +584,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         for program in self._wyoming_info.tts:
             for voice in program.voices:
                 if not name or voice.name == name:
-                    return voice
+                    return voice  # type: ignore[return-value]  # voices are TtsVoiceModel at runtime
         return None
 
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
@@ -668,7 +672,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             if final_timestamp is not None:
                 # Send audio stop after streaming completes
-                await self.write_event(AudioStop(timestamp=final_timestamp).event())
+                await self.write_event(AudioStop(timestamp=int(final_timestamp)).event())
                 _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(synthesize.text))
                 return True
             return False
@@ -735,7 +739,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         segmenter = self._pysbd_segmenters[pysbd_language]
 
         # Segment the entire accumulated text
-        sentences = segmenter.segment(self._text_accumulator)
+        sentences: list[str] = list(segmenter.segment(self._text_accumulator))
 
         # Process complete sentences (all but the last one)
         if len(sentences) > 1:
@@ -901,7 +905,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     total_timestamp = chunk_timestamp
 
                 # Send final audio stop
-                await self.write_event(AudioStop(timestamp=total_timestamp).event())
+                await self.write_event(AudioStop(timestamp=int(total_timestamp)).event())
                 _LOGGER.info("Successfully completed concurrent streaming synthesis: %s", _truncate_for_log(full_text))
             else:
                 # Use non-streaming synthesis for non-streaming voices
@@ -1052,7 +1056,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if final_timestamp is not None:
             # Send audio stop after streaming completes
-            await self.write_event(AudioStop(timestamp=final_timestamp).event())
+            await self.write_event(AudioStop(timestamp=int(final_timestamp)).event())
             _LOGGER.info("Successfully synthesized non-streaming: %s", _truncate_for_log(text))
             return True
         return False
@@ -1187,5 +1191,5 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def stop(self) -> None:
         """Stop the handler and close the clients"""
         await super().stop()
-        self._stt_client.close()
-        self._tts_client.close()
+        await self._stt_client.close()
+        await self._tts_client.close()

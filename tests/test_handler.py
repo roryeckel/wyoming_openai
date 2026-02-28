@@ -1,3 +1,4 @@
+import builtins
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -46,7 +47,9 @@ def dummy_info():
 @pytest.fixture
 def dummy_clients():
     stt_client = MagicMock()
+    stt_client.close = AsyncMock()
     tts_client = MagicMock()
+    tts_client.close = AsyncMock()
     return stt_client, tts_client
 
 
@@ -395,10 +398,10 @@ class TestOpenAIEventHandlerComprehensive:
 
             def isinstance_side_effect(obj, class_or_tuple):
                 if obj is mock_transcription:
-                    from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+                    from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
 
                     return class_or_tuple is TranscriptionCreateResponse
-                return isinstance.__wrapped__(obj, class_or_tuple)
+                return builtins.isinstance(obj, class_or_tuple)
 
             mock_isinstance.side_effect = isinstance_side_effect
 
@@ -654,10 +657,10 @@ class TestOpenAIEventHandlerComprehensive:
 
             def isinstance_side_effect(obj, class_or_tuple):
                 if obj is mock_transcription:
-                    from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+                    from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
 
                     return class_or_tuple is TranscriptionCreateResponse
-                return isinstance.__wrapped__(obj, class_or_tuple)
+                return builtins.isinstance(obj, class_or_tuple)
 
             mock_isinstance.side_effect = isinstance_side_effect
 
