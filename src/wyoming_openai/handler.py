@@ -3,6 +3,7 @@ import io
 import logging
 import wave
 from dataclasses import dataclass
+from typing import cast
 
 import pysbd
 from openai import AsyncStream, omit
@@ -94,6 +95,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_instructions (str | None): Optional instructions for TTS.
             tts_streaming_min_words (int | None): Minimum words per chunk for streaming TTS.
             tts_streaming_max_chars (int | None): Maximum characters per chunk for streaming TTS.
+            Note: The caller owns the STT/TTS clients and is responsible for closing them.
             **kwargs: Arbitrary keyword arguments for the superclass.
         """
         super().__init__(*args, **kwargs)
@@ -584,7 +586,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         for program in self._wyoming_info.tts:
             for voice in program.voices:
                 if not name or voice.name == name:
-                    return voice  # type: ignore[return-value]  # voices are TtsVoiceModel at runtime
+                    return cast(TtsVoiceModel, voice)
         return None
 
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
@@ -631,15 +633,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _log_unsupported_voice(self, requested_voice: str | None) -> None:
         """Log an error message if a voice is not supported"""
         if requested_voice:
-            available = [
-                voice.name
-                for program in self._wyoming_info.tts
-                for voice in program.voices
-            ]
-            _LOGGER.error(
-                f"Voice {requested_voice} is not supported."
-                f" Available voices: {available}"
-            )
+            available = [voice.name for program in self._wyoming_info.tts for voice in program.voices]
+            _LOGGER.error(f"Voice {requested_voice} is not supported. Available voices: {available}")
         else:
             _LOGGER.error("No TTS voices specified")
 
@@ -1187,9 +1182,3 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.debug("Outgoing event type %s", event.type)
 
         await super().write_event(event)
-
-    async def stop(self) -> None:
-        """Stop the handler and close the clients"""
-        await super().stop()
-        await self._stt_client.close()
-        await self._tts_client.close()

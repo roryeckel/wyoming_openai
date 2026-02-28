@@ -75,8 +75,56 @@ def handler(dummy_info, dummy_clients, dummy_reader_writer):
 async def test_init_and_stop(dummy_info, dummy_clients, dummy_reader_writer, handler):
     stt_client, tts_client = dummy_clients
     await handler.stop()
-    stt_client.close.assert_called_once()
-    tts_client.close.assert_called_once()
+    stt_client.close.assert_not_called()
+    tts_client.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shared_clients_remain_usable_after_handler_stop(dummy_info, dummy_reader_writer):
+    stt_client = AsyncMock()
+    tts_client = AsyncMock()
+
+    stt_client.close = AsyncMock()
+    tts_client.close = AsyncMock()
+
+    mock_transcription = Mock()
+    mock_transcription.text = "Shared client transcription"
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
+
+    handler = OpenAIEventHandler(
+        dummy_reader_writer[0],
+        dummy_reader_writer[1],
+        info=dummy_info,
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+
+    await handler.stop()
+
+    transcribe_event = Event(type="transcribe", data={"language": "en", "name": "m1"})
+    assert await handler.handle_event(transcribe_event) is True
+
+    await handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+    await handler.handle_event(
+        Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 50)
+    )
+
+    with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
+        def isinstance_side_effect(obj, class_or_tuple):
+            if obj is mock_transcription:
+                from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
+
+                return class_or_tuple is TranscriptionCreateResponse
+            return builtins.isinstance(obj, class_or_tuple)
+
+        mock_isinstance.side_effect = isinstance_side_effect
+        await handler.handle_event(Event(type="audio-stop"))
+
+    stt_client.audio.transcriptions.create.assert_called_once()
+    stt_client.close.assert_not_called()
+    tts_client.close.assert_not_called()
 
 
 def test_get_asr_model(handler):
