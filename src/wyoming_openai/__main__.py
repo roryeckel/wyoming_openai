@@ -16,7 +16,7 @@ from .compatibility import (
     create_tts_voices,
     tts_voice_to_string,
 )
-from .const import __version__
+from .const import DEFAULT_OPENAI_BASE_URL, __version__
 from .handler import OpenAIEventHandler
 from .utilities import create_enum_parser
 
@@ -25,8 +25,9 @@ def configure_logging(level):
     """Configure logging based on a string level."""
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
-        raise ValueError(f'Invalid log level: {level}')
+        raise ValueError(f"Invalid log level: {level}")
     logging.basicConfig(level=numeric_level, force=True)
+
 
 async def main():
     """Main entry point for the Wyoming OpenAI server."""
@@ -53,20 +54,18 @@ async def main():
 
     # General configuration
     parser.add_argument(
-        "--uri",
-        default=os.getenv("WYOMING_URI","tcp://0.0.0.0:10300"),
-        help="This Wyoming Server URI"
+        "--uri", default=os.getenv("WYOMING_URI", "tcp://0.0.0.0:10300"), help="This Wyoming Server URI"
     )
     parser.add_argument(
         "--log-level",
         default=os.getenv("WYOMING_LOG_LEVEL", "INFO"),
-        help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+        help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
     )
     parser.add_argument(
         "--languages",
         nargs="+",
         default=os.getenv("WYOMING_LANGUAGES", "en").split(),
-        help="List of languages supported by BOTH STT AND TTS (example: en, fr)"
+        help="List of languages supported by BOTH STT AND TTS (example: en, fr)",
     )
 
     # STT configuration
@@ -74,18 +73,18 @@ async def main():
         "--stt-openai-key",
         required=False,
         default=os.getenv("STT_OPENAI_KEY", None),
-        help="OpenAI API key for speech-to-text"
+        help="OpenAI API key for speech-to-text",
     )
     parser.add_argument(
         "--stt-openai-url",
-        default=os.getenv("STT_OPENAI_URL", "https://api.openai.com/v1"),
-        help="Custom OpenAI API base URL for STT"
+        default=os.getenv("STT_OPENAI_URL", DEFAULT_OPENAI_BASE_URL),
+        help="Custom OpenAI API base URL for STT",
     )
     parser.add_argument(
         "--stt-models",
-        nargs='+',  # Use nargs to accept multiple values
-        default=os.getenv("STT_MODELS", '').split(),
-        help="List of STT model identifiers"
+        nargs="+",  # Use nargs to accept multiple values
+        default=os.getenv("STT_MODELS", "").split(),
+        help="List of STT model identifiers",
     )
     parser.add_argument(
         "--stt-backend",
@@ -93,24 +92,20 @@ async def main():
         required=False,
         choices=list(OpenAIBackend),
         default=stt_backend_default,
-        help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
+        help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)",
     )
     parser.add_argument(
         "--stt-temperature",
         type=float,
         default=float(os.getenv("STT_TEMPERATURE")) if os.getenv("STT_TEMPERATURE") else None,
-        help="Sampling temperature for speech-to-text (0.0 to 1.0, default is None for OpenAI default)"
+        help="Sampling temperature for speech-to-text (0.0 to 1.0, default is None for OpenAI default)",
     )
-    parser.add_argument(
-        "--stt-prompt",
-        default=os.getenv("STT_PROMPT", None),
-        help="Optional prompt for STT requests"
-    )
+    parser.add_argument("--stt-prompt", default=os.getenv("STT_PROMPT", None), help="Optional prompt for STT requests")
     parser.add_argument(
         "--stt-streaming-models",
         nargs="+",
-        default=os.getenv("STT_STREAMING_MODELS", '').split(),
-        help="Space-separated list of STT model names that support streaming (e.g. gpt-4o-transcribe)"
+        default=os.getenv("STT_STREAMING_MODELS", "").split(),
+        help="Space-separated list of STT model names that support streaming (e.g. gpt-4o-transcribe)",
     )
 
     # TTS configuration
@@ -118,25 +113,22 @@ async def main():
         "--tts-openai-key",
         required=False,
         default=os.getenv("TTS_OPENAI_KEY", None),
-        help="OpenAI API key for text-to-speech"
+        help="OpenAI API key for text-to-speech",
     )
     parser.add_argument(
         "--tts-openai-url",
-        default=os.getenv("TTS_OPENAI_URL", "https://api.openai.com/v1"),
-        help="Custom OpenAI API base URL for TTS"
+        default=os.getenv("TTS_OPENAI_URL", DEFAULT_OPENAI_BASE_URL),
+        help="Custom OpenAI API base URL for TTS",
     )
     parser.add_argument(
-        "--tts-models",
-        nargs='+',
-        default=os.getenv("TTS_MODELS", '').split(),
-        help="List of TTS model identifiers"
+        "--tts-models", nargs="+", default=os.getenv("TTS_MODELS", "").split(), help="List of TTS model identifiers"
     )
     parser.add_argument(
         "--tts-voices",
-        nargs='+',
-        default=os.getenv("TTS_VOICES", '').split(),
+        nargs="+",
+        default=os.getenv("TTS_VOICES", "").split(),
         required=False,
-        help="List of available TTS voices"
+        help="List of available TTS voices",
     )
     parser.add_argument(
         "--tts-backend",
@@ -144,36 +136,34 @@ async def main():
         required=False,
         choices=list(OpenAIBackend),
         default=tts_backend_default,
-        help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)"
+        help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)",
     )
     parser.add_argument(
         "--tts-speed",
         type=float,
         default=float(os.getenv("TTS_SPEED")) if os.getenv("TTS_SPEED") else None,
-        help="Speed of the TTS output (0.25 to 4.0, default is None for OpenAI default)"
+        help="Speed of the TTS output (0.25 to 4.0, default is None for OpenAI default)",
     )
     parser.add_argument(
-        "--tts-instructions",
-        default=os.getenv("TTS_INSTRUCTIONS", None),
-        help="Optional instructions for TTS requests"
+        "--tts-instructions", default=os.getenv("TTS_INSTRUCTIONS", None), help="Optional instructions for TTS requests"
     )
     parser.add_argument(
         "--tts-streaming-models",
         nargs="+",
-        default=os.getenv("TTS_STREAMING_MODELS", '').split(),
-        help="Space-separated list of TTS model names that support streaming synthesis (e.g. tts-1)"
+        default=os.getenv("TTS_STREAMING_MODELS", "").split(),
+        help="Space-separated list of TTS model names that support streaming synthesis (e.g. tts-1)",
     )
     parser.add_argument(
         "--tts-streaming-min-words",
         type=int,
         default=int(os.getenv("TTS_STREAMING_MIN_WORDS")) if os.getenv("TTS_STREAMING_MIN_WORDS") else None,
-        help="Minimum words per chunk for streaming TTS (optional)"
+        help="Minimum words per chunk for streaming TTS (optional)",
     )
     parser.add_argument(
         "--tts-streaming-max-chars",
         type=int,
         default=int(os.getenv("TTS_STREAMING_MAX_CHARS")) if os.getenv("TTS_STREAMING_MAX_CHARS") else None,
-        help="Maximum characters per chunk for streaming TTS (optional)"
+        help="Maximum characters per chunk for streaming TTS (optional)",
     )
 
     args = parser.parse_args()
@@ -205,20 +195,20 @@ async def main():
 
     # Use clients in async context managers
     async with stt_client, tts_client:
-
         asr_programs = create_asr_programs(
-            args.stt_models,
-            args.stt_streaming_models,
-            args.stt_openai_url,
-            args.languages
+            args.stt_models, args.stt_streaming_models, args.stt_openai_url, args.languages
         )
 
         if args.tts_voices:
             # If TTS_VOICES is set, use that
-            tts_voices = create_tts_voices(args.tts_models, args.tts_streaming_models, args.tts_voices, args.tts_openai_url, args.languages)
+            tts_voices = create_tts_voices(
+                args.tts_models, args.tts_streaming_models, args.tts_voices, args.tts_openai_url, args.languages
+            )
         else:
             # Otherwise, list supported voices via backend (with streaming fallback)
-            tts_voices = await tts_client.list_supported_voices(args.tts_models, args.tts_streaming_models, args.languages)
+            tts_voices = await tts_client.list_supported_voices(
+                args.tts_models, args.tts_streaming_models, args.languages
+            )
 
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 
@@ -242,12 +232,18 @@ async def main():
                         non_streaming_asr_models_for_logging.append(model)
 
             if streaming_asr_models_for_logging:
-                _logger.info("*** Streaming ASR Models ***\n%s", "\n".join(asr_model_to_string(x, is_streaming=True) for x in streaming_asr_models_for_logging))
+                _logger.info(
+                    "*** Streaming ASR Models ***\n%s",
+                    "\n".join(asr_model_to_string(x, is_streaming=True) for x in streaming_asr_models_for_logging),
+                )
             else:
                 _logger.info("No Streaming ASR models specified")
 
             if non_streaming_asr_models_for_logging:
-                _logger.info("*** Non-Streaming ASR Models ***\n%s", "\n".join(asr_model_to_string(x, is_streaming=False) for x in non_streaming_asr_models_for_logging))
+                _logger.info(
+                    "*** Non-Streaming ASR Models ***\n%s",
+                    "\n".join(asr_model_to_string(x, is_streaming=False) for x in non_streaming_asr_models_for_logging),
+                )
             else:
                 _logger.info("No Non-Streaming ASR models specified")
         else:
@@ -259,18 +255,24 @@ async def main():
 
             for prog in tts_programs:
                 for voice in prog.voices:
-                    if getattr(prog, 'supports_synthesize_streaming', False):
+                    if getattr(prog, "supports_synthesize_streaming", False):
                         streaming_tts_voices_for_logging.append(voice)
                     else:
                         non_streaming_tts_voices_for_logging.append(voice)
 
             if streaming_tts_voices_for_logging:
-                _logger.info("*** Streaming TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in streaming_tts_voices_for_logging))
+                _logger.info(
+                    "*** Streaming TTS Voices ***\n%s",
+                    "\n".join(tts_voice_to_string(x) for x in streaming_tts_voices_for_logging),
+                )
             else:
                 _logger.info("No Streaming TTS voices specified")
 
             if non_streaming_tts_voices_for_logging:
-                _logger.info("*** Non-Streaming TTS Voices ***\n%s", "\n".join(tts_voice_to_string(x) for x in non_streaming_tts_voices_for_logging))
+                _logger.info(
+                    "*** Non-Streaming TTS Voices ***\n%s",
+                    "\n".join(tts_voice_to_string(x) for x in non_streaming_tts_voices_for_logging),
+                )
             else:
                 _logger.info("No Non-Streaming TTS voices specified")
         else:
@@ -292,9 +294,10 @@ async def main():
                 tts_instructions=args.tts_instructions,
                 stt_prompt=args.stt_prompt,
                 tts_streaming_min_words=args.tts_streaming_min_words,
-                tts_streaming_max_chars=args.tts_streaming_max_chars
+                tts_streaming_max_chars=args.tts_streaming_max_chars,
             )
         )
+
 
 if __name__ == "__main__":
     asyncio.run(main())

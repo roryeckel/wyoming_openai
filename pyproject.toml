@@ -48,7 +48,7 @@ include = ["wyoming_openai", "wyoming_openai.*"]
 lint.select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "T20", "RET"]
 lint.ignore = []
 
-line-length = 200
+line-length = 120
 indent-width = 4
 
 # Assume Python 3.12

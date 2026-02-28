@@ -20,7 +20,7 @@ from wyoming_openai.handler import OpenAIEventHandler
 def create_test_wav_data(frame_count: int = 2000, sample_rate: int = 24000) -> bytes:
     """Create test WAV data with specified parameters."""
     wav_buffer = io.BytesIO()
-    with wave.open(wav_buffer, 'wb') as wav_file:
+    with wave.open(wav_buffer, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
@@ -58,7 +58,11 @@ class TestIntegration:
         reader = AsyncMock()
         writer = AsyncMock()
         handler = OpenAIEventHandler(
-            reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
+            reader,
+            writer,
+            info=info,
+            stt_client=stt_client,
+            tts_client=tts_client,
         )
         handler.write_event = AsyncMock()
 
@@ -76,19 +80,20 @@ class TestIntegration:
         # 3. Send audio data
         test_audio_data = b"\x00\x01" * 500
         chunk_event = Event(
-            type="audio-chunk",
-            data={"rate": 16000, "width": 2, "channels": 1},
-            payload=test_audio_data
+            type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=test_audio_data
         )
         await handler.handle_event(chunk_event)
 
         # 4. Stop recording and trigger transcription
-        with patch('wyoming_openai.handler.isinstance') as mock_isinstance:
+        with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
             def isinstance_side_effect(obj, class_or_tuple):
                 if obj is mock_transcription:
                     from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+
                     return class_or_tuple is TranscriptionCreateResponse
                 return isinstance.__wrapped__(obj, class_or_tuple)
+
             mock_isinstance.side_effect = isinstance_side_effect
 
             stop_event = Event(type="audio-stop")
@@ -100,8 +105,7 @@ class TestIntegration:
 
         # Verify transcript event was written
         transcript_events = [
-            call[0][0] for call in handler.write_event.call_args_list
-            if call[0][0].type == "transcript"
+            call[0][0] for call in handler.write_event.call_args_list if call[0][0].type == "transcript"
         ]
         assert len(transcript_events) > 0
 
@@ -129,7 +133,7 @@ class TestIntegration:
         # Mock streaming response
         class MockAsyncIterator:
             def __init__(self, data):
-                self.chunks = [data[i:i+1024] for i in range(0, len(data), 1024)]
+                self.chunks = [data[i : i + 1024] for i in range(0, len(data), 1024)]
                 self.index = 0
 
             def __aiter__(self):
@@ -155,7 +159,11 @@ class TestIntegration:
         reader = AsyncMock()
         writer = AsyncMock()
         handler = OpenAIEventHandler(
-            reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
+            reader,
+            writer,
+            info=info,
+            stt_client=stt_client,
+            tts_client=tts_client,
         )
         handler.write_event = AsyncMock()
 
@@ -165,8 +173,8 @@ class TestIntegration:
             data={
                 "text": "Integration test synthesis",
                 "voice": {"name": "alloy"},
-                "raw_text": "Integration test synthesis"
-            }
+                "raw_text": "Integration test synthesis",
+            },
         )
 
         result = await handler.handle_event(synthesize_event)
@@ -194,9 +202,17 @@ class TestIntegration:
 
         for base_url, expected_backend in test_cases:
             # Mock the detection methods based on expected backend
-            with patch.object(CustomAsyncOpenAI, '_is_localai', return_value=(expected_backend == OpenAIBackend.LOCALAI)):
-                with patch.object(CustomAsyncOpenAI, '_is_speaches', return_value=(expected_backend == OpenAIBackend.SPEACHES)):
-                    with patch.object(CustomAsyncOpenAI, '_is_kokoro_fastapi', return_value=(expected_backend == OpenAIBackend.KOKORO_FASTAPI)):
+            with patch.object(
+                CustomAsyncOpenAI, "_is_localai", return_value=(expected_backend == OpenAIBackend.LOCALAI)
+            ):
+                with patch.object(
+                    CustomAsyncOpenAI, "_is_speaches", return_value=(expected_backend == OpenAIBackend.SPEACHES)
+                ):
+                    with patch.object(
+                        CustomAsyncOpenAI,
+                        "_is_kokoro_fastapi",
+                        return_value=(expected_backend == OpenAIBackend.KOKORO_FASTAPI),
+                    ):
                         client = await factory(api_key="test-key", base_url=base_url)
                         assert client.backend == expected_backend
 
@@ -217,7 +233,11 @@ class TestIntegration:
         reader = AsyncMock()
         writer = AsyncMock()
         handler = OpenAIEventHandler(
-            reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
+            reader,
+            writer,
+            info=info,
+            stt_client=stt_client,
+            tts_client=tts_client,
         )
         handler.write_event = AsyncMock()
 
@@ -263,10 +283,7 @@ class TestIntegration:
             assert result == expected
 
         # Verify info event was written for describe
-        info_events = [
-            call[0][0] for call in handler.write_event.call_args_list
-            if call[0][0].type == "info"
-        ]
+        info_events = [call[0][0] for call in handler.write_event.call_args_list if call[0][0].type == "info"]
         assert len(info_events) > 0
 
         # Verify TTS was called for synthesis
@@ -324,7 +341,11 @@ class TestIntegration:
         reader = AsyncMock()
         writer = AsyncMock()
         handler = OpenAIEventHandler(
-            reader, writer, info=info, stt_client=stt_client, tts_client=tts_client,
+            reader,
+            writer,
+            info=info,
+            stt_client=stt_client,
+            tts_client=tts_client,
         )
         handler.write_event = AsyncMock()
 

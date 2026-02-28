@@ -19,23 +19,29 @@ def dummy_info():
         def __init__(self, name, languages=None):
             self.name = name
             self.languages = languages or ["en"]
+
     class DummyVoice:
         def __init__(self, name, languages=None, model_name=None):
             self.name = name
             self.languages = languages or ["en"]
             self.model_name = model_name or name
+
     class DummyProgram:
         def __init__(self, models=None, voices=None, supports_transcript_streaming=False):
             self.models = models or []
             self.voices = voices or []
             self.supports_transcript_streaming = supports_transcript_streaming
+
     class DummyInfo:
         def __init__(self):
             self.asr = [DummyProgram([DummyModel("m1")])]
             self.tts = [DummyProgram(voices=[DummyVoice("voice1", ["en"], "m1")])]
+
         def event(self):
             return "event"
+
     return DummyInfo()
+
 
 @pytest.fixture
 def dummy_clients():
@@ -43,9 +49,11 @@ def dummy_clients():
     tts_client = MagicMock()
     return stt_client, tts_client
 
+
 @pytest.fixture
 def dummy_reader_writer():
     return MagicMock(name="reader"), MagicMock(name="writer")
+
 
 @pytest.fixture
 def handler(dummy_info, dummy_clients, dummy_reader_writer):
@@ -59,6 +67,7 @@ def handler(dummy_info, dummy_clients, dummy_reader_writer):
         tts_client=tts_client,
     )
 
+
 @pytest.mark.asyncio
 async def test_init_and_stop(dummy_info, dummy_clients, dummy_reader_writer, handler):
     stt_client, tts_client = dummy_clients
@@ -66,23 +75,28 @@ async def test_init_and_stop(dummy_info, dummy_clients, dummy_reader_writer, han
     stt_client.close.assert_called_once()
     tts_client.close.assert_called_once()
 
+
 def test_get_asr_model(handler):
     model = handler._get_asr_model("m1")
     assert model is not None
     assert model.name == "m1"
+
 
 def test_get_voice(handler):
     voice = handler._get_voice("voice1")
     assert voice is not None
     assert voice.name == "voice1"
 
+
 def test_is_asr_model_streaming(dummy_info, handler):
     dummy_info.asr[0].supports_transcript_streaming = True
     assert handler._is_asr_model_streaming("m1") is True
 
+
 def test_is_asr_language_supported(handler):
     model = handler._get_asr_model("m1")
     assert handler._is_asr_language_supported("en", model)
+
 
 def test_validate_tts_language(handler):
     voice = handler._get_voice("voice1")
@@ -122,6 +136,7 @@ async def test_buffered_synthesis_failure_aborts(handler):
     from wyoming_openai.handler import TtsStreamResult
 
     call_count = 0
+
     async def mock_buffered_failure(text, voice, task_id=None):
         nonlocal call_count
         call_count += 1
@@ -165,9 +180,7 @@ async def test_empty_audio_data_aborts(handler):
 
     with patch.object(handler, "_get_tts_audio_stream", side_effect=mock_empty_audio):
         # Send two sentences so first one gets processed (and returns empty audio)
-        result = await handler.handle_event(
-            SynthesizeChunk(text="Test sentence. Another one.").event()
-        )
+        result = await handler.handle_event(SynthesizeChunk(text="Test sentence. Another one.").event())
 
     assert result is False
     event_types = [call.args[0].type for call in handler.write_event.call_args_list]
@@ -189,15 +202,11 @@ async def test_multiple_consecutive_chunk_failures(handler):
     await handler.handle_event(SynthesizeStart(voice=start_voice).event())
 
     # Mock to always fail
-    failing_stream = AsyncMock(
-        side_effect=TtsStreamError("Persistent failure", "Test chunk", "voice1")
-    )
+    failing_stream = AsyncMock(side_effect=TtsStreamError("Persistent failure", "Test chunk", "voice1"))
 
     with patch.object(handler, "_get_tts_audio_stream", failing_stream):
         # First failure - send two sentences so first gets processed
-        result1 = await handler.handle_event(
-            SynthesizeChunk(text="First chunk. Second one.").event()
-        )
+        result1 = await handler.handle_event(SynthesizeChunk(text="First chunk. Second one.").event())
         assert result1 is False
 
         # Verify state was reset after first failure
@@ -208,9 +217,7 @@ async def test_multiple_consecutive_chunk_failures(handler):
         assert handler._is_synthesizing is True
 
         # Second failure
-        result2 = await handler.handle_event(
-            SynthesizeChunk(text="Another chunk. And another.").event()
-        )
+        result2 = await handler.handle_event(SynthesizeChunk(text="Another chunk. And another.").event())
         assert result2 is False
 
         # Verify state is consistently reset
@@ -288,7 +295,7 @@ def enhanced_handler(mock_info, mock_clients, dummy_reader_writer):
         stt_temperature=0.5,
         stt_prompt="Test prompt",
         tts_speed=1.0,
-        tts_instructions="Test instructions"
+        tts_instructions="Test instructions",
     )
 
     # Mock write_event as AsyncMock
@@ -316,14 +323,7 @@ class TestOpenAIEventHandlerComprehensive:
     @pytest.mark.asyncio
     async def test_handle_audio_start_event(self, enhanced_handler):
         """Test handling of AudioStart event."""
-        event = Event(
-            type="audio-start",
-            data={
-                "rate": 16000,
-                "width": 2,
-                "channels": 1
-            }
-        )
+        event = Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1})
 
         result = await enhanced_handler.handle_event(event)
 
@@ -341,15 +341,7 @@ class TestOpenAIEventHandlerComprehensive:
 
         # Send audio chunk
         audio_data = b"\x00\x01" * 100
-        chunk_event = Event(
-            type="audio-chunk",
-            data={
-                "rate": 16000,
-                "width": 2,
-                "channels": 1
-            },
-            payload=audio_data
-        )
+        chunk_event = Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=audio_data)
 
         result = await enhanced_handler.handle_event(chunk_event)
 
@@ -383,39 +375,31 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
 
         # First send the transcribe event to set the model
-        transcribe_event = Event(
-            type="transcribe",
-            data={
-                "language": "en",
-                "name": "whisper-1"
-            }
-        )
+        transcribe_event = Event(type="transcribe", data={"language": "en", "name": "whisper-1"})
         result = await enhanced_handler.handle_event(transcribe_event)
         assert result is True
 
         # Now record some audio
-        start_event = Event(
-            type="audio-start",
-            data={"rate": 16000, "width": 2, "channels": 1}
-        )
+        start_event = Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1})
         await enhanced_handler.handle_event(start_event)
 
         # Add audio data
         chunk_event = Event(
-            type="audio-chunk",
-            data={"rate": 16000, "width": 2, "channels": 1},
-            payload=b"\x00\x01" * 1000
+            type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 1000
         )
         await enhanced_handler.handle_event(chunk_event)
 
         # Stop recording - this triggers transcription
         # Patch the isinstance check in the handler to accept our mock
-        with patch('wyoming_openai.handler.isinstance') as mock_isinstance:
+        with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
             def isinstance_side_effect(obj, class_or_tuple):
                 if obj is mock_transcription:
                     from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+
                     return class_or_tuple is TranscriptionCreateResponse
                 return isinstance.__wrapped__(obj, class_or_tuple)
+
             mock_isinstance.side_effect = isinstance_side_effect
 
             stop_event = Event(type="audio-stop")
@@ -442,7 +426,7 @@ class TestOpenAIEventHandlerComprehensive:
 
         # Create proper WAV data with header
         wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
+        with wave.open(wav_buffer, "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
             wav_file.setframerate(24000)
@@ -454,7 +438,7 @@ class TestOpenAIEventHandlerComprehensive:
         class MockAsyncIterator:
             def __init__(self, data):
                 self.data = data
-                self.chunks = [data[i:i+2048] for i in range(0, len(data), 2048)]
+                self.chunks = [data[i : i + 2048] for i in range(0, len(data), 2048)]
                 self.index = 0
 
             def __aiter__(self):
@@ -478,12 +462,7 @@ class TestOpenAIEventHandlerComprehensive:
         tts_client.audio.speech.with_streaming_response.create = Mock(return_value=mock_stream_response)
 
         event = Event(
-            type="synthesize",
-            data={
-                "text": "Hello world",
-                "voice": {"name": "alloy"},
-                "raw_text": "Hello world"
-            }
+            type="synthesize", data={"text": "Hello world", "voice": {"name": "alloy"}, "raw_text": "Hello world"}
         )
 
         # Clear previous write_event calls
@@ -511,7 +490,7 @@ class TestOpenAIEventHandlerComprehensive:
 
         # Create proper WAV data with header
         wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
+        with wave.open(wav_buffer, "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
             wav_file.setframerate(24000)
@@ -523,7 +502,7 @@ class TestOpenAIEventHandlerComprehensive:
         class MockAsyncIterator:
             def __init__(self, data):
                 self.data = data
-                self.chunks = [data[i:i+2048] for i in range(0, len(data), 2048)]
+                self.chunks = [data[i : i + 2048] for i in range(0, len(data), 2048)]
                 self.index = 0
 
             def __aiter__(self):
@@ -546,25 +525,16 @@ class TestOpenAIEventHandlerComprehensive:
         tts_client.audio.speech.with_streaming_response.create = Mock(return_value=mock_stream_response)
 
         # Start synthesis
-        start_event = Event(
-            type="synthesize-start",
-            data={"voice": {"name": "alloy"}}
-        )
+        start_event = Event(type="synthesize-start", data={"voice": {"name": "alloy"}})
         result = await enhanced_handler.handle_event(start_event)
         assert result is True
 
         # Send text chunks
-        chunk1_event = Event(
-            type="synthesize-chunk",
-            data={"text": "Hello "}
-        )
+        chunk1_event = Event(type="synthesize-chunk", data={"text": "Hello "})
         result = await enhanced_handler.handle_event(chunk1_event)
         assert result is True
 
-        chunk2_event = Event(
-            type="synthesize-chunk",
-            data={"text": "world"}
-        )
+        chunk2_event = Event(type="synthesize-chunk", data={"text": "world"})
         result = await enhanced_handler.handle_event(chunk2_event)
         assert result is True
 
@@ -579,12 +549,12 @@ class TestOpenAIEventHandlerComprehensive:
         # For non-streaming TTS voices (default mock behavior), the TTS client should be called
         # to synthesize the accumulated text using our non-streaming fallback
         tts_client.audio.speech.with_streaming_response.create.assert_called_once_with(
-            model='tts-1',
-            voice='alloy',
-            input='Hello world',
-            response_format='wav',
+            model="tts-1",
+            voice="alloy",
+            input="Hello world",
+            response_format="wav",
             speed=1.0,
-            instructions='Test instructions'
+            instructions="Test instructions",
         )
 
         # Verify completion and audio events were written
@@ -606,30 +576,17 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Streaming test - expected"))
 
         # First send the transcribe event to set the model
-        transcribe_event = Event(
-            type="transcribe",
-            data={
-                "language": "en",
-                "name": "whisper-1"
-            }
-        )
+        transcribe_event = Event(type="transcribe", data={"language": "en", "name": "whisper-1"})
         result = await enhanced_handler.handle_event(transcribe_event)
         assert result is True
 
         # Start recording
-        start_event = Event(
-            type="audio-start",
-            data={"rate": 16000, "width": 2, "channels": 1}
-        )
+        start_event = Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1})
         await enhanced_handler.handle_event(start_event)
 
         # Add some audio
         audio_data = b"\x00\x01" * 100
-        chunk_event = Event(
-            type="audio-chunk",
-            data={"rate": 16000, "width": 2, "channels": 1},
-            payload=audio_data
-        )
+        chunk_event = Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=audio_data)
         await enhanced_handler.handle_event(chunk_event)
 
         # Stop recording - this triggers streaming transcription
@@ -644,13 +601,7 @@ class TestOpenAIEventHandlerComprehensive:
     @pytest.mark.asyncio
     async def test_handle_invalid_model(self, enhanced_handler):
         """Test handling of Transcribe event with invalid model."""
-        event = Event(
-            type="transcribe",
-            data={
-                "language": "en",
-                "name": "invalid-model"
-            }
-        )
+        event = Event(type="transcribe", data={"language": "en", "name": "invalid-model"})
 
         result = await enhanced_handler.handle_event(event)
 
@@ -663,8 +614,8 @@ class TestOpenAIEventHandlerComprehensive:
             type="transcribe",
             data={
                 "language": "zh",  # Not in supported languages
-                "name": "whisper-1"
-            }
+                "name": "whisper-1",
+            },
         )
 
         result = await enhanced_handler.handle_event(event)
@@ -682,20 +633,11 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
 
         # First set up transcription model
-        transcribe_event = Event(
-            type="transcribe",
-            data={
-                "language": "en",
-                "name": "whisper-1"
-            }
-        )
+        transcribe_event = Event(type="transcribe", data={"language": "en", "name": "whisper-1"})
         await enhanced_handler.handle_event(transcribe_event)
 
         # Start recording
-        start_event = Event(
-            type="audio-start",
-            data={"rate": 16000, "width": 2, "channels": 1}
-        )
+        start_event = Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1})
         await enhanced_handler.handle_event(start_event)
 
         assert enhanced_handler._is_recording is True
@@ -704,20 +646,19 @@ class TestOpenAIEventHandlerComprehensive:
         # Send multiple audio chunks
         for i in range(5):
             chunk_data = bytes([i % 256] * 200)
-            chunk_event = Event(
-                type="audio-chunk",
-                data={"rate": 16000, "width": 2, "channels": 1},
-                payload=chunk_data
-            )
+            chunk_event = Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=chunk_data)
             await enhanced_handler.handle_event(chunk_event)
 
         # Stop recording - this triggers transcription
-        with patch('wyoming_openai.handler.isinstance') as mock_isinstance:
+        with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
             def isinstance_side_effect(obj, class_or_tuple):
                 if obj is mock_transcription:
                     from openai.resources.audio.transcriptions import TranscriptionCreateResponse
+
                     return class_or_tuple is TranscriptionCreateResponse
                 return isinstance.__wrapped__(obj, class_or_tuple)
+
             mock_isinstance.side_effect = isinstance_side_effect
 
             stop_event = Event(type="audio-stop")
