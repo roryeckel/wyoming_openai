@@ -1083,7 +1083,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     model=voice.model_name,
                     voice=voice.name,
                     input=text,
-                    response_format="wav",
+                    response_format="pcm",
+                    extra_body={"stream": True},
                     speed=self._tts_speed if self._tts_speed is not None else omit,
                     instructions=self._tts_instructions if self._tts_instructions is not None else omit,
                 ) as response:
