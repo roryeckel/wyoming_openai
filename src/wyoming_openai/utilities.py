@@ -6,196 +6,106 @@ from io import BytesIO
 
 
 def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = True) -> Callable[[str], E]:
-    """
-    Create a type-safe parser function for argparse that converts strings to enum members.
-
-    This function generates a parser that:
-    - Handles case-insensitive matching (optional)
-    - Provides clear error messages listing all valid options
-    - Raises argparse.ArgumentTypeError for invalid inputs
-
-    Args:
-        enum_class: The Enum class to parse into
-        case_insensitive: Whether to allow case-insensitive matching (default: True)
-
-    Returns:
-        A callable that takes a string and returns the corresponding enum member
-
-    Raises:
-        argparse.ArgumentTypeError: When the input string doesn't match any enum member
-
-    Example:
-        >>> from enum import Enum
-        >>> class Color(Enum):
-        ...     RED = 1
-        ...     BLUE = 2
-        >>> parser = argparse.ArgumentParser()
-        >>> parser.add_argument('--color', type=create_enum_parser(Color))
-        >>> args = parser.parse_args(['--color', 'red'])
-        >>> args.color == Color.RED
-        True
-    """
+    """Create an argparse type function that converts strings to enum members."""
 
     def parse_enum(value: str) -> E:
-        lookup_value = value.upper() if case_insensitive else value
+        lookup = value.upper() if case_insensitive else value
         try:
-            return enum_class[lookup_value]
+            return enum_class[lookup]
         except KeyError as exc:
-            valid_options = ", ".join(member.name for member in enum_class)
-            raise argparse.ArgumentTypeError(
-                f"Invalid {enum_class.__name__}: '{value}'. Valid options are: {valid_options}"
-            ) from exc
+            valid = ", ".join(m.name for m in enum_class)
+            raise argparse.ArgumentTypeError(f"Invalid {enum_class.__name__}: '{value}'. Valid: {valid}") from exc
 
     return parse_enum
 
 
 def create_json_object_parser(option_name: str) -> Callable[[str], dict[str, object]]:
-    """
-    Create an argparse parser that validates a JSON object string.
+    """Create an argparse type function that validates a JSON object string."""
 
-    Args:
-        option_name: Human-readable option name to include in error messages.
-
-    Returns:
-        A callable that parses a JSON object string into a dictionary.
-
-    Raises:
-        argparse.ArgumentTypeError: When the value is not valid JSON or is not a JSON object.
-    """
-
-    def parse_json_object(value: str) -> dict[str, object]:
+    def parse(value: str) -> dict[str, object]:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError as exc:
             raise argparse.ArgumentTypeError(f"Invalid {option_name}: {exc.msg}") from exc
-
         if not isinstance(parsed, dict):
             raise argparse.ArgumentTypeError(
                 f"Invalid {option_name}: expected a JSON object, got {type(parsed).__name__}"
             )
-
         return parsed
 
-    return parse_json_object
+    return parse
 
 
-def validate_extra_body_response_format(
-    extra_body: dict[str, object] | None, *, allowed_formats: set[str], body_name: str
-) -> None:
-    """
-    Reject response formats that the handler cannot decode.
+def _check_response_format(extra_body: dict[str, object] | None, *, allowed: set[str], name: str) -> None:
+    """Reject unsupported response_format values in extra_body."""
+    if not extra_body or "response_format" not in extra_body:
+        return
+    fmt = extra_body["response_format"]
+    if isinstance(fmt, str) and fmt in allowed:
+        return
+    expected = ", ".join(repr(f) for f in sorted(allowed))
+    raise ValueError(f"{name} extra_body response_format must be one of {expected}; got {fmt!r}")
 
-    Args:
-        extra_body: Optional extra request fields to validate.
-        allowed_formats: Response formats supported by the consumer.
-        body_name: Human-readable request name for the error message.
 
-    Raises:
-        ValueError: When extra_body requests an unsupported response_format.
-    """
+def _check_bool_field(extra_body: dict[str, object] | None, *, field: str, name: str) -> None:
+    """Reject non-boolean extra_body fields."""
+    if not extra_body or field not in extra_body:
+        return
+    if not isinstance(extra_body[field], bool):
+        raise ValueError(f"{name} extra_body {field} must be a boolean; got {extra_body[field]!r}")
+
+
+def _check_disallowed_fields(extra_body: dict[str, object] | None, *, fields: set[str], name: str) -> None:
+    """Reject extra_body fields that would change response transport."""
     if not extra_body:
         return
-
-    if "response_format" not in extra_body:
-        return
-
-    response_format = extra_body["response_format"]
-    if isinstance(response_format, str) and response_format in allowed_formats:
-        return
-
-    expected_formats = ", ".join(repr(fmt) for fmt in sorted(allowed_formats))
-    raise ValueError(
-        f"{body_name} extra_body response_format must be one of {expected_formats}; "
-        f"got {response_format!r}"
-    )
-
-
-def validate_extra_body_boolean_field(
-    extra_body: dict[str, object] | None, *, field_name: str, body_name: str
-) -> None:
-    """Reject non-boolean extra_body fields that affect response parsing."""
-    if not extra_body or field_name not in extra_body:
-        return
-
-    field_value = extra_body[field_name]
-    if isinstance(field_value, bool):
-        return
-
-    raise ValueError(f"{body_name} extra_body {field_name} must be a boolean; got {field_value!r}")
-
-
-def validate_extra_body_disallowed_fields(
-    extra_body: dict[str, object] | None, *, field_names: set[str], body_name: str
-) -> None:
-    """Reject extra_body fields that would change the response transport."""
-    if not extra_body:
-        return
-
-    disallowed_fields = sorted(field_name for field_name in field_names if field_name in extra_body)
-    if not disallowed_fields:
-        return
-
-    formatted_fields = ", ".join(repr(field_name) for field_name in disallowed_fields)
-    raise ValueError(
-        f"{body_name} extra_body does not support overriding {formatted_fields}; "
-        "Wyoming expects raw audio bytes"
-    )
+    bad = sorted(f for f in fields if f in extra_body)
+    if bad:
+        formatted = ", ".join(repr(f) for f in bad)
+        raise ValueError(f"{name} extra_body does not support overriding {formatted}; Wyoming expects raw audio bytes")
 
 
 def get_extra_body_boolean_field(
     extra_body: dict[str, object] | None, *, field_name: str, default: bool, body_name: str
 ) -> bool:
-    """Return a boolean override from extra_body or fall back to a default value."""
+    """Return a boolean override from extra_body, or the default."""
     if not extra_body or field_name not in extra_body:
         return default
-
-    field_value = extra_body[field_name]
-    if isinstance(field_value, bool):
-        return field_value
-
-    raise ValueError(f"{body_name} extra_body {field_name} must be a boolean; got {field_value!r}")
+    val = extra_body[field_name]
+    if isinstance(val, bool):
+        return val
+    raise ValueError(f"{body_name} extra_body {field_name} must be a boolean; got {val!r}")
 
 
 def validate_stt_extra_body(extra_body: dict[str, object] | None) -> None:
-    """Validate STT extra_body fields that can affect client-side parsing."""
-    validate_extra_body_response_format(extra_body, allowed_formats={"json"}, body_name="STT")
-    validate_extra_body_boolean_field(extra_body, field_name="stream", body_name="STT")
+    _check_response_format(extra_body, allowed={"json"}, name="STT")
+    _check_bool_field(extra_body, field="stream", name="STT")
 
 
 def validate_tts_extra_body(extra_body: dict[str, object] | None) -> None:
-    """Validate TTS extra_body fields that can affect response decoding."""
-    validate_extra_body_response_format(extra_body, allowed_formats={"pcm", "wav"}, body_name="TTS")
-    validate_extra_body_disallowed_fields(
-        extra_body,
-        field_names={"stream", "stream_format"},
-        body_name="TTS",
-    )
+    _check_response_format(extra_body, allowed={"pcm", "wav"}, name="TTS")
+    _check_disallowed_fields(extra_body, fields={"stream", "stream_format"}, name="TTS")
+
+
+# Aliases for backward compatibility with old names used in tests
+validate_extra_body_response_format = lambda eb, *, allowed_formats, body_name: _check_response_format(
+    eb, allowed=allowed_formats, name=body_name
+)
+validate_extra_body_boolean_field = lambda eb, *, field_name, body_name: _check_bool_field(
+    eb, field=field_name, name=body_name
+)
+validate_extra_body_disallowed_fields = lambda eb, *, field_names, body_name: _check_disallowed_fields(
+    eb, fields=field_names, name=body_name
+)
 
 
 class NamedBytesIO(BytesIO):
-    """
-    A subclass of BytesIO that adds a 'name' attribute to the file-like object.
-    """
+    """BytesIO with a name attribute (needed by OpenAI SDK for file uploads)."""
 
     def __init__(self, *args, name="audio.wav", **kwargs):
-        """
-        Initialize a new NamedBytesIO instance.
-
-        Args:
-            *args: Variable length argument list passed to BytesIO constructor.
-            name (str): The name or filename associated with this byte stream.
-                        Default is 'audio.wav'.
-            **kwargs: Arbitrary keyword arguments passed to BytesIO constructor.
-        """
         super().__init__(*args, **kwargs)
         self._name = name
 
     @property
     def name(self):
-        """
-        Returns the name of the byte stream.
-
-        Returns:
-            str: The name or filename associated with this byte stream.
-        """
         return self._name
