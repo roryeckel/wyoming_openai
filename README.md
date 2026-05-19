@@ -590,3 +590,18 @@ This project uses [pytest](https://pytest.org/) for unit testing. Tests are loca
 
 All new code should include appropriate tests.
 A GitHub Action automatically runs pytest on all pull requests and branch pushes to ensure tests pass.
+
+#### End-to-End Integration Tests
+
+The `tests/test_e2e.py` suite drives a real `wyoming_openai` server over TCP and a real Speaches backend in Docker, with no Home Assistant or microphone needed. TTS output is verified by feeding it back through STT and fuzzy-matching the transcript against the original phrase.
+
+These tests are gated behind the `integration` marker and skipped by default. To run locally:
+
+```bash
+docker compose -f docker-compose.speaches-cpu.yml up -d speaches
+pytest -m integration -v
+```
+
+If Speaches is already healthy on `localhost:8000`, the fixture will reuse it. Set `WYOMING_OPENAI_KEEP_SPEACHES=1` to leave the container running between test invocations for faster iteration.
+
+A separate [Integration](.github/workflows/integration.yml) GitHub Actions workflow runs this suite on PRs against `main`.
