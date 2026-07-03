@@ -2,11 +2,22 @@
 
 OpenAI-Compatible Proxy Middleware for the Wyoming Protocol
 
-[![License](https://img.shields.io/github/license/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/blob/main/LICENSE) [![Python version](https://img.shields.io/pypi/pyversions/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/) [![GitHub issues](https://img.shields.io/github/issues/roryeckel/wyoming-openai.svg)](https://github.com/roryeckel/wyoming-openai/issues) [![Docker](https://img.shields.io/github/v/release/roryeckel/wyoming-openai?label=ghcr.io&logo=docker&logoColor=white&color=2496ED)](https://github.com/roryeckel/wyoming-openai/pkgs/container/wyoming_openai) [![PyPI version](https://badge.fury.io/py/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/)
+[![License](https://img.shields.io/github/license/roryeckel/wyoming_openai.svg)](https://github.com/roryeckel/wyoming_openai/blob/main/LICENSE) [![Python version](https://img.shields.io/pypi/pyversions/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/) [![GitHub issues](https://img.shields.io/github/issues/roryeckel/wyoming_openai.svg)](https://github.com/roryeckel/wyoming_openai/issues) [![Docker](https://img.shields.io/github/v/release/roryeckel/wyoming_openai?label=ghcr.io&logo=docker&logoColor=white&color=2496ED)](https://github.com/roryeckel/wyoming_openai/pkgs/container/wyoming_openai) [![PyPI version](https://badge.fury.io/py/wyoming-openai.svg)](https://pypi.org/project/wyoming-openai/)
 
 **Author:** Rory Eckel
 
 Note: This project is not affiliated with OpenAI or the Wyoming project.
+
+## Scope and Community Support
+
+Wyoming OpenAI primarily targets OpenAI-compatible APIs and the Wyoming protocol event flows built around them.
+
+- Questions, setup help, and general support: use [GitHub Discussions](https://github.com/roryeckel/wyoming_openai/discussions)
+- Bug reports, compatibility reports, and scoped feature requests: use [GitHub Issues](https://github.com/roryeckel/wyoming_openai/issues)
+- Project scope and compatibility policy: see [COMPATIBILITY.md](COMPATIBILITY.md)
+- Contribution expectations: see [CONTRIBUTING.md](CONTRIBUTING.md)
+
+Provider-specific custom endpoints and bespoke transports are generally out of scope unless explicitly approved. If another project exposes both an OpenAI-compatible route and a custom route, Wyoming OpenAI targets the OpenAI-compatible route.
 
 ## Overview
 
@@ -53,8 +64,8 @@ Example: Sharing TTS/STT services between [Open WebUI](#open-webui) and [Home As
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/roryeckel/wyoming-openai.git
-   cd wyoming-openai
+   git clone https://github.com/roryeckel/wyoming_openai.git
+   cd wyoming_openai
    ```
 
 2. **Create a Virtual Environment** (optional but recommended)
@@ -95,7 +106,7 @@ To enable symlink support on Windows:
 1. Enable **Developer Mode** in Windows Settings (Settings → System → For developers)
 2. Either clone with symlinks enabled:
    ```bash
-   git clone -c core.symlinks=true https://github.com/roryeckel/wyoming-openai.git
+   git clone -c core.symlinks=true https://github.com/roryeckel/wyoming_openai.git
    ```
    Or, if you've already cloned, enable symlinks and re-checkout:
    ```bash
@@ -106,7 +117,7 @@ To enable symlink support on Windows:
 
 You can verify symlinks are working by checking that `CLAUDE.md` contains the full project instructions rather than just the text `AGENTS.md`.
 
-## Installation from PyPI [![Publish to PyPI](https://github.com/roryeckel/wyoming-openai/actions/workflows/publish-to-pypi.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/publish-to-pypi.yml)
+## Installation from PyPI [![Publish to PyPI](https://github.com/roryeckel/wyoming_openai/actions/workflows/publish-to-pypi.yml/badge.svg)](https://github.com/roryeckel/wyoming_openai/actions/workflows/publish-to-pypi.yml)
 
 Since v0.3.2, `wyoming-openai` is now available on [PyPI](https://pypi.org/project/wyoming-openai/). To install the latest release, run:
 
@@ -186,7 +197,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 
 Both `STT_EXTRA_BODY` and `TTS_EXTRA_BODY` must be valid JSON objects. The OpenAI client merges these values into the outgoing request body rather than sending a nested `extra_body` field. Supported overlaps still need to match Wyoming's transport expectations: STT continues to require `response_format="json"`, and a boolean `stream` override will update both the request body and the client's response parser for `/v1/audio/transcriptions`. TTS can override raw-audio fields such as `response_format`, `speed`, and `instructions`, but rejects `stream` and `stream_format` because the handler expects audio bytes instead of SSE-style framing.
 
-## Docker (Recommended) [![Docker Image CI](https://github.com/roryeckel/wyoming-openai/actions/workflows/docker-image.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/docker-image.yml)
+## Docker (Recommended) [![Docker Image CI](https://github.com/roryeckel/wyoming_openai/actions/workflows/docker-image.yml/badge.svg)](https://github.com/roryeckel/wyoming_openai/actions/workflows/docker-image.yml)
 
 ### Prerequisites
 
@@ -531,7 +542,7 @@ Contributions are welcome! Please feel free to open issues or submit pull reques
 
 ## Quality Assurance
 
-### Linting (Ruff) [![Lint](https://github.com/roryeckel/wyoming-openai/actions/workflows/lint.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/lint.yml)
+### Linting (Ruff) [![Lint](https://github.com/roryeckel/wyoming_openai/actions/workflows/lint.yml/badge.svg)](https://github.com/roryeckel/wyoming_openai/actions/workflows/lint.yml)
 
 This project uses [Ruff](https://github.com/astral-sh/ruff) for linting and code quality checks. Ruff is a fast Python linter written in Rust that can replace multiple tools like flake8, isort, and more.
 
@@ -567,7 +578,7 @@ To use Pyright during development:
 
 Pyright configuration is defined in `pyproject.toml` under `[tool.pyright]`.
 
-### Testing (Pytest) [![Test](https://github.com/roryeckel/wyoming-openai/actions/workflows/test.yml/badge.svg)](https://github.com/roryeckel/wyoming-openai/actions/workflows/test.yml)
+### Testing (Pytest) [![Test](https://github.com/roryeckel/wyoming_openai/actions/workflows/test.yml/badge.svg)](https://github.com/roryeckel/wyoming_openai/actions/workflows/test.yml)
 
 This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
 

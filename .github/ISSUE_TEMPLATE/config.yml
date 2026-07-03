@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and support
+    url: https://github.com/roryeckel/wyoming_openai/discussions
+    about: Use Discussions for setup help, usage questions, and general support.
+  - name: Scope and compatibility policy
+    url: https://github.com/roryeckel/wyoming_openai/blob/main/COMPATIBILITY.md
+    about: Read this before filing issues about provider compatibility or custom APIs.
+  - name: Contribution guide
+    url: https://github.com/roryeckel/wyoming_openai/blob/main/CONTRIBUTING.md
+    about: Review project scope, issue expectations, and PR guidelines.

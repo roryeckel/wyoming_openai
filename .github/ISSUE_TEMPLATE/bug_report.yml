@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a reproducible bug on a supported surface.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        Before filing, please confirm this is about a supported OpenAI-compatible surface or core Wyoming behavior. Questions and setup help belong in Discussions.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      description: Pick the closest supported surface involved.
+      options:
+        - OpenAI-compatible /v1/audio/transcriptions
+        - OpenAI-compatible /v1/audio/speech
+        - OpenAI Realtime /v1/realtime transcription
+        - Wyoming event flow or handler behavior
+        - CLI or configuration behavior
+        - Documentation
+        - Other or not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Wyoming OpenAI version
+      description: PyPI version, Docker tag, or commit SHA.
+      placeholder: 0.5.0
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider or upstream server
+      description: Name the provider, wrapper, or server project involved.
+      placeholder: OpenAI, Speaches, LocalAI, Chatterbox-TTS-Server
+    validations:
+      required: true
+  - type: input
+    id: upstream_link
+    attributes:
+      label: Upstream project or issue link
+      description: Link the upstream server or issue if another project is involved.
+      placeholder: https://github.com/example/project
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Exact steps, requests, or configuration needed to reproduce the issue.
+      placeholder: |
+        1. Start Wyoming OpenAI with ...
+        2. Send request to ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or config snippets
+      description: Include only the relevant portion and remove secrets.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I have removed secrets from logs and config snippets.
+          required: true
+        - label: This report is about a supported OpenAI-compatible or core Wyoming surface, or I clearly linked the upstream project involved.
+          required: true
