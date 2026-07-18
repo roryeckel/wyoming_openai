@@ -355,7 +355,46 @@ For users who want to use Groq's fast inference cloud API, this setup provides a
   docker compose -f docker-compose.groq.yml up -d
   ```
 
-#### 9. Development with Docker
+#### 9. Deploying with Soniqo Speech Core
+
+[Soniqo Speech Core](https://github.com/soniqo/speech-core) provides local
+OpenAI-compatible speech-to-text and text-to-speech on Linux and Windows. Its
+server uses Parakeet for transcription and Kokoro for synthesis, with no audio
+or text sent to a remote service.
+
+Install a Speech Core release that exposes both `/v1/audio/transcriptions` and
+`/v1/audio/speech`, download its model bundle, and create a `.env` file with a
+shared key:
+
+```dotenv
+SPEECH_SERVER_API_KEY=replace-with-a-random-value
+```
+
+Start Speech Core on the host so the Wyoming container can reach it:
+
+```bash
+SPEECH_SERVER_API_KEY=replace-with-a-random-value \
+  speech serve --host 0.0.0.0
+```
+
+On Windows, run the server from the extracted package's `bin` directory:
+
+```powershell
+$env:SPEECH_SERVER_API_KEY = 'replace-with-a-random-value'
+.\speech-server.exe --host 0.0.0.0
+```
+
+Then start the included bridge config:
+
+```bash
+docker compose -f docker-compose.soniqo.yml up -d
+```
+
+The compose file advertises `whisper-1`, `tts-1`, and the bundled Kokoro voice
+IDs to Home Assistant. `host.docker.internal` works with Docker Desktop, and
+the included `host-gateway` mapping provides the same hostname on Linux.
+
+#### 10. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -365,9 +404,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 10. Example: Development with Additional Local Service
+#### 11. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, and `docker-compose.chatterbox.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, `docker-compose.soniqo.yml`, and `docker-compose.chatterbox.yml`.
 
 - **Command**:
   
@@ -375,7 +414,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 11. Docker Tags
+#### 12. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -389,7 +428,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
 
-#### 12. Pull Request Docker Images
+#### 13. Pull Request Docker Images
 
 For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
 
