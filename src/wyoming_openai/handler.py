@@ -1476,14 +1476,23 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Try to parse WAV header
             wav_params = self._parse_wav_header(audio_data)
             if wav_params:
-                audio_rate, audio_channels, audio_width, data_offset = wav_params
-                audio_data = audio_data[data_offset:]
+                audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
+                available_audio = audio_data[data_offset:]
+                if len(available_audio) < data_size:
+                    _LOGGER.warning(
+                        "TTS WAV response ended after %d of %d declared PCM bytes",
+                        len(available_audio),
+                        data_size,
+                    )
+                audio_data = available_audio[:data_size]
                 _LOGGER.debug(
-                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
+                    "header offset: %d, PCM size: %d bytes",
                     audio_rate,
                     audio_channels,
                     audio_width,
                     data_offset,
+                    data_size,
                 )
             else:
                 _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
@@ -1559,6 +1568,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             timestamp = start_timestamp
             awaiting_wav_header = self._get_tts_response_format() == "wav"
             pending_header = b""
+            remaining_wav_data: int | None = None
 
             if self._tts_client is None:
                 _LOGGER.error("No TTS client configured for synthesis")
@@ -1582,16 +1592,20 @@ class OpenAIEventHandler(AsyncEventHandler):
                             pending_header += chunk
                             wav_params = self._parse_wav_header(pending_header)
                             if wav_params:
-                                audio_rate, audio_channels, audio_width, data_offset = wav_params
-                                audio_data = pending_header[data_offset:]
+                                audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
+                                available_audio = pending_header[data_offset:]
+                                audio_data = available_audio[:data_size]
+                                remaining_wav_data = data_size - len(audio_data)
                                 pending_header = b""
                                 awaiting_wav_header = False
                                 _LOGGER.debug(
-                                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d",
+                                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
+                                    "header offset: %d, PCM size: %d bytes",
                                     audio_rate,
                                     audio_channels,
                                     audio_width,
                                     data_offset,
+                                    data_size,
                                 )
                             elif len(pending_header) <= TTS_WAV_HEADER_MAX_BYTES:
                                 continue
@@ -1605,6 +1619,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                                 awaiting_wav_header = False
                         else:
                             audio_data = chunk
+                            if remaining_wav_data is not None:
+                                audio_data = audio_data[:remaining_wav_data]
+                                remaining_wav_data -= len(audio_data)
 
                         if send_audio_start:
                             await self.write_event(
@@ -1630,6 +1647,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                                 audio_width=audio_width,
                                 audio_channels=audio_channels,
                             )
+
+            if remaining_wav_data:
+                _LOGGER.warning(
+                    "TTS WAV response ended with %d declared PCM bytes missing",
+                    remaining_wav_data,
+                )
 
             if awaiting_wav_header and pending_header:
                 _LOGGER.warning(
@@ -1680,10 +1703,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         actual_frames = len(audio_data) // frame_size
         return timestamp + (actual_frames / audio_rate) * 1000
 
-    def _parse_wav_header(self, wav_data: bytes) -> tuple[int, int, int, int] | None:
+    def _parse_wav_header(self, wav_data: bytes) -> tuple[int, int, int, int, int] | None:
         """
-        Parse WAV header to extract sample rate, channels, sample width, and data offset.
-        Returns (sample_rate, channels, sample_width, data_offset) or None if parsing fails.
+        Parse WAV header to extract the PCM format, data offset, and data size.
+        Returns (sample_rate, channels, sample_width, data_offset, data_size) or None if parsing fails.
         """
         try:
             # Create a BytesIO object from the data
@@ -1694,11 +1717,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                 sample_rate = wav_file.getframerate()
                 channels = wav_file.getnchannels()
                 sample_width = wav_file.getsampwidth()
+                data_size = wav_file.getnframes() * channels * sample_width
 
                 # Get the current position which should be at the start of audio data
                 data_offset = wav_io.tell()
 
-                return sample_rate, channels, sample_width, data_offset
+                return sample_rate, channels, sample_width, data_offset, data_size
         except Exception as e:
             _LOGGER.debug("Failed to parse WAV header: %s", e)
             return None
