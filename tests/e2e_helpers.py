@@ -22,7 +22,7 @@ from wyoming.asr import Transcribe, Transcript, TranscriptChunk, TranscriptStart
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
 from wyoming.event import Event
-from wyoming.info import Describe, Info
+from wyoming.info import Describe, Info, SelectProgram
 from wyoming.tts import (
     Synthesize,
     SynthesizeChunk,
@@ -155,6 +155,10 @@ class WyomingTestClient:
             raise WyomingServerClosedError(f"Connection closed while waiting for {expecting}")
         return event
 
+    async def select_program(self, name: str) -> None:
+        """Pin a program for this connection (wyoming 1.10.0 select-program)."""
+        await self._write_event(SelectProgram(name=name).event())
+
     async def describe(self) -> Info:
         await self._write_event(Describe().event())
         async with asyncio.timeout(self._operation_timeout):
@@ -164,7 +168,13 @@ class WyomingTestClient:
                     return Info.from_event(event)
 
     async def transcribe(
-        self, wav_bytes: bytes, model: str | None = None, language: str = "en"
+        self,
+        wav_bytes: bytes,
+        model: str | None = None,
+        language: str = "en",
+        vad_sensitivity: str | None = None,
+        transcript_names: list[str] | None = None,
+        transcript_terms: list[str] | None = None,
     ) -> TranscriptionResult:
         with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
             rate = wav.getframerate()
@@ -172,7 +182,15 @@ class WyomingTestClient:
             channels = wav.getnchannels()
             pcm = wav.readframes(wav.getnframes())
 
-        await self._write_event(Transcribe(name=model, language=language).event())
+        await self._write_event(
+            Transcribe(
+                name=model,
+                language=language,
+                vad_sensitivity=vad_sensitivity,
+                transcript_names=transcript_names,
+                transcript_terms=transcript_terms,
+            ).event()
+        )
         await self._write_event(AudioStart(rate=rate, width=width, channels=channels).event())
 
         bytes_per_frame = width * channels
@@ -202,14 +220,18 @@ class WyomingTestClient:
         text = final_text if final_text is not None else streamed_text
         return TranscriptionResult(text=text, event_types=event_types)
 
-    async def synthesize(self, text: str, voice: str | None = None) -> SynthesizedAudio:
+    async def synthesize(
+        self, text: str, voice: str | None = None, text_format: str | None = None
+    ) -> SynthesizedAudio:
         synth_voice = SynthesizeVoice(name=voice) if voice else None
-        await self._write_event(Synthesize(text=text, voice=synth_voice).event())
+        await self._write_event(Synthesize(text=text, voice=synth_voice, text_format=text_format).event())
         return await self._collect_audio()
 
-    async def synthesize_streaming(self, text: str, voice: str | None = None) -> SynthesizedAudio:
+    async def synthesize_streaming(
+        self, text: str, voice: str | None = None, text_format: str | None = None
+    ) -> SynthesizedAudio:
         synth_voice = SynthesizeVoice(name=voice) if voice else None
-        await self._write_event(SynthesizeStart(voice=synth_voice).event())
+        await self._write_event(SynthesizeStart(voice=synth_voice, text_format=text_format).event())
         await self._write_event(SynthesizeChunk(text=text).event())
         await self._write_event(SynthesizeStop().event())
         return await self._collect_audio(expect_synthesize_stopped=True)
