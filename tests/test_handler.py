@@ -2,6 +2,7 @@ import asyncio
 import base64
 import builtins
 import io
+import struct
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -17,6 +18,27 @@ from wyoming_openai.handler import (
     OpenAIEventHandler,
     TtsStreamError,
 )
+
+
+def _riff_chunk(chunk_id: bytes, payload: bytes) -> bytes:
+    """Build a word-aligned RIFF chunk."""
+    padding = b"\x00" if len(payload) % 2 else b""
+    return chunk_id + struct.pack("<I", len(payload)) + payload + padding
+
+
+def _pcm_wav_with_trailing_metadata(pcm: bytes) -> bytes:
+    """Build a valid PCM WAV with LIST/INFO and C2PA chunks after data."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(24000)
+        wav_file.writeframes(pcm)
+
+    wav_data = wav_buffer.getvalue()
+    metadata = _riff_chunk(b"LIST", b"INFOISFT\x08\x00\x00\x00CrispASR") + _riff_chunk(b"C2PA", b"manifest")
+    complete_wav = wav_data + metadata
+    return complete_wav[:4] + struct.pack("<I", len(complete_wav) - 8) + complete_wav[8:]
 
 
 @pytest.fixture
@@ -1111,6 +1133,50 @@ class TestOpenAIEventHandlerComprehensive:
         assert timestamp == pytest.approx(1000.0)
 
     @pytest.mark.asyncio
+    async def test_stream_audio_to_wyoming_excludes_trailing_riff_chunks(self, enhanced_handler):
+        """Test buffered WAV conversion stops at the declared PCM data boundary."""
+        pcm = b"\x00\x01" * 240
+        wav_data = _pcm_wav_with_trailing_metadata(pcm)
+
+        timestamp = await enhanced_handler._stream_audio_to_wyoming(
+            wav_data,
+            is_first_chunk=True,
+            start_timestamp=0,
+        )
+
+        audio_chunk_events = [
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "audio-chunk"
+        ]
+        emitted_audio = b"".join(event.payload for event in audio_chunk_events)
+        assert emitted_audio == pcm
+        assert b"LIST" not in emitted_audio
+        assert b"C2PA" not in emitted_audio
+        assert timestamp == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
+    async def test_stream_audio_to_wyoming_warns_for_truncated_wav(self, enhanced_handler, caplog):
+        """Test buffered WAV conversion reports an incomplete declared PCM payload."""
+        pcm = b"\x00\x01" * 240
+        wav_data = _pcm_wav_with_trailing_metadata(pcm)
+        wav_params = enhanced_handler._parse_wav_header(wav_data)
+        assert wav_params is not None
+        data_offset = wav_params[3]
+        truncated_wav = wav_data[: data_offset + len(pcm) - 10]
+
+        timestamp = await enhanced_handler._stream_audio_to_wyoming(
+            truncated_wav,
+            is_first_chunk=True,
+            start_timestamp=0,
+        )
+
+        audio_chunk_events = [
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "audio-chunk"
+        ]
+        assert b"".join(event.payload for event in audio_chunk_events) == pcm[:-10]
+        assert timestamp == pytest.approx(470 / 2 / 24000 * 1000)
+        assert "ended after 470 of 480 declared PCM bytes" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_stream_tts_audio_uses_frame_count_for_stereo_audio(self, enhanced_handler, mock_clients):
         """Test direct TTS streaming preserves correct stereo timing."""
         _, tts_client = mock_clients
@@ -1211,6 +1277,107 @@ class TestOpenAIEventHandlerComprehensive:
         assert audio_chunk_events
         assert audio_chunk_events[0].payload == wav_data[44:60]
         assert b"".join(event.payload for event in audio_chunk_events) == wav_data[44:]
+
+    @pytest.mark.asyncio
+    async def test_stream_tts_audio_excludes_trailing_riff_chunks_across_http_boundaries(
+        self, enhanced_handler, mock_clients
+    ):
+        """Test incremental WAV conversion stops at the data boundary for varied HTTP chunks."""
+        _, tts_client = mock_clients
+        pcm = b"\x00\x01" * 240
+        wav_data = _pcm_wav_with_trailing_metadata(pcm)
+        wav_params = enhanced_handler._parse_wav_header(wav_data)
+        assert wav_params is not None
+        data_offset = wav_params[3]
+        data_end = data_offset + len(pcm)
+        chunk_layouts = [
+            [wav_data],
+            [wav_data[: data_end - 8], wav_data[data_end - 8 : data_end + 4], wav_data[data_end + 4 :]],
+            [wav_data[:data_end], wav_data[data_end:]],
+        ]
+
+        class MockAsyncIterator:
+            def __init__(self, chunks):
+                self.chunks = chunks
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.chunks):
+                    raise StopAsyncIteration
+                chunk = self.chunks[self.index]
+                self.index += 1
+                return chunk
+
+        voice = enhanced_handler._get_voice("alloy")
+        assert voice is not None
+
+        for chunks in chunk_layouts:
+            mock_response = Mock()
+            mock_response.iter_bytes = Mock(return_value=MockAsyncIterator(chunks))
+            mock_stream_response = AsyncMock()
+            mock_stream_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_stream_response.__aexit__ = AsyncMock(return_value=None)
+            tts_client.audio.speech.with_streaming_response.create = Mock(return_value=mock_stream_response)
+            enhanced_handler.write_event.reset_mock()
+
+            timestamp = await enhanced_handler._stream_tts_audio(voice, "Hello world", send_audio_start=True)
+
+            audio_chunk_events = [
+                call.args[0]
+                for call in enhanced_handler.write_event.call_args_list
+                if call.args[0].type == "audio-chunk"
+            ]
+            emitted_audio = b"".join(event.payload for event in audio_chunk_events)
+            assert emitted_audio == pcm
+            assert b"LIST" not in emitted_audio
+            assert b"C2PA" not in emitted_audio
+            assert timestamp == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
+    async def test_stream_tts_audio_warns_for_truncated_wav(self, enhanced_handler, mock_clients, caplog):
+        """Test incremental WAV conversion reports missing declared PCM bytes."""
+        _, tts_client = mock_clients
+        pcm = b"\x00\x01" * 240
+        wav_data = _pcm_wav_with_trailing_metadata(pcm)
+        wav_params = enhanced_handler._parse_wav_header(wav_data)
+        assert wav_params is not None
+        data_end = wav_params[3] + len(pcm)
+        truncated_wav = wav_data[: data_end - 10]
+
+        class MockAsyncIterator:
+            def __init__(self, data):
+                self.data = data
+                self.done = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.done:
+                    raise StopAsyncIteration
+                self.done = True
+                return self.data
+
+        mock_response = Mock()
+        mock_response.iter_bytes = Mock(return_value=MockAsyncIterator(truncated_wav))
+        mock_stream_response = AsyncMock()
+        mock_stream_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream_response.__aexit__ = AsyncMock(return_value=None)
+        tts_client.audio.speech.with_streaming_response.create = Mock(return_value=mock_stream_response)
+        voice = enhanced_handler._get_voice("alloy")
+        assert voice is not None
+
+        timestamp = await enhanced_handler._stream_tts_audio(voice, "Hello world", send_audio_start=True)
+
+        audio_chunk_events = [
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "audio-chunk"
+        ]
+        assert b"".join(event.payload for event in audio_chunk_events) == pcm[:-10]
+        assert timestamp == pytest.approx(470 / 2 / 24000 * 1000)
+        assert "ended with 10 declared PCM bytes missing" in caplog.text
 
     @pytest.mark.asyncio
     async def test_handle_streaming_synthesis(self, enhanced_handler, mock_clients):
