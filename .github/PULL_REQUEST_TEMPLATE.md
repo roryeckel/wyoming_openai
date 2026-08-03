@@ -12,6 +12,13 @@ reads cleanly out of context.
 
 
 
+## Checklist
+
+- [ ] This change stays within the project's supported scope.
+- [ ] Tests were added or updated if supported behavior changed.
+- [ ] Docs were updated if user-facing behavior changed.
+- [ ] This does not add a provider-specific custom API without prior maintainer approval.
+
 ## Details
 
 <!-- Optional: implementation notes, design choices, links to related issues/PRs. Closes #N goes here. -->
@@ -21,5 +28,4 @@ reads cleanly out of context.
 ## Testing
 
 <!-- How you verified this. Commands run, manual steps, screenshots, etc. -->
-
 

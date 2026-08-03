@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a scoped feature request for Wyoming OpenAI.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+
+        This project prioritizes OpenAI-compatible behavior. Requests that mainly depend on provider-specific custom APIs are unlikely to be accepted here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the user problem first, not just the proposed solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior you want to see.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface would this affect?
+      options:
+        - OpenAI-compatible /v1/audio/transcriptions
+        - OpenAI-compatible /v1/audio/speech
+        - OpenAI Realtime /v1/realtime transcription
+        - Wyoming event flow or handler behavior
+        - CLI or configuration behavior
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or upstream context
+      description: Include upstream links, related projects, or alternatives you considered.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I understand this project primarily targets OpenAI-compatible behavior.
+          required: true
+        - label: This request is not solely asking for support of a provider-specific custom API outside the OpenAI-compatible surface.
+          required: true

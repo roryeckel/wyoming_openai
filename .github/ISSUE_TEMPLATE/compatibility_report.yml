@@ -1,0 +1,73 @@
+name: Compatibility report
+description: Report an interoperability problem with an OpenAI-compatible provider or wrapper.
+title: "[Compatibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when another provider or wrapper claims OpenAI compatibility but does not appear to behave correctly on the route Wyoming OpenAI uses.
+
+        If the behavior only exists on a custom provider route such as `/tts`, it is likely upstream or out of scope here.
+  - type: input
+    id: project
+    attributes:
+      label: Upstream project or provider
+      placeholder: Chatterbox-TTS-Server
+    validations:
+      required: true
+  - type: input
+    id: project_link
+    attributes:
+      label: Upstream project link
+      placeholder: https://github.com/example/project
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Upstream version or commit
+      placeholder: v1.2.3 or abc1234
+  - type: dropdown
+    id: route
+    attributes:
+      label: Exact route involved
+      options:
+        - OpenAI-compatible /v1/audio/transcriptions
+        - OpenAI-compatible /v1/audio/speech
+        - OpenAI Realtime /v1/realtime transcription
+        - A custom provider route
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: divergence
+    attributes:
+      label: How does the behavior diverge?
+      description: Describe the specific request or response behavior that differs from the supported OpenAI-compatible surface.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include enough detail to show whether the problem belongs here or upstream.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link exact docs, code, logs, or upstream issues.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I linked the upstream project or implementation involved.
+          required: true
+        - label: I am reporting behavior on the OpenAI-compatible route used by Wyoming OpenAI, or I clearly explained why I am unsure.
+          required: true
+        - label: I understand that support for custom provider routes may be out of scope.
+          required: true
