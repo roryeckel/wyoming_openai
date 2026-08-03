@@ -111,7 +111,13 @@ class WyomingTestClient:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._client is not None:
-            await self._client.disconnect()
+            try:
+                await self._client.disconnect()
+            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+                # disconnect() flushes buffered writes; when the server already
+                # reset the connection (the negative tests induce exactly this),
+                # that flush can fail. A dead connection at teardown is fine.
+                pass
             self._client = None
 
     @property
@@ -141,6 +147,10 @@ class WyomingTestClient:
             raise WyomingTimeoutError(
                 f"No event within {self._event_timeout}s while waiting for {expecting}"
             ) from exc
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as exc:
+            # A hard reset (RST) surfaces as an error rather than the clean
+            # None-on-EOF path below; normalize both to the same exception.
+            raise WyomingServerClosedError(f"Connection reset while waiting for {expecting}") from exc
         if event is None:
             raise WyomingServerClosedError(f"Connection closed while waiting for {expecting}")
         return event
