@@ -2018,7 +2018,7 @@ async def test_synthesize_ssml_strips_tags_before_sending(enhanced_handler):
 
     assert result is True
     enhanced_handler._stream_tts_audio.assert_awaited_once()
-    assert enhanced_handler._stream_tts_audio.await_args.args[1] == "Hello world"
+    assert enhanced_handler._stream_tts_audio.await_args_list[0].args[1] == "Hello world"
 
 
 @pytest.mark.asyncio
@@ -2031,7 +2031,7 @@ async def test_synthesize_text_format_text_passes_through(enhanced_handler):
     )
 
     assert result is True
-    assert enhanced_handler._stream_tts_audio.await_args.args[1] == text
+    assert enhanced_handler._stream_tts_audio.await_args_list[0].args[1] == text
 
 
 @pytest.mark.asyncio
@@ -2044,7 +2044,7 @@ async def test_synthesize_text_format_none_passes_through(enhanced_handler):
     )
 
     assert result is True
-    assert enhanced_handler._stream_tts_audio.await_args.args[1] == text
+    assert enhanced_handler._stream_tts_audio.await_args_list[0].args[1] == text
 
 
 @pytest.mark.asyncio
