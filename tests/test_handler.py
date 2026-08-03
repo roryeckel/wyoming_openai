@@ -2065,3 +2065,74 @@ async def test_synthesize_start_ssml_strips_chunk_tags(enhanced_handler):
     assert result is True
     assert enhanced_handler._text_accumulator == "Hello world"
     assert enhanced_handler._synthesis_buffer == ["Hello world"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_tag_split_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # Tag split mid-name across chunk boundaries must not leak markup
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<speak>Hello <em"}))
+    await enhanced_handler.handle_event(
+        Event(type="synthesize-chunk", data={"text": "phasis>world</emphasis></speak>"})
+    )
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_tag_split_across_three_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    for chunk in ("Hello<br", "ea", "k/>world"):
+        await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": chunk}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stop_flushes_ssml_carry(enhanced_handler):
+    enhanced_handler.write_event = AsyncMock()
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hi <"}))
+    assert enhanced_handler._ssml_carry == "<"
+
+    # A trailing "<" never completed into a tag is literal text, not markup
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+    enhanced_handler._audio_started = True  # take the incremental early-exit path
+    await enhanced_handler.handle_event(Event(type="synthesize-stop", data={}))
+
+    flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
+    assert flushed_text == ["Hi <"]
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_no_select_program_explicit_cross_program_names_resolve(multi_program_handler):
+    """Without select-program, every advertised model/voice stays addressable by
+    explicit name across programs (deliberate: pre-1.10 clients cannot select)."""
+    result = await multi_program_handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "language": "en"})
+    )
+    assert result is True
+    assert multi_program_handler._current_asr_model.name == "whisper-1"
+
+    assert multi_program_handler._get_voice("alloy (tts-1)") is not None

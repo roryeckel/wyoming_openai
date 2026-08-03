@@ -61,6 +61,7 @@ TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when streaming sentences
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
+_MAX_SSML_TAG_CARRY = 64  # Longer trailing "<..." fragments are treated as literal text, not a split tag
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer: list[str] = []
         self._synthesis_voice: SynthesizeVoice | None = None
         self._synthesis_text_format: str | SynthesizeTextFormat | None = None
+        self._ssml_carry: str = ""
         self._is_synthesizing: bool = False
 
         # State for incremental sentence detection
@@ -725,7 +727,13 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._wav_buffer = None
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
-        """Get an ASR model by name or None"""
+        """Get an ASR model by name or None.
+
+        Without a select-program event, nameless requests resolve to the first
+        program (per wyoming 1.10 defaults) but explicit names deliberately
+        resolve across all programs: every advertised model stays addressable
+        by clients that cannot send select-program.
+        """
         programs = [self._selected_asr_program] if self._selected_asr_program else self._wyoming_info.asr
         for program in programs:
             for model in program.models:
@@ -795,7 +803,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         return False
 
     def _iter_tts_voices(self):
-        """Iterate over configured TTS voices, limited to the selected program when set."""
+        """Iterate over configured TTS voices, limited to the selected program when set.
+
+        Without a selection all programs' voices stay addressable by name; the
+        collision-aware public voice names (e.g. "alloy (tts-1)") exist so
+        clients without select-program support can reach any advertised voice.
+        """
         programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
         for program in programs:
             for voice in program.voices:
@@ -1040,6 +1053,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._ready_chunks = []
         self._pysbd_segmenters.clear()
         self._synthesis_voice = None
+        self._synthesis_text_format = None
+        self._ssml_carry = ""
 
         return False
 
@@ -1218,6 +1233,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer = []
         self._is_synthesizing = True
         self._synthesis_text_format = synthesize_start.text_format
+        self._ssml_carry = ""
 
         # Reset incremental detection state
         self._text_accumulator = ""
@@ -1251,9 +1267,16 @@ class OpenAIEventHandler(AsyncEventHandler):
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
         _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
 
-        # Strip per chunk so pysbd segments plain text; a tag split across
-        # chunk boundaries is not reassembled and its fragments pass through
+        # Strip per chunk so pysbd segments plain text. A tag split across
+        # chunk boundaries ("<bre" + "ak/>") is reassembled by holding a
+        # trailing partial tag back until the next chunk (or synthesize-stop).
         if self._is_ssml_format(self._synthesis_text_format):
+            chunk_text = self._ssml_carry + chunk_text
+            self._ssml_carry = ""
+            last_lt = chunk_text.rfind("<")
+            if last_lt > chunk_text.rfind(">") and len(chunk_text) - last_lt <= _MAX_SSML_TAG_CARRY:
+                self._ssml_carry = chunk_text[last_lt:]
+                chunk_text = chunk_text[:last_lt]
             chunk_text = strip_ssml(chunk_text)
 
         # Store in buffer for fallback compatibility
@@ -1306,6 +1329,14 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._is_synthesizing = False
 
+        # Flush any held-back partial SSML tag; at end of stream it is either a
+        # malformed fragment (kept literally by strip_ssml) or literal text
+        if self._ssml_carry:
+            flushed = strip_ssml(self._ssml_carry)
+            self._ssml_carry = ""
+            self._text_accumulator += flushed
+            self._synthesis_buffer.append(flushed)
+
         # Process any remaining text in the accumulator (even if it's incomplete)
         # This is the final text, so we process it regardless of sentence completion
         if self._text_accumulator.strip():
@@ -1324,6 +1355,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer = []
         self._synthesis_voice = None
         self._synthesis_text_format = None
+        self._ssml_carry = ""
         self._text_accumulator = ""
         self._ready_chunks = []
         self._pysbd_segmenters.clear()  # Clear segmenter cache
