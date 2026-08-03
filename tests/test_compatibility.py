@@ -74,6 +74,20 @@ def test_create_asr_programs():
     assert all(isinstance(p, AsrProgram) for p in progs)
 
 
+def test_create_asr_programs_vad_audio_preferences_default_true():
+    """Lock in the accepted wyoming 1.10.0 defaults for all program shapes.
+
+    VAD optimizations are deferred; this fails loudly if the library defaults
+    change or a program starts overriding them.
+    """
+    progs = create_asr_programs(["m1"], ["m2"], "url", ["en"], stt_realtime_models=["m3"])
+    assert len(progs) == 3
+    for prog in progs:
+        assert prog.requires_external_vad is True
+        assert prog.prefers_auto_gain_enabled is True
+        assert prog.prefers_noise_reduction_enabled is True
+
+
 def test_create_tts_voices():
     voices = create_tts_voices(["m"], [], ["v"], "url", ["en"])
     assert isinstance(voices, list)
