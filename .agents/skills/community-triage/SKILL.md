@@ -143,6 +143,7 @@ If the issue remains unsupported by evidence after reasonable follow-up, close i
 - Do not treat "it works in another server's `/tts` route" as evidence that this repo should adopt that route.
 - Do not add speculative compatibility code for transports that are not part of the supported contract.
 - Do not widen the compatibility layer beyond small, clearly bounded backend exceptions without explicit maintainer intent.
+- Do not add new provider-specific autodetection probes (custom `/health`, `/readyz`, `/test`, or similar routes) when explicit backend configuration or the OpenAI-compatible surface itself can identify the backend. A new provider-specific route is justifiable only when it fills a gap the OpenAI spec does not cover (for example voice listing); pure identity probes do not meet that bar.
 - Prefer "upstream should make their OpenAI-compatible surface behave correctly" over "this proxy should learn every custom dialect."
 
 ## Boundary Example
@@ -282,6 +283,7 @@ Reopen or continue when:
 - conflating "streaming exists somewhere in the upstream project" with "the supported integration surface streams here"
 - adding fallback behavior for undocumented responses
 - treating backend enum exceptions as permission for general vendor lock-in
+- adding new provider-specific autodetection probes when explicit backend configuration would work. Provider-specific routes are acceptable only when they fill a gap the OpenAI spec lacks (for example voice/model listing) — not for pure identity probes.
 
 ## Maintainer Intent Distilled
 

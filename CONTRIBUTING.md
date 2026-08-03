@@ -28,6 +28,9 @@ The following are usually out of scope unless explicitly approved by the maintai
 - provider-specific streaming flags or transport semantics outside the OpenAI-compatible surface
 - custom request or response schemas for a single upstream wrapper
 - speculative compatibility code without a concrete supported use case
+- new provider-specific health-check or autodetection endpoints (such as custom `/health`, `/readyz`, or `/test` routes) when explicit backend configuration or the OpenAI-compatible surface itself can identify the backend
+
+The one accepted exception to "no provider-specific routes" is a helper that fills a gap the OpenAI spec does not cover — for example, listing available voices, which OpenAI has no endpoint for. A provider-specific route is justifiable only when it provides a capability the OpenAI-compatible surface lacks. Pure identity or health probes do not meet that bar.
 
 If an upstream project exposes both an OpenAI-compatible route and a custom route, this project targets the OpenAI-compatible route.
 

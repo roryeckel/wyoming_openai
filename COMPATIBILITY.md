@@ -33,6 +33,31 @@ This project includes a small backend compatibility layer for some known backend
 
 These shims exist to smooth known interoperability gaps. They are not a general policy of implementing every provider-specific route or dialect.
 
+### Provider-Specific Helpers: Allowed Carve-Outs
+
+The OpenAI API spec does not cover every operation this proxy needs. A small set of provider-specific routes are accepted as carve-outs, but **only** when they fill a gap the OpenAI spec does not provide.
+
+Allowed carve-outs today:
+
+| Helper | Route | Why accepted |
+| --- | --- | --- |
+| `_list_kokoro_fastapi_voices` | `/audio/voices` | OpenAI has no voice-listing endpoint. |
+| `_list_speaches_voices` | `/models/{model}` and legacy `/audio/speech/voices` | OpenAI has no per-model voice-listing endpoint. |
+| `_list_localai_voices` | none (synthesizes voice from model name) | Fills the same voice-listing gap without a custom route. |
+
+The rule: a provider-specific route is acceptable when it provides a capability the OpenAI-compatible surface lacks (for example, listing available voices or models). It is not acceptable when an OpenAI-compatible route already provides the capability.
+
+### Backend Autodetection
+
+Backend autodetection currently relies on provider-specific health endpoints (for example `/test`, `/readyz`, and `/health`) for the historical backends above. Unlike the voice-listing carve-outs, these probes do not fill a gap in the OpenAI spec — they only identify which shim to apply.
+
+Adding new custom-route health probes is discouraged. Prefer, in order:
+
+1. explicit `--stt-backend` / `--tts-backend` configuration, or
+2. detection via the OpenAI-compatible surface itself.
+
+A new provider-specific route is justifiable only when it provides a capability the OpenAI-compatible surface lacks (see the voice-listing carve-outs above); pure identity probes do not meet that bar.
+
 ## Out of Scope by Default
 
 The following are out of scope unless explicitly approved by the maintainer:
