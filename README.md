@@ -590,3 +590,41 @@ This project uses [pytest](https://pytest.org/) for unit testing. Tests are loca
 
 All new code should include appropriate tests.
 A GitHub Action automatically runs pytest on all pull requests and branch pushes to ensure tests pass.
+
+#### End-to-End Integration Tests
+
+The `tests/test_e2e.py` suite drives a real `wyoming_openai` server over TCP and a real Speaches backend in Docker, with no Home Assistant or microphone needed. TTS output is verified by feeding it back through STT and fuzzy-matching the transcript against the original phrase (with tolerance for minor mishearing).
+
+These tests are gated behind the `integration` marker and skipped by default. To run locally, just:
+
+```bash
+pytest -m integration -v
+```
+
+The fixtures handle the backend automatically: a Speaches instance already healthy on `localhost:8000` is reused; otherwise the Docker Compose stack (`docker-compose.speaches-cpu.yml` layered with `docker-compose.e2e.yml`, which swaps in a smaller Whisper model for testing) is started and torn down; if Docker is unavailable, the suite skips. Useful environment variables:
+
+- `WYOMING_OPENAI_KEEP_SPEACHES=1` - leave the Speaches container running between invocations for faster iteration (model load is the slow part).
+- `WYOMING_E2E_URI=tcp://host:port` - target an already-running proxy instead of spawning a subprocess (the autodetection test skips in this mode, since it must control the server's environment).
+- `WYOMING_E2E_ARTIFACT_DIR=<dir>` - save synthesized WAVs and server logs for debugging (CI uses this to upload artifacts on failure).
+
+To test the actual Docker image end-to-end (what the containerized CI smoke job does):
+
+```bash
+docker build -t wyoming_openai:e2e .
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d
+WYOMING_E2E_URI=tcp://127.0.0.1:10300 pytest -m "integration and smoke" -v
+```
+
+Or in PowerShell:
+
+```powershell
+docker build -t wyoming_openai:e2e .
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d
+$env:WYOMING_E2E_URI = "tcp://127.0.0.1:10300"; pytest -m "integration and smoke" -v
+```
+
+Windows note: this works under Docker Desktop; run pytest from a native Windows Python (not WSL) so subprocess spawning and localhost port publishing line up.
+
+Realtime models (`STT_REALTIME_MODELS`) are intentionally not covered - they use the OpenAI websocket API, which Speaches does not implement.
+
+The [Integration](.github/workflows/integration.yml) GitHub Actions workflow runs this suite on pushes and PRs against `main`: one job with the subprocess proxy, plus a smoke job against the freshly built Docker image.
