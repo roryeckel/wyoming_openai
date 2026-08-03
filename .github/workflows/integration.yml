@@ -1,0 +1,217 @@
+name: Integration
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Full e2e suite: Speaches in Docker, wyoming_openai as a pytest-managed
+  # subprocess. TTS output is round-tripped through STT and fuzzy-matched.
+  e2e-subprocess:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: wyoming_openai
+      WYOMING_E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Restore Hugging Face model cache
+        id: hf-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: hf-cache
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml') }}
+          restore-keys: hf-
+
+      - name: Seed docker volume from cache
+        run: |
+          mkdir -p hf-cache
+          docker volume create wyoming_openai_huggingface-hub
+          if [ -n "$(ls -A hf-cache 2>/dev/null)" ]; then
+            docker run --rm \
+              -v wyoming_openai_huggingface-hub:/dest \
+              -v "$PWD/hf-cache":/src \
+              alpine sh -c "cp -a /src/. /dest/"
+          fi
+
+      - name: Start Speaches
+        run: docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d speaches
+
+      - name: Wait for Speaches to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              echo "Speaches healthy after ${i} polls"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Speaches did not become healthy in time"
+          docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml logs speaches
+          exit 1
+
+      - name: Run integration tests
+        run: pytest -m integration -v --timeout=180
+
+      # always(): save the downloaded models even when tests fail, so a rerun
+      # of a failed cold-cache run doesn't download them again.
+      - name: Snapshot HF cache for next run
+        if: always() && steps.hf-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf hf-cache
+          mkdir -p hf-cache
+          docker run --rm \
+            -v wyoming_openai_huggingface-hub:/src \
+            -v "$PWD/hf-cache":/dest \
+            alpine sh -c "cp -a /src/. /dest/"
+
+      - name: Save Hugging Face model cache
+        if: always() && steps.hf-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: hf-cache
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml') }}
+
+      - name: Capture logs on failure
+        if: failure()
+        run: |
+          mkdir -p "$WYOMING_E2E_ARTIFACT_DIR"
+          docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml logs speaches > "$WYOMING_E2E_ARTIFACT_DIR/speaches.log" 2>&1 || true
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-subprocess-artifacts
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml down -v
+
+  # Smoke test against the actual built Docker image: the proxy runs as a
+  # container next to Speaches, and the smoke subset of the e2e suite targets
+  # it over TCP via WYOMING_E2E_URI.
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: wyoming_openai
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Restore only - the e2e-subprocess job owns cache saves, avoiding a
+      # write race between the two parallel jobs.
+      - name: Restore Hugging Face model cache
+        uses: actions/cache/restore@v4
+        with:
+          path: hf-cache
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml') }}
+          restore-keys: hf-
+
+      - name: Seed docker volume from cache
+        run: |
+          mkdir -p hf-cache
+          docker volume create wyoming_openai_huggingface-hub
+          if [ -n "$(ls -A hf-cache 2>/dev/null)" ]; then
+            docker run --rm \
+              -v wyoming_openai_huggingface-hub:/dest \
+              -v "$PWD/hf-cache":/src \
+              alpine sh -c "cp -a /src/. /dest/"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # cache-from only: docker-image-pr.yml owns GHA build-cache writes.
+      - name: Build wyoming_openai image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: wyoming_openai:e2e
+          cache-from: type=gha
+
+      - name: Start the full stack
+        run: docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d
+
+      - name: Wait for the stack to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              echo "Speaches healthy after ${i} polls"
+              break
+            fi
+            if [ "$i" = "60" ]; then
+              echo "Speaches did not become healthy in time"
+              docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml logs
+              exit 1
+            fi
+            sleep 5
+          done
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 10300; then
+              echo "wyoming_openai accepting connections after ${i} polls"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "wyoming_openai did not start in time"
+          docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml logs wyoming_openai
+          exit 1
+
+      - name: Run smoke tests against the container
+        run: pytest -m "integration and smoke" -v --timeout=180
+        env:
+          WYOMING_E2E_URI: tcp://127.0.0.1:10300
+
+      - name: Capture logs on failure
+        if: failure()
+        run: |
+          mkdir -p smoke-artifacts
+          docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml logs speaches > smoke-artifacts/speaches.log 2>&1 || true
+          docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml logs wyoming_openai > smoke-artifacts/wyoming_openai.log 2>&1 || true
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-smoke-artifacts
+          path: smoke-artifacts/
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml down -v
