@@ -23,6 +23,16 @@ def test_strip_ssml_strips_break_tags():
     assert strip_ssml("Hello world.") == "Hello world."
 
 
+def test_strip_ssml_preserves_word_boundaries():
+    # Pause/block elements separate words even without surrounding whitespace
+    assert strip_ssml("<speak>Hello<break/>world</speak>") == "Hello world"
+    assert strip_ssml("<speak><p>one</p><p>two</p></speak>").strip() == "one two"
+    assert strip_ssml("<speak><s>First.</s><s>Second.</s></speak>").strip() == "First. Second."
+    # Inline elements must not introduce extra spaces
+    assert strip_ssml("<speak>a<emphasis>b</emphasis>c</speak>") == "abc"
+    assert strip_ssml('<speak><prosody rate="slow">slow</prosody> text</speak>') == "slow text"
+
+
 def test_synthesize_ssml_decodes_entities():
     # Well-formed entities are decoded by the XML parser
     assert strip_ssml("Tom &amp; Jerry") == "Tom & Jerry"

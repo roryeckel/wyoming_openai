@@ -8,19 +8,26 @@ from io import BytesIO
 from xml.etree import ElementTree
 
 _SSML_TAG_RE = re.compile(r"<[^>]*>")
+# Pause/block elements separate words even without surrounding whitespace;
+# inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
+_SSML_PAUSE_TAG_RE = re.compile(r"</?(?:break|p|s)\b[^>]*>", re.IGNORECASE)
+_MULTI_SPACE_RE = re.compile(r" {2,}")
 
 
 def strip_ssml(text: str) -> str:
     """Strip SSML markup, returning plain text for backends that only accept it.
 
-    Pause semantics (e.g. <break/>) are lost; no in-scope backend accepts them.
-    Malformed markup falls back to regex tag removal with entity decoding.
+    Pause semantics (e.g. <break/>) are reduced to a word boundary; no in-scope
+    backend accepts them. Malformed markup falls back to regex tag removal with
+    entity decoding.
     """
+    text = _SSML_PAUSE_TAG_RE.sub(" ", text)
     try:
         root = ElementTree.fromstring(f"<root>{text}</root>")
-        return "".join(root.itertext())
+        stripped = "".join(root.itertext())
     except ElementTree.ParseError:
-        return html.unescape(_SSML_TAG_RE.sub("", text))
+        stripped = html.unescape(_SSML_TAG_RE.sub("", text))
+    return _MULTI_SPACE_RE.sub(" ", stripped)
 
 
 def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = True) -> Callable[[str], E]:
