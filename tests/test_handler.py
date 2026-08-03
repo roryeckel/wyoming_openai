@@ -13,7 +13,13 @@ from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
 from wyoming.tts import SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
-from wyoming_openai.compatibility import OpenAIBackend
+from wyoming_openai.compatibility import (
+    OpenAIBackend,
+    create_asr_programs,
+    create_info,
+    create_tts_programs,
+    create_tts_voices,
+)
 from wyoming_openai.handler import (
     OpenAIEventHandler,
     TtsStreamError,
@@ -1871,3 +1877,90 @@ class TestOpenAIEventHandlerComprehensive:
         voice = enhanced_handler._get_voice("alloy")
         assert enhanced_handler._validate_tts_language("en", voice) is True
         assert enhanced_handler._validate_tts_language("fr", voice) is False
+
+
+@pytest.fixture
+def multi_program_info():
+    """Real Info built by the compatibility factories, with two programs per domain."""
+    asr_programs = create_asr_programs(["whisper-1"], ["gpt-4o-transcribe"], "http://stt.test", ["en"])
+    voices = create_tts_voices(["tts-1"], ["gpt-4o-mini-tts"], ["alloy"], "http://tts.test", ["en"])
+    tts_programs = create_tts_programs(voices, ["gpt-4o-mini-tts"])
+    return create_info(asr_programs, tts_programs)
+
+
+@pytest.fixture
+def multi_program_handler(multi_program_info, dummy_clients, dummy_reader_writer):
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=multi_program_info,
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_select_program_picks_asr_program_by_name(multi_program_handler):
+    result = await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+
+    assert result is True
+    assert multi_program_handler._selected_asr_program is not None
+    assert multi_program_handler._selected_asr_program.name == "openai"
+    # "openai" is a program name in both domains, so one event selects both
+    assert multi_program_handler._selected_tts_program is not None
+    assert multi_program_handler._selected_tts_program.name == "openai"
+
+
+@pytest.mark.asyncio
+async def test_select_program_picks_tts_program_by_name(multi_program_handler):
+    result = await multi_program_handler.handle_event(
+        Event(type="select-program", data={"name": "openai-streaming"})
+    )
+
+    assert result is True
+    assert multi_program_handler._selected_tts_program is not None
+    assert multi_program_handler._selected_tts_program.name == "openai-streaming"
+    assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"
+
+
+@pytest.mark.asyncio
+async def test_select_program_unknown_name_is_dropped(multi_program_handler):
+    result = await multi_program_handler.handle_event(
+        Event(type="select-program", data={"name": "does-not-exist"})
+    )
+
+    assert result is True
+    assert multi_program_handler._selected_asr_program is None
+    assert multi_program_handler._selected_tts_program is None
+    # Resolution still spans all programs
+    assert multi_program_handler._get_asr_model("whisper-1") is not None
+    assert multi_program_handler._get_voice("alloy (tts-1)") is not None
+
+
+@pytest.mark.asyncio
+async def test_select_program_then_transcribe_resolves_within_selected_program(multi_program_handler):
+    await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+
+    # Model from the non-selected "openai-streaming" program is rejected
+    result = await multi_program_handler.handle_event(
+        Event(type="transcribe", data={"name": "gpt-4o-transcribe", "language": "en"})
+    )
+    assert result is False
+
+    # Nameless transcribe resolves to the selected program's first model
+    result = await multi_program_handler.handle_event(Event(type="transcribe", data={"language": "en"}))
+    assert result is True
+    assert multi_program_handler._current_asr_model.name == "whisper-1"
+
+
+@pytest.mark.asyncio
+async def test_no_select_program_defaults_to_first_program(multi_program_handler):
+    result = await multi_program_handler.handle_event(Event(type="transcribe", data={"language": "en"}))
+
+    assert result is True
+    assert multi_program_handler._current_asr_model.name == "gpt-4o-transcribe"
+    assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"

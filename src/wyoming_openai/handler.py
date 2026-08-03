@@ -20,7 +20,7 @@ from wyoming.asr import (
 )
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
-from wyoming.info import AsrModel, Describe, Info, TtsVoice
+from wyoming.info import AsrModel, AsrProgram, Describe, Info, SelectProgram, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler
 from wyoming.tts import (
     Synthesize,
@@ -117,6 +117,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         """
         super().__init__(*args, **kwargs)
         self._wyoming_info = info
+
+        # Connection-lifetime program selection (select-program event). The
+        # server constructs a fresh handler per connection, so no reset needed.
+        self._selected_asr_program: AsrProgram | None = None
+        self._selected_tts_program: TtsProgram | None = None
 
         self._stt_client = stt_client
         self._stt_temperature = stt_temperature
@@ -215,6 +220,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         if SynthesizeStop.is_type(event.type):
             return await self._handle_synthesize_stop()
 
+        if SelectProgram.is_type(event.type):
+            return await self._handle_select_program(SelectProgram.from_event(event))
+
         if Describe.is_type(event.type):
             await self.write_event(self._wyoming_info.event())
             return True
@@ -230,6 +238,35 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Stop the event handler without closing shared OpenAI clients."""
         await self._cleanup_realtime_transcription()
         await super().stop()
+
+    async def _handle_select_program(self, select_program: SelectProgram) -> bool:
+        """Handle select-program request pinning a program for this connection.
+
+        Program names are only unique within a domain, so the name is resolved
+        against ASR and TTS programs independently; one event may select both.
+        Unrecognized names are dropped per the Wyoming protocol.
+        """
+        name = select_program.name
+        matched = False
+
+        for program in self._wyoming_info.asr:
+            if getattr(program, "name", None) == name:
+                self._selected_asr_program = program
+                matched = True
+                _LOGGER.debug("Selected ASR program: %s", name)
+                break
+
+        for program in self._wyoming_info.tts:
+            if getattr(program, "name", None) == name:
+                self._selected_tts_program = program
+                matched = True
+                _LOGGER.debug("Selected TTS program: %s", name)
+                break
+
+        if not matched:
+            _LOGGER.info("Ignoring select-program for unknown program: %s", name)
+
+        return True
 
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
@@ -673,7 +710,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
         """Get an ASR model by name or None"""
-        for program in self._wyoming_info.asr:
+        programs = [self._selected_asr_program] if self._selected_asr_program else self._wyoming_info.asr
+        for program in programs:
             for model in program.models:
                 if model.name == model_name or not model_name:
                     return model
@@ -741,8 +779,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         return False
 
     def _iter_tts_voices(self):
-        """Iterate over configured TTS voices."""
-        for program in self._wyoming_info.tts:
+        """Iterate over configured TTS voices, limited to the selected program when set."""
+        programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
+        for program in programs:
             for voice in program.voices:
                 yield cast(TtsVoiceModel, voice)
 
