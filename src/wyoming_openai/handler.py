@@ -270,6 +270,14 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
+        # No OpenAI-compatible endpoint accepts VAD sensitivity or hotword biasing
+        if transcribe.vad_sensitivity is not None:
+            _LOGGER.debug("Ignoring unsupported Transcribe field vad_sensitivity: %s", transcribe.vad_sensitivity)
+        if transcribe.transcript_names:
+            _LOGGER.debug("Ignoring unsupported Transcribe field transcript_names: %s", transcribe.transcript_names)
+        if transcribe.transcript_terms:
+            _LOGGER.debug("Ignoring unsupported Transcribe field transcript_terms: %s", transcribe.transcript_terms)
+
         requested_model = self._get_asr_model(transcribe.name)
         requested_language = transcribe.language
 

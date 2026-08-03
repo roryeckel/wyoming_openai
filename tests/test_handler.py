@@ -2,6 +2,7 @@ import asyncio
 import base64
 import builtins
 import io
+import logging
 import struct
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -1964,3 +1965,37 @@ async def test_no_select_program_defaults_to_first_program(multi_program_handler
     assert result is True
     assert multi_program_handler._current_asr_model.name == "gpt-4o-transcribe"
     assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_vad_sensitivity_logged_and_ignored(enhanced_handler, caplog):
+    caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+
+    result = await enhanced_handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "language": "en", "vad_sensitivity": "aggressive"})
+    )
+
+    assert result is True
+    assert enhanced_handler._current_asr_model is not None
+    assert "vad_sensitivity" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transcribe_transcript_names_logged_and_ignored(enhanced_handler, caplog):
+    caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+
+    result = await enhanced_handler.handle_event(
+        Event(
+            type="transcribe",
+            data={
+                "name": "whisper-1",
+                "language": "en",
+                "transcript_names": ["Alice"],
+                "transcript_terms": ["Kubernetes"],
+            },
+        )
+    )
+
+    assert result is True
+    assert "transcript_names" in caplog.text
+    assert "transcript_terms" in caplog.text
