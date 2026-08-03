@@ -9,9 +9,25 @@ from wyoming_openai.utilities import (
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
+    strip_ssml,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
+
+
+def test_strip_ssml_strips_break_tags():
+    assert strip_ssml('<speak>Hello <break time="500ms"/>world</speak>') == "Hello world"
+    # Malformed markup (unclosed tag) takes the regex fallback but still loses tags
+    assert strip_ssml("Hello <break>world") == "Hello world"
+    # Plain text round-trips unchanged
+    assert strip_ssml("Hello world.") == "Hello world."
+
+
+def test_synthesize_ssml_decodes_entities():
+    # Well-formed entities are decoded by the XML parser
+    assert strip_ssml("Tom &amp; Jerry") == "Tom & Jerry"
+    # A bare ampersand breaks XML parsing; the fallback path unescapes what it can
+    assert strip_ssml("<speak>AT&T &amp; friends</speak>") == "AT&T & friends"
 
 
 def test_named_bytes_io_name_property():

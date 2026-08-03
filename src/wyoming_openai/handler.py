@@ -28,11 +28,18 @@ from wyoming.tts import (
     SynthesizeStart,
     SynthesizeStop,
     SynthesizeStopped,
+    SynthesizeTextFormat,
     SynthesizeVoice,
 )
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
-from .utilities import NamedBytesIO, get_extra_body_boolean_field, validate_stt_extra_body, validate_tts_extra_body
+from .utilities import (
+    NamedBytesIO,
+    get_extra_body_boolean_field,
+    strip_ssml,
+    validate_stt_extra_body,
+    validate_tts_extra_body,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -163,6 +170,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State for streaming synthesis
         self._synthesis_buffer: list[str] = []
         self._synthesis_voice: SynthesizeVoice | None = None
+        self._synthesis_text_format: str | SynthesizeTextFormat | None = None
         self._is_synthesizing: bool = False
 
         # State for incremental sentence detection
@@ -1154,6 +1162,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             available,
         )
 
+    @staticmethod
+    def _is_ssml_format(text_format: str | SynthesizeTextFormat | None) -> bool:
+        """Check for SSML text format; str-enum equality also matches a raw "ssml" string."""
+        return text_format == SynthesizeTextFormat.SSML
+
     async def _handle_synthesize(self, synthesize: Synthesize) -> bool:
         """Handle text-to-speech synthesis request"""
         try:
@@ -1178,13 +1191,18 @@ class OpenAIEventHandler(AsyncEventHandler):
             if not voice:
                 return False
 
+            text = synthesize.text
+            if self._is_ssml_format(synthesize.text_format):
+                text = strip_ssml(text)
+                _LOGGER.debug("Stripped SSML markup from synthesize text (text_format=ssml)")
+
             # Use shared streaming logic
-            final_timestamp = await self._stream_tts_audio(voice, synthesize.text, send_audio_start=True)
+            final_timestamp = await self._stream_tts_audio(voice, text, send_audio_start=True)
 
             if final_timestamp is not None:
                 # Send audio stop after streaming completes
                 await self.write_event(AudioStop(timestamp=int(final_timestamp)).event())
-                _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(synthesize.text))
+                _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(text))
                 return True
             return False
 
@@ -1199,6 +1217,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Reset synthesis state
         self._synthesis_buffer = []
         self._is_synthesizing = True
+        self._synthesis_text_format = synthesize_start.text_format
 
         # Reset incremental detection state
         self._text_accumulator = ""
@@ -1232,8 +1251,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
         _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
 
+        # Strip per chunk so pysbd segments plain text; a tag split across
+        # chunk boundaries is not reassembled and its fragments pass through
+        if self._is_ssml_format(self._synthesis_text_format):
+            chunk_text = strip_ssml(chunk_text)
+
         # Store in buffer for fallback compatibility
-        self._synthesis_buffer.append(synthesize_chunk.text)
+        self._synthesis_buffer.append(chunk_text)
 
         # Add to accumulator for sentence detection across chunks
         self._text_accumulator += chunk_text
@@ -1299,6 +1323,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Clear synthesis state early
         self._synthesis_buffer = []
         self._synthesis_voice = None
+        self._synthesis_text_format = None
         self._text_accumulator = ""
         self._ready_chunks = []
         self._pysbd_segmenters.clear()  # Clear segmenter cache

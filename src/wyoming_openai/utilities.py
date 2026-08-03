@@ -1,8 +1,26 @@
 import argparse
+import html
 import json
+import re
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
+from xml.etree import ElementTree
+
+_SSML_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def strip_ssml(text: str) -> str:
+    """Strip SSML markup, returning plain text for backends that only accept it.
+
+    Pause semantics (e.g. <break/>) are lost; no in-scope backend accepts them.
+    Malformed markup falls back to regex tag removal with entity decoding.
+    """
+    try:
+        root = ElementTree.fromstring(f"<root>{text}</root>")
+        return "".join(root.itertext())
+    except ElementTree.ParseError:
+        return html.unescape(_SSML_TAG_RE.sub("", text))
 
 
 def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = True) -> Callable[[str], E]:

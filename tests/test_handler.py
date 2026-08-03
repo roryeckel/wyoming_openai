@@ -1999,3 +1999,69 @@ async def test_transcribe_transcript_names_logged_and_ignored(enhanced_handler, 
     assert result is True
     assert "transcript_names" in caplog.text
     assert "transcript_terms" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_ssml_strips_tags_before_sending(enhanced_handler):
+    enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
+
+    result = await enhanced_handler.handle_event(
+        Event(
+            type="synthesize",
+            data={
+                "text": '<speak>Hello <break time="1s"/>world</speak>',
+                "text_format": "ssml",
+                "voice": {"name": "alloy"},
+            },
+        )
+    )
+
+    assert result is True
+    enhanced_handler._stream_tts_audio.assert_awaited_once()
+    assert enhanced_handler._stream_tts_audio.await_args.args[1] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_text_format_text_passes_through(enhanced_handler):
+    enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
+    text = "Hello <break/>world"
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": text, "text_format": "text", "voice": {"name": "alloy"}})
+    )
+
+    assert result is True
+    assert enhanced_handler._stream_tts_audio.await_args.args[1] == text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_text_format_none_passes_through(enhanced_handler):
+    enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
+    text = "Hello <break/>world"
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": text, "voice": {"name": "alloy"}})
+    )
+
+    assert result is True
+    assert enhanced_handler._stream_tts_audio.await_args.args[1] == text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_start_ssml_strips_chunk_tags(enhanced_handler):
+    result = await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+    assert result is True
+    assert enhanced_handler._synthesis_text_format == "ssml"
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize-chunk", data={"text": "Hello <break/>world"})
+    )
+
+    assert result is True
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert enhanced_handler._synthesis_buffer == ["Hello world"]
