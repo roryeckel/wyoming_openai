@@ -11,7 +11,41 @@ _SSML_TAG_RE = re.compile(r"<[^>]*>")
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
 _SSML_PAUSE_TAG_RE = re.compile(r"</?(?:break|p|s)\b[^>]*>", re.IGNORECASE)
+# Known inline elements removed without a separator in the regex fallback.
+_SSML_INLINE_TAG_RE = re.compile(
+    r"</?(?:audio|emphasis|lang|mark|phoneme|prosody|say-as|speak|sub|voice|w)\b[^>]*>",
+    re.IGNORECASE,
+)
 _MULTI_SPACE_RE = re.compile(r" {2,}")
+
+
+def _strip_ssml_tags(text: str) -> str:
+    """Regex fallback for malformed markup.
+
+    Contiguous tag runs are handled as one unit: a run of only known inline
+    elements (emphasis, prosody, ...) is removed without a separator, keeping
+    their text flow intact. A run containing any unknown tag that sits between
+    two non-whitespace characters gets a single space so adjacent words are
+    never joined; literal text whitespace is preserved as-is.
+    """
+    parts: list[str] = []
+    pos = 0
+    for match in _SSML_TAG_RE.finditer(text):
+        parts.append(text[pos : match.start()])
+        run_start = match.start()
+        run_end = match.end()
+        run = [match.group(0)]
+        while (next_match := _SSML_TAG_RE.search(text, run_end)) and next_match.start() == run_end:
+            run.append(next_match.group(0))
+            run_end = next_match.end()
+        pos = run_end
+        if any(not _SSML_INLINE_TAG_RE.fullmatch(tag) for tag in run):
+            prev_char = text[run_start - 1] if run_start > 0 else ""
+            next_char = text[run_end] if run_end < len(text) else ""
+            if prev_char and next_char and not prev_char.isspace() and not next_char.isspace():
+                parts.append(" ")
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def strip_ssml(text: str) -> str:
@@ -26,7 +60,7 @@ def strip_ssml(text: str) -> str:
         root = ElementTree.fromstring(f"<root>{text}</root>")
         stripped = "".join(root.itertext())
     except ElementTree.ParseError:
-        stripped = html.unescape(_SSML_TAG_RE.sub("", text))
+        stripped = html.unescape(_strip_ssml_tags(text))
     return _MULTI_SPACE_RE.sub(" ", stripped)
 
 

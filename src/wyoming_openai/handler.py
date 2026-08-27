@@ -254,7 +254,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         Program names are only unique within a domain, so the name is resolved
         against ASR and TTS programs independently; one event may select both.
-        Unrecognized names are dropped per the Wyoming protocol.
+        A selection applies only to the domains whose programs match: prior
+        selections in other domains remain active for the lifetime of the
+        connection (per the Wyoming protocol), so clients can pick a distinct
+        program per domain before sending request events. Unrecognized names
+        are dropped per the Wyoming protocol.
         """
         name = select_program.name
         matched = False

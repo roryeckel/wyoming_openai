@@ -40,6 +40,35 @@ def test_synthesize_ssml_decodes_entities():
     assert strip_ssml("<speak>AT&T &amp; friends</speak>") == "AT&T & friends"
 
 
+def test_strip_ssml_fallback_preserves_word_boundaries():
+    # Malformed markup takes the regex fallback; tags must not join adjacent words
+    assert strip_ssml('<speak>Foo<bad-attr=&>bar</speak>') == "Foo bar"
+
+
+def test_strip_ssml_fallback_keeps_inline_tags_flowing():
+    # A bare ampersand forces the fallback, but known inline elements must not
+    # introduce pauses between the text they wrap
+    assert strip_ssml("<speak>a<emphasis>b</emphasis>c &</speak>") == "abc &"
+    assert strip_ssml('<speak>slow<prosody rate="slow">s</prosody>t</speak>') == "slowst"
+
+
+def test_strip_ssml_fallback_preserves_literal_whitespace():
+    # Whitespace around words is text content, not tag-generated
+    assert strip_ssml("<speak> hello & goodbye </speak>") == " hello & goodbye "
+
+
+def test_strip_ssml_fallback_adjacent_unknown_tags_join_words():
+    # A contiguous run of unknown tags counts as a single separator unit
+    assert strip_ssml("Foo<vendor></vendor>bar &") == "Foo bar &"
+
+
+def test_strip_ssml_fallback_mixed_tag_run():
+    # A contiguous run mixing known inline and unknown tags still separates the words
+    assert strip_ssml("a<emphasis><vendor/></emphasis>b &") == "a b &"
+    # A run of only known inline elements keeps its text flowing
+    assert strip_ssml("a<emphasis><prosody></prosody></emphasis>b &") == "ab &"
+
+
 def test_named_bytes_io_name_property():
     buf = NamedBytesIO(b"abc", name="test.wav")
     assert buf.name == "test.wav"

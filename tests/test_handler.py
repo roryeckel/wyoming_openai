@@ -1904,6 +1904,32 @@ def multi_program_handler(multi_program_info, dummy_clients, dummy_reader_writer
     return handler
 
 
+@pytest.fixture
+def distinct_names_handler(multi_program_info, dummy_clients, dummy_reader_writer):
+    """Handler whose program names are unique within a domain (asr-*/tts-*).
+
+    Exercises cross-domain selection, where a name can never match both
+    domains in one event.
+    """
+    asr_programs = list(multi_program_info.asr)
+    tts_programs = list(multi_program_info.tts)
+    for program in asr_programs:
+        program.name = f"asr-{program.name}"
+    for program in tts_programs:
+        program.name = f"tts-{program.name}"
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=create_info(asr_programs, tts_programs),
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+    return handler
+
+
 @pytest.mark.asyncio
 async def test_select_program_picks_asr_program_by_name(multi_program_handler):
     result = await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
@@ -1940,6 +1966,37 @@ async def test_select_program_unknown_name_is_dropped(multi_program_handler):
     # Resolution still spans all programs
     assert multi_program_handler._get_asr_model("whisper-1") is not None
     assert multi_program_handler._get_voice("alloy (tts-1)") is not None
+
+
+@pytest.mark.asyncio
+async def test_select_program_selections_persist_independently_per_domain(distinct_names_handler):
+    """select-program only affects matching domains: a later TTS-only event must
+    not clear a prior ASR selection (or vice versa). Each selection stays active
+    for the lifetime of the connection and constrains its own domain."""
+    handler = distinct_names_handler
+
+    # Select an ASR-only program, then a TTS-only program
+    result = await handler.handle_event(Event(type="select-program", data={"name": "asr-openai"}))
+    assert result is True
+    assert handler._selected_asr_program is not None
+    assert handler._selected_asr_program.name == "asr-openai"
+    assert handler._selected_tts_program is None
+
+    result = await handler.handle_event(Event(type="select-program", data={"name": "tts-openai"}))
+    assert result is True
+    assert handler._selected_asr_program is not None
+    assert handler._selected_asr_program.name == "asr-openai"
+    assert handler._selected_tts_program is not None
+    assert handler._selected_tts_program.name == "tts-openai"
+
+    # Each selection still constrains its own domain
+    result = await handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "language": "en"})
+    )
+    assert result is True
+    assert handler._current_asr_model.name == "whisper-1"
+
+    assert handler._get_voice("alloy (gpt-4o-mini-tts)") is None
 
 
 @pytest.fixture
