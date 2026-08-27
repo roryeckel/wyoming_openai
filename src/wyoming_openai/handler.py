@@ -61,7 +61,48 @@ TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when streaming sentences
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
-_MAX_SSML_TAG_CARRY = 64  # Longer trailing "<..." fragments are treated as literal text, not a split tag
+_MAX_SSML_TAG_CARRY = 64  # Longer trailing "<..."/"&..." fragments are treated as literal text, not a split tag/entity
+_SSML_ENTITY_NAMES = ("amp", "apos", "gt", "lt", "quot")
+
+
+def _is_valid_entity_prefix(text: str) -> bool:
+    """True when text is a prefix of a well-formed XML entity reference."""
+    if not text.startswith("&"):
+        return False
+    body = text[1:]
+    if body.startswith("#"):
+        rest = body[1:]
+        if rest.startswith(("x", "X")):
+            return all(c in "0123456789abcdefABCDEF" for c in rest[1:])
+        return all(c in "0123456789" for c in rest)
+    if body and not body.isalpha():
+        return False
+    return any(name.startswith(body) for name in _SSML_ENTITY_NAMES)
+
+
+def _is_complete_entity(text: str) -> bool:
+    """True when text is a complete well-formed XML entity reference."""
+    if not text.startswith("&") or not text.endswith(";"):
+        return False
+    body = text[1:-1]
+    if body.startswith("#"):
+        digits = body[1:]
+        if digits.startswith(("x", "X")):
+            return len(digits) > 1 and all(c in "0123456789abcdefABCDEF" for c in digits[1:])
+        return bool(digits) and all(c in "0123456789" for c in digits)
+    return body in _SSML_ENTITY_NAMES
+
+
+def _strip_ssml_literal_ampersand(text: str) -> str:
+    """Strip SSML from text whose leading "&" is literal text, not an entity.
+
+    Precondition: text starts with "&". html.unescape would otherwise decode
+    an incomplete reference and shorten it ("&amp" becomes "&"); the sentinel
+    keeps the ampersand intact while the fallback still runs in one context
+    so unknown tags preserve word boundaries.
+    """
+    protected = "\0" + text[1:]
+    return strip_ssml(protected, force_fallback=True).replace("\0", "&", 1)
 
 
 @dataclass(frozen=True)
@@ -1281,17 +1322,56 @@ class OpenAIEventHandler(AsyncEventHandler):
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
         _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
 
-        # Strip per chunk so pysbd segments plain text. A tag split across
-        # chunk boundaries ("<bre" + "ak/>") is reassembled by holding a
-        # trailing partial tag back until the next chunk (or synthesize-stop).
+        # Strip per chunk so pysbd segments plain text. A tag or entity split
+        # across chunk boundaries ("<bre" + "ak/>", "&am" + "p;") is
+        # reassembled by holding a trailing partial fragment back until the
+        # next chunk (or synthesize-stop).
         if self._is_ssml_format(self._synthesis_text_format):
             chunk_text = self._ssml_carry + chunk_text
+            carry_len = len(self._ssml_carry)
             self._ssml_carry = ""
+
+            hold_at: int | None = None
             last_lt = chunk_text.rfind("<")
             if last_lt > chunk_text.rfind(">") and len(chunk_text) - last_lt <= _MAX_SSML_TAG_CARRY:
-                self._ssml_carry = chunk_text[last_lt:]
-                chunk_text = chunk_text[:last_lt]
-            chunk_text = strip_ssml(chunk_text)
+                hold_at = last_lt
+            last_amp = chunk_text.rfind("&")
+            if (
+                last_amp > chunk_text.rfind(";")
+                and len(chunk_text) - last_amp <= _MAX_SSML_TAG_CARRY
+                and _is_valid_entity_prefix(chunk_text[last_amp:])
+            ):
+                hold_at = last_amp if hold_at is None else min(hold_at, last_amp)
+
+            if hold_at is not None:
+                if carry_len and chunk_text[:carry_len].startswith("&"):
+                    # The previous carry was an entity fragment and this chunk
+                    # starts a tag split; widen the hold so the entity stays in
+                    # the same fallback context as the tag (their seam must
+                    # keep the tag's word boundary: "&amp;" + "<vendor>bar"
+                    # must stay "& bar", not "&bar").
+                    hold_at = 0
+                self._ssml_carry = chunk_text[hold_at:]
+                chunk_text = chunk_text[:hold_at]
+                if hold_at < carry_len:
+                    carry_len = 0  # previous carry lives on in the new hold
+
+            if carry_len and chunk_text.startswith("&"):
+                merged_end = chunk_text.find(";") + 1 if ";" in chunk_text else 0
+                entity_complete = bool(merged_end) and _is_complete_entity(chunk_text[:merged_end])
+                if entity_complete:
+                    chunk_text = strip_ssml(chunk_text)
+                else:
+                    # Rejected entity candidate: the "&" is literal text.
+                    # Protect it from html.unescape while keeping the whole
+                    # fragment in one fallback context so unknown tags still
+                    # preserve word boundaries ("&" + "<vendor/>bar" must stay
+                    # "& bar", not "&bar"). The carry itself is not sliced
+                    # after decoding, so entity-length changes cannot drop
+                    # characters ("&amp" + "regulations" keeps both).
+                    chunk_text = _strip_ssml_literal_ampersand(chunk_text)
+            else:
+                chunk_text = strip_ssml(chunk_text)
 
         # Store in buffer for fallback compatibility
         self._synthesis_buffer.append(chunk_text)
@@ -1343,11 +1423,20 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._is_synthesizing = False
 
-        # Flush any held-back partial SSML tag; at end of stream it is either a
-        # malformed fragment (kept literally by strip_ssml) or literal text
+        # Flush any held-back partial SSML tag or valid entity prefix; at end
+        # of stream it is either a malformed fragment (kept literally by
+        # strip_ssml) or literal text
         if self._ssml_carry:
-            flushed = strip_ssml(self._ssml_carry)
+            carry = self._ssml_carry
             self._ssml_carry = ""
+            if carry.startswith("&"):
+                merged_end = carry.find(";") + 1 if ";" in carry else 0
+                if merged_end and _is_complete_entity(carry[:merged_end]):
+                    flushed = strip_ssml(carry)
+                else:
+                    flushed = _strip_ssml_literal_ampersand(carry)
+            else:
+                flushed = strip_ssml(carry)
             self._text_accumulator += flushed
             self._synthesis_buffer.append(flushed)
 

@@ -48,14 +48,17 @@ def _strip_ssml_tags(text: str) -> str:
     return "".join(parts)
 
 
-def strip_ssml(text: str) -> str:
+def strip_ssml(text: str, *, force_fallback: bool = False) -> str:
     """Strip SSML markup, returning plain text for backends that only accept it.
 
     Pause semantics (e.g. <break/>) are reduced to a word boundary; no in-scope
     backend accepts them. Malformed markup falls back to regex tag removal with
-    entity decoding.
+    entity decoding. With force_fallback=True the XML parser is skipped so a
+    caller can protect raw "&" text from cross-context entity decoding.
     """
     text = _SSML_PAUSE_TAG_RE.sub(" ", text)
+    if force_fallback:
+        return _MULTI_SPACE_RE.sub(" ", html.unescape(_strip_ssml_tags(text)))
     try:
         root = ElementTree.fromstring(f"<root>{text}</root>")
         stripped = "".join(root.itertext())

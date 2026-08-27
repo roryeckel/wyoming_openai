@@ -2221,6 +2221,161 @@ async def test_synthesize_chunk_ssml_tag_split_across_three_chunks(enhanced_hand
 
 
 @pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_split_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # An entity split mid-name across chunk boundaries must be reassembled and
+    # decoded, not left as a literal fragment
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Tom &am"}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "p; Jerry"}))
+
+    assert enhanced_handler._text_accumulator == "Tom & Jerry"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Tom & Jerry"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_bare_ampersand_at_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A literal ampersand ending a chunk is held as a pending candidate; when
+    # the next chunk cannot extend it to a valid entity, it must be stripped
+    # separately so html.unescape cannot decode across the boundary
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Rules &"}))
+    assert enhanced_handler._ssml_carry == "&"
+    assert enhanced_handler._text_accumulator == "Rules "
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "regulations"}))
+
+    assert enhanced_handler._text_accumulator == "Rules &regulations"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Rules &regulations"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_prefix_then_plain_text(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # An entity-looking carry rejected by the next chunk must keep every
+    # character: html.unescape may shorten the prefix, so the result must not
+    # be sliced by the original carry length
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+    assert enhanced_handler._ssml_carry == "&amp"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "regulations"}))
+
+    assert enhanced_handler._text_accumulator == "Foo &ampregulations"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo &ampregulations"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_split_after_ampersand(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # An entity split immediately after "&" must still be reassembled and decoded
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Tom &"}))
+    assert enhanced_handler._ssml_carry == "&"
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "amp; Jerry"}))
+
+    assert enhanced_handler._text_accumulator == "Tom & Jerry"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Tom & Jerry"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_bare_ampersand_preserves_tag_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A rejected "&" carry followed by an unknown tag must keep the tag's word
+    # boundary: the malformed fallback would produce "Foo& bar" for the
+    # combined text, so the split path must not join the words
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo&"}))
+    assert enhanced_handler._ssml_carry == "&"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<vendor/>bar"}))
+
+    assert enhanced_handler._text_accumulator == "Foo& bar"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo& bar"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_completed_entity_preserves_tag_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A carried entity completed by the next chunk followed by an unknown tag
+    # must keep the tag's word boundary: the malformed fallback would produce
+    # "Foo & bar" for the combined text, so the seam must not join the words
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+    assert enhanced_handler._ssml_carry == "&amp"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ";<vendor>bar"}))
+
+    assert enhanced_handler._text_accumulator == "Foo & bar"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo & bar"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_then_split_tag_preserves_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A carried entity completed by the next chunk that then starts a tag split
+    # across the following chunk must keep the tag's word boundary: the
+    # malformed fallback would produce "Foo & bar" for the combined text, so
+    # the seams must not join the words
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+    assert enhanced_handler._ssml_carry == "&amp"
+    assert enhanced_handler._text_accumulator == "Foo "
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ";<vendor"}))
+    assert enhanced_handler._ssml_carry == "&amp;<vendor"
+    assert enhanced_handler._text_accumulator == "Foo "
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ">bar"}))
+
+    assert enhanced_handler._text_accumulator == "Foo & bar"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo & bar"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
 async def test_synthesize_stop_flushes_ssml_carry(enhanced_handler):
     enhanced_handler.write_event = AsyncMock()
     await enhanced_handler.handle_event(
@@ -2239,6 +2394,30 @@ async def test_synthesize_stop_flushes_ssml_carry(enhanced_handler):
 
     flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
     assert flushed_text == ["Hi <"]
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stop_flushes_ssml_incomplete_entity(enhanced_handler):
+    enhanced_handler.write_event = AsyncMock()
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+    assert enhanced_handler._ssml_carry == "&amp"
+    assert enhanced_handler._text_accumulator == "Foo "
+
+    # A trailing entity-like fragment never completed into an entity is literal
+    # text; flushing must not decode it ("&amp" must not become "&")
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+    enhanced_handler._audio_started = True  # take the incremental early-exit path
+    await enhanced_handler.handle_event(Event(type="synthesize-stop", data={}))
+
+    flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
+    assert flushed_text == ["Foo &amp"]
     assert enhanced_handler._ssml_carry == ""
 
 
