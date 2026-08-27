@@ -260,14 +260,14 @@ class OpenAIEventHandler(AsyncEventHandler):
         matched = False
 
         for program in self._wyoming_info.asr:
-            if getattr(program, "name", None) == name:
+            if program.name == name:
                 self._selected_asr_program = program
                 matched = True
                 _LOGGER.debug("Selected ASR program: %s", name)
                 break
 
         for program in self._wyoming_info.tts:
-            if getattr(program, "name", None) == name:
+            if program.name == name:
                 self._selected_tts_program = program
                 matched = True
                 _LOGGER.debug("Selected TTS program: %s", name)
@@ -752,11 +752,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _has_asr_models(self) -> bool:
         """Return True when STT is configured for this handler."""
-        return any(getattr(program, "models", None) for program in self._wyoming_info.asr)
+        return any(program.models for program in self._wyoming_info.asr)
 
     def _has_tts_voices(self) -> bool:
         """Return True when TTS is configured for this handler."""
-        return any(getattr(program, "voices", None) for program in self._wyoming_info.tts)
+        return any(program.voices for program in self._wyoming_info.tts)
 
     def _get_stt_extra_body(self) -> dict[str, object] | None:
         """Get STT extra_body merged with backend-specific fields."""
@@ -783,8 +783,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         return "wav"
 
     def _is_asr_model_streaming(self, model_name: str) -> bool:
-        """Check if an ASR model supports streaming"""
-        for program in self._wyoming_info.asr:
+        """Check if an ASR model supports streaming.
+
+        Restricted to the selected program when set, so the streaming decision
+        matches the program the model was resolved from.
+        """
+        programs = [self._selected_asr_program] if self._selected_asr_program else self._wyoming_info.asr
+        for program in programs:
             for model in program.models:
                 if model.name == model_name:
                     return program.supports_transcript_streaming
@@ -795,8 +800,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         return model_name in self._stt_realtime_models
 
     def _is_tts_voice_streaming(self, voice_name: str) -> bool:
-        """Check if a TTS voice supports streaming synthesis"""
-        for program in self._wyoming_info.tts:
+        """Check if a TTS voice supports streaming synthesis.
+
+        Restricted to the selected program when set, so the streaming decision
+        matches the program the voice was resolved from.
+        """
+        programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
+        for program in programs:
             for voice in program.voices:
                 if voice.name == voice_name:
                     return getattr(program, "supports_synthesize_streaming", False)

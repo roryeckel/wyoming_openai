@@ -1942,6 +1942,66 @@ async def test_select_program_unknown_name_is_dropped(multi_program_handler):
     assert multi_program_handler._get_voice("alloy (tts-1)") is not None
 
 
+@pytest.fixture
+def streaming_collision_info():
+    """Info where a model/voice name exists in both a streaming and a non-streaming program.
+
+    The streaming program is listed first, so a name-only scan returns the
+    streaming flag even when the non-streaming program is selected.
+    """
+    asr_programs = create_asr_programs(["shared"], ["shared"], "http://stt.test", ["en"]) + create_asr_programs(
+        ["shared"], [], "http://stt.test", ["en"]
+    )
+    streaming_voices = create_tts_voices(["tts-1"], ["tts-1"], ["alloy"], "http://tts.test", ["en"])
+    non_streaming_voices = create_tts_voices(["tts-1"], [], ["alloy"], "http://tts.test", ["en"])
+    tts_programs = create_tts_programs(streaming_voices, ["tts-1"]) + create_tts_programs(non_streaming_voices)
+    return create_info(asr_programs, tts_programs)
+
+
+@pytest.fixture
+def streaming_collision_handler(streaming_collision_info, dummy_clients, dummy_reader_writer):
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=streaming_collision_info,
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_streaming_flag_follows_selected_asr_program(streaming_collision_handler):
+    handler = streaming_collision_handler
+
+    # Without selection the first name match across programs wins (pre-existing)
+    assert handler._is_asr_model_streaming("shared") is True
+
+    # Selecting the non-streaming program must not pick up the streaming program's flag
+    await handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+    assert handler._is_asr_model_streaming("shared") is False
+
+    await handler.handle_event(Event(type="select-program", data={"name": "openai-streaming"}))
+    assert handler._is_asr_model_streaming("shared") is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_flag_follows_selected_tts_program(streaming_collision_handler):
+    handler = streaming_collision_handler
+
+    assert handler._is_tts_voice_streaming("alloy") is True
+
+    # Selecting the non-streaming program must not pick up the streaming program's flag
+    await handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+    assert handler._is_tts_voice_streaming("alloy") is False
+
+    await handler.handle_event(Event(type="select-program", data={"name": "openai-streaming"}))
+    assert handler._is_tts_voice_streaming("alloy") is True
+
+
 @pytest.mark.asyncio
 async def test_select_program_then_transcribe_resolves_within_selected_program(multi_program_handler):
     await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
