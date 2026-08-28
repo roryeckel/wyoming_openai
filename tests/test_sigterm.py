@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(
 
 def test_server_exits_zero_on_sigterm() -> None:
     """SIGTERM stops the server cleanly with exit code 0, not 143."""
-    proc, port, log_path = _start_wyoming_server(
+    proc, _, log_path = _start_wyoming_server(
         env_overrides={
             # Point at the official OpenAI domain so backend autodetection
             # skips its network probes, and provide voices so the backend
