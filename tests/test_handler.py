@@ -22,6 +22,7 @@ from wyoming_openai.compatibility import (
     create_tts_voices,
 )
 from wyoming_openai.handler import (
+    _MAX_SSML_CARRY,
     OpenAIEventHandler,
     TtsStreamError,
 )
@@ -2373,6 +2374,251 @@ async def test_synthesize_chunk_ssml_entity_then_split_tag_preserves_boundary(en
     assert enhanced_handler._text_accumulator == "Foo & bar"
     assert "".join(enhanced_handler._synthesis_buffer) == "Foo & bar"
     assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_normalizes_spaces_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # The stripped stream must match one-shot stripping regardless of where the
+    # client split the text around a pause tag
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hello "}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<break/>world"}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_split_pause_tag_normalizes_spaces(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A pause tag split mid-name still contributes exactly one separator
+    for chunk in ("Hello ", "<bre", "ak/> world"):
+        await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": chunk}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_normalizes_spaces_before_split_tag(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # The leading space must be normalized even while the trailing tag is held.
+    for chunk in ("Hello ", " <voice", ">world"):
+        await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": chunk}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_plain_ssml_spaces_normalize_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hello "}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": " world"}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_normalizes_spaces_after_sentence_flush(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # Sentence detection retains only the final segment, which drops the
+    # trailing space still present in the emitted synthesis buffer.
+    segmenter = MagicMock()
+    segmenter.segment.side_effect = [["First.", "Second."], ["Second.", "Next"]]
+    enhanced_handler._pysbd_segmenters["en"] = segmenter
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "First. Second. "}))
+    assert enhanced_handler._text_accumulator == "Second."
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": " Next"}))
+
+    assert "".join(enhanced_handler._synthesis_buffer) == "First. Second. Next"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_long_tag_split_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A valid tag longer than the old 64-char carry limit must still be
+    # reassembled and stripped; one-shot stripping keeps the literal space
+    tag = '<audio src="https://example.com/' + ("a" * 50) + '"/>'
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hello " + tag[:-2]}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[-2:] + "world"}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_long_tag_growing_past_previous_limit(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # The carry must not be capped: a fragment held at 64 chars and completed
+    # by the next chunks is still reassembled as one tag
+    tag = '<audio src="https://example.com/' + ("a" * 50) + '"/>'
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[:64]}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[64:65]}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[65:] + "world"}))
+
+    assert enhanced_handler._text_accumulator == "world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "world"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_quoted_tag_close_waits_for_real_tag_end(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # ">" inside a quoted attribute is not the tag end
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": '<voice name="a>'}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": 'b"/>spoken'}))
+
+    assert enhanced_handler._text_accumulator == "spoken"
+    assert "".join(enhanced_handler._synthesis_buffer) == "spoken"
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_unclosed_tag_carry_is_bounded(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A client sending an unclosed "<" followed by endless text must not grow
+    # the carry (and its per-chunk rescan/copy) without bound: after the cap
+    # the carry is released and subsequent chunks stream normally
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<"}))
+    assert enhanced_handler._ssml_carry == "<"
+
+    flooded = "x" * 5000
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": flooded}))
+    assert enhanced_handler._ssml_carry == ""
+    assert "<" + flooded in "".join(enhanced_handler._synthesis_buffer)
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "more text"}))
+    assert enhanced_handler._ssml_carry == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_unterminated_numeric_entity_is_bounded(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A numeric entity prefix never terminated by ";" must not grow the carry
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "&#123"}))
+    assert enhanced_handler._ssml_carry == "&#123"
+
+    flooded = "4" * 5000
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": flooded}))
+    assert enhanced_handler._ssml_carry == ""
+    assert "&#123" + flooded in "".join(enhanced_handler._synthesis_buffer)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_oversized_carry_flushes_literally_at_stop(enhanced_handler):
+    enhanced_handler.write_event = AsyncMock()
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A fragment held at the cap and released at stop is literal text, not decoded
+    fragment = "<" + "x" * 5000
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": fragment}))
+    assert enhanced_handler._ssml_carry == ""
+
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+    enhanced_handler._audio_started = True  # take the incremental early-exit path
+    await enhanced_handler.handle_event(Event(type="synthesize-stop", data={}))
+    flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
+    assert flushed_text == [fragment]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_complete_entity_decodes_despite_oversized_split_tag(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A carried "&amp" completed by ";" stays decoded: an oversized trailing
+    # tag split must not re-mark the already-complete entity as literal text
+    # ("&amp;<..." is emitted, not "<...>"), even though the merged fragment
+    # crossed the carry bound
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "&amp"}))
+    assert enhanced_handler._ssml_carry == "&amp"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ";<"}))
+    assert enhanced_handler._ssml_carry == "&amp;<"
+
+    flood = "x" * _MAX_SSML_CARRY
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": flood}))
+
+    assert enhanced_handler._ssml_carry == ""
+    assert enhanced_handler._text_accumulator == "&" + "<" + flood
+    assert "".join(enhanced_handler._synthesis_buffer) == "&" + "<" + flood
 
 
 @pytest.mark.asyncio

@@ -61,8 +61,48 @@ TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when streaming sentences
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
-_MAX_SSML_TAG_CARRY = 64  # Longer trailing "<..."/"&..." fragments are treated as literal text, not a split tag/entity
 _SSML_ENTITY_NAMES = ("amp", "apos", "gt", "lt", "quot")
+# Bound the held-back partial tag/entity so a stream that never completes it
+# cannot grow the carry (and its per-chunk rescan/copy cost) without limit.
+# Far above any realistic SSML tag; an oversized fragment is flushed literally
+# rather than reassembled.
+_MAX_SSML_CARRY = 4096
+
+
+def _find_partial_tag_start(text: str) -> int | None:
+    """Return where a trailing incomplete tag begins, or None.
+
+    Quote-aware: ">" inside an attribute value does not close the tag, so a
+    scan starting at the last "<" may still be inside an open attribute. The
+    caller bounds the held-back length with _MAX_SSML_CARRY.
+    """
+    quote: str | None = None
+    start: int | None = None
+    for index, char in enumerate(text):
+        if start is None:
+            if char == "<":
+                start = index
+            continue
+        if char == "<":
+            # A "<" cannot appear inside an attribute value, quoted or not: it
+            # aborts the outer tag start. The outer "<" is literal text while
+            # this fresh "<" may start a real tag.
+            start = index
+            quote = None
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == ">":
+            # Tag is closed; no hold candidate
+            start = None
+    return start
+
+
+def _ends_with_ascii_space(chunks: list[str]) -> bool:
+    """Whether the most recently emitted non-empty chunk ends with a space."""
+    return next((chunk.endswith(" ") for chunk in reversed(chunks) if chunk), False)
 
 
 def _is_valid_entity_prefix(text: str) -> bool:
@@ -1325,31 +1365,33 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Strip per chunk so pysbd segments plain text. A tag or entity split
         # across chunk boundaries ("<bre" + "ak/>", "&am" + "p;") is
         # reassembled by holding a trailing partial fragment back until the
-        # next chunk (or synthesize-stop).
+        # next chunk (or synthesize-stop). The carry is bounded so a fragment
+        # that never completes cannot grow without limit; an oversized fragment
+        # is flushed literally instead of leaked as markup.
         if self._is_ssml_format(self._synthesis_text_format):
             chunk_text = self._ssml_carry + chunk_text
             carry_len = len(self._ssml_carry)
+            carry_is_entity = self._ssml_carry.startswith("&")
             self._ssml_carry = ""
 
             hold_at: int | None = None
-            last_lt = chunk_text.rfind("<")
-            if last_lt > chunk_text.rfind(">") and len(chunk_text) - last_lt <= _MAX_SSML_TAG_CARRY:
-                hold_at = last_lt
+            tag_start = _find_partial_tag_start(chunk_text)
+            if tag_start is not None and len(chunk_text) - tag_start <= _MAX_SSML_CARRY:
+                hold_at = tag_start
             last_amp = chunk_text.rfind("&")
             if (
                 last_amp > chunk_text.rfind(";")
-                and len(chunk_text) - last_amp <= _MAX_SSML_TAG_CARRY
+                and len(chunk_text) - last_amp <= _MAX_SSML_CARRY
                 and _is_valid_entity_prefix(chunk_text[last_amp:])
             ):
                 hold_at = last_amp if hold_at is None else min(hold_at, last_amp)
 
+            # A carried entity fragment followed by a tag split stays merged with
+            # the tag in one hold, so their seam keeps the tag's word boundary in
+            # the fallback context ("&amp;" + "<vendor>bar" stays "& bar", not
+            # "&bar")
             if hold_at is not None:
-                if carry_len and chunk_text[:carry_len].startswith("&"):
-                    # The previous carry was an entity fragment and this chunk
-                    # starts a tag split; widen the hold so the entity stays in
-                    # the same fallback context as the tag (their seam must
-                    # keep the tag's word boundary: "&amp;" + "<vendor>bar"
-                    # must stay "& bar", not "&bar").
+                if carry_is_entity and chunk_text[:carry_len].startswith("&"):
                     hold_at = 0
                 self._ssml_carry = chunk_text[hold_at:]
                 chunk_text = chunk_text[:hold_at]
@@ -1362,16 +1404,21 @@ class OpenAIEventHandler(AsyncEventHandler):
                 if entity_complete:
                     chunk_text = strip_ssml(chunk_text)
                 else:
-                    # Rejected entity candidate: the "&" is literal text.
-                    # Protect it from html.unescape while keeping the whole
-                    # fragment in one fallback context so unknown tags still
-                    # preserve word boundaries ("&" + "<vendor/>bar" must stay
-                    # "& bar", not "&bar"). The carry itself is not sliced
-                    # after decoding, so entity-length changes cannot drop
-                    # characters ("&amp" + "regulations" keeps both).
+                    # The leading "&" is literal text; protect it from
+                    # html.unescape while unknown tags still preserve word
+                    # boundaries ("&" + "<vendor/>bar" stays "& bar", not
+                    # "&bar"). The carry is not sliced after decoding, so
+                    # entity-length changes cannot drop characters
+                    # ("&amp" + "regulations" keeps both).
                     chunk_text = _strip_ssml_literal_ampersand(chunk_text)
             else:
                 chunk_text = strip_ssml(chunk_text)
+
+            # strip_ssml collapses runs of ASCII spaces within one call; keep the
+            # same normalization across chunk boundaries so the joined stream
+            # matches one-shot stripping of the complete text
+            if chunk_text.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
+                chunk_text = chunk_text.lstrip(" ")
 
         # Store in buffer for fallback compatibility
         self._synthesis_buffer.append(chunk_text)
@@ -1437,6 +1484,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                     flushed = _strip_ssml_literal_ampersand(carry)
             else:
                 flushed = strip_ssml(carry)
+            # Same cross-boundary space normalization as chunk processing
+            if flushed.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
+                flushed = flushed.lstrip(" ")
             self._text_accumulator += flushed
             self._synthesis_buffer.append(flushed)
 
