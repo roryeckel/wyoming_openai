@@ -1198,7 +1198,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Use cached segmenter or create a new one
         if pysbd_language not in self._pysbd_segmenters:
             _LOGGER.debug("Creating new pysbd segmenter for language: %s", pysbd_language)
-            self._pysbd_segmenters[pysbd_language] = pysbd.Segmenter(language=pysbd_language, clean=True)
+            # The final segment is retained and appended to by later events, so whitespace must be lossless.
+            self._pysbd_segmenters[pysbd_language] = pysbd.Segmenter(language=pysbd_language, clean=False)
 
         segmenter = self._pysbd_segmenters[pysbd_language]
 

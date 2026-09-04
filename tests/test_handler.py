@@ -1460,6 +1460,20 @@ class TestOpenAIEventHandlerComprehensive:
         assert "audio-stop" in event_types
 
     @pytest.mark.asyncio
+    async def test_streaming_synthesis_preserves_whitespace_in_retained_sentence(self, handler):
+        """Keep token whitespace when a partial sentence spans synthesis chunks."""
+        handler._process_ready_sentences = AsyncMock(return_value=True)
+
+        assert await handler.handle_event(Event(type="synthesize-start", data={"voice": {"name": "voice1"}})) is True
+        assert await handler.handle_event(Event(type="synthesize-chunk", data={"text": "First sentence. "})) is True
+        assert await handler.handle_event(Event(type="synthesize-chunk", data={"text": "Todo "})) is True
+        assert handler._text_accumulator == "Todo "
+
+        assert await handler.handle_event(Event(type="synthesize-chunk", data={"text": "listo."})) is True
+        assert handler._text_accumulator == "Todo listo."
+        handler._process_ready_sentences.assert_awaited_once_with(["First sentence. "], None)
+
+    @pytest.mark.asyncio
     async def test_stream_tts_audio_incremental_includes_configured_tts_extra_body(
         self, enhanced_handler, mock_clients
     ):
