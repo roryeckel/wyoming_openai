@@ -2458,7 +2458,7 @@ async def test_synthesize_chunk_ssml_normalizes_spaces_after_sentence_flush(enha
     # Sentence detection retains only the final segment, which drops the
     # trailing space still present in the emitted synthesis buffer.
     segmenter = MagicMock()
-    segmenter.segment.side_effect = [["First.", "Second."], ["Second.", "Next"]]
+    segmenter.segment.side_effect = [["First.", "Second."], ["Second. Next"]]
     enhanced_handler._pysbd_segmenters["en"] = segmenter
     enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
 
@@ -2468,6 +2468,8 @@ async def test_synthesize_chunk_ssml_normalizes_spaces_after_sentence_flush(enha
     await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": " Next"}))
 
     assert "".join(enhanced_handler._synthesis_buffer) == "First. Second. Next"
+    assert segmenter.segment.call_args_list[1].args == ("Second. Next",)
+    assert enhanced_handler._text_accumulator == "Second. Next"
 
 
 @pytest.mark.asyncio

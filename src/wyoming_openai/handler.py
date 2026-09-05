@@ -1414,17 +1414,26 @@ class OpenAIEventHandler(AsyncEventHandler):
             else:
                 chunk_text = strip_ssml(chunk_text)
 
-            # strip_ssml collapses runs of ASCII spaces within one call; keep the
-            # same normalization across chunk boundaries so the joined stream
-            # matches one-shot stripping of the complete text
-            if chunk_text.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
-                chunk_text = chunk_text.lstrip(" ")
+            # Keep the fallback buffer normalized as one continuous stream, but
+            # normalize the sentence accumulator against its own pending text.
+            # pysbd can remove trailing whitespace when it retains only the
+            # final sentence; using the buffer's whitespace for both would then
+            # join the next chunk's first word to that pending sentence.
+            buffer_chunk_text = chunk_text
+            accumulator_chunk_text = chunk_text
+            if buffer_chunk_text.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
+                buffer_chunk_text = buffer_chunk_text.lstrip(" ")
+            if accumulator_chunk_text.startswith(" ") and self._text_accumulator.endswith(" "):
+                accumulator_chunk_text = accumulator_chunk_text.lstrip(" ")
+        else:
+            buffer_chunk_text = chunk_text
+            accumulator_chunk_text = chunk_text
 
         # Store in buffer for fallback compatibility
-        self._synthesis_buffer.append(chunk_text)
+        self._synthesis_buffer.append(buffer_chunk_text)
 
         # Add to accumulator for sentence detection across chunks
-        self._text_accumulator += chunk_text
+        self._text_accumulator += accumulator_chunk_text
 
         # Get or create segmenter for the current language
         requested_language = self._synthesis_voice.language if self._synthesis_voice else None
@@ -1484,11 +1493,16 @@ class OpenAIEventHandler(AsyncEventHandler):
                     flushed = _strip_ssml_literal_ampersand(carry)
             else:
                 flushed = strip_ssml(carry)
-            # Same cross-boundary space normalization as chunk processing
-            if flushed.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
-                flushed = flushed.lstrip(" ")
-            self._text_accumulator += flushed
-            self._synthesis_buffer.append(flushed)
+            # As in chunk processing, the fallback buffer and the pending
+            # sentence can have different trailing whitespace after a flush.
+            buffer_flushed = flushed
+            accumulator_flushed = flushed
+            if buffer_flushed.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
+                buffer_flushed = buffer_flushed.lstrip(" ")
+            if accumulator_flushed.startswith(" ") and self._text_accumulator.endswith(" "):
+                accumulator_flushed = accumulator_flushed.lstrip(" ")
+            self._text_accumulator += accumulator_flushed
+            self._synthesis_buffer.append(buffer_flushed)
 
         # Process any remaining text in the accumulator (even if it's incomplete)
         # This is the final text, so we process it regardless of sentence completion
