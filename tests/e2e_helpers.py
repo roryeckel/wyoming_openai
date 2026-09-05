@@ -35,6 +35,9 @@ from wyoming.tts import (
 AUDIO_CHUNK_FRAMES = 1024
 DEFAULT_EVENT_TIMEOUT_SECONDS = 30.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 120.0
+# wyoming 1.10.2 added optional timeouts to AsyncClient; use them to fail fast
+# if the wyoming_openai server hangs mid-event (instead of waiting forever).
+DEFAULT_READ_TIMEOUT_SECONDS = 90.0
 
 # When set, save_debug_wav() writes synthesized audio here so CI can upload it
 # as an artifact for human listening when a round-trip assertion fails.
@@ -97,15 +100,17 @@ class WyomingTestClient:
         port: int = 10300,
         event_timeout: float = DEFAULT_EVENT_TIMEOUT_SECONDS,
         operation_timeout: float = DEFAULT_OPERATION_TIMEOUT_SECONDS,
+        read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS,
     ) -> None:
         self.host = host
         self.port = port
         self._event_timeout = event_timeout
         self._operation_timeout = operation_timeout
+        self._read_timeout = read_timeout
         self._client: AsyncTcpClient | None = None
 
     async def __aenter__(self) -> WyomingTestClient:
-        self._client = AsyncTcpClient(self.host, self.port)
+        self._client = AsyncTcpClient(self.host, self.port, read_timeout=self._read_timeout)
         await self._client.connect()
         return self
 
