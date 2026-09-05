@@ -35,6 +35,7 @@ from wyoming.tts import (
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .utilities import (
     NamedBytesIO,
+    SsmlTextTransformer,
     get_extra_body_boolean_field,
     strip_ssml,
     validate_stt_extra_body,
@@ -61,90 +62,6 @@ TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when streaming sentences
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
-_SSML_ENTITY_NAMES = ("amp", "apos", "gt", "lt", "quot")
-# Bound the held-back partial tag/entity so a stream that never completes it
-# cannot grow the carry (and its per-chunk rescan/copy cost) without limit.
-# Far above any realistic SSML tag; an oversized fragment is flushed literally
-# rather than reassembled.
-_MAX_SSML_CARRY = 4096
-
-
-def _find_partial_tag_start(text: str) -> int | None:
-    """Return where a trailing incomplete tag begins, or None.
-
-    Quote-aware: ">" inside an attribute value does not close the tag, so a
-    scan starting at the last "<" may still be inside an open attribute. The
-    caller bounds the held-back length with _MAX_SSML_CARRY.
-    """
-    quote: str | None = None
-    start: int | None = None
-    for index, char in enumerate(text):
-        if start is None:
-            if char == "<":
-                start = index
-            continue
-        if char == "<":
-            # A "<" cannot appear inside an attribute value, quoted or not: it
-            # aborts the outer tag start. The outer "<" is literal text while
-            # this fresh "<" may start a real tag.
-            start = index
-            quote = None
-        elif quote:
-            if char == quote:
-                quote = None
-        elif char in "\"'":
-            quote = char
-        elif char == ">":
-            # Tag is closed; no hold candidate
-            start = None
-    return start
-
-
-def _ends_with_ascii_space(chunks: list[str]) -> bool:
-    """Whether the most recently emitted non-empty chunk ends with a space."""
-    return next((chunk.endswith(" ") for chunk in reversed(chunks) if chunk), False)
-
-
-def _is_valid_entity_prefix(text: str) -> bool:
-    """True when text is a prefix of a well-formed XML entity reference."""
-    if not text.startswith("&"):
-        return False
-    body = text[1:]
-    if body.startswith("#"):
-        rest = body[1:]
-        if rest.startswith(("x", "X")):
-            return all(c in "0123456789abcdefABCDEF" for c in rest[1:])
-        return all(c in "0123456789" for c in rest)
-    if body and not body.isalpha():
-        return False
-    return any(name.startswith(body) for name in _SSML_ENTITY_NAMES)
-
-
-def _is_complete_entity(text: str) -> bool:
-    """True when text is a complete well-formed XML entity reference."""
-    if not text.startswith("&") or not text.endswith(";"):
-        return False
-    body = text[1:-1]
-    if body.startswith("#"):
-        digits = body[1:]
-        if digits.startswith(("x", "X")):
-            return len(digits) > 1 and all(c in "0123456789abcdefABCDEF" for c in digits[1:])
-        return bool(digits) and all(c in "0123456789" for c in digits)
-    return body in _SSML_ENTITY_NAMES
-
-
-def _strip_ssml_literal_ampersand(text: str) -> str:
-    """Strip SSML from text whose leading "&" is literal text, not an entity.
-
-    Precondition: text starts with "&". html.unescape would otherwise decode
-    an incomplete reference and shorten it ("&amp" becomes "&"); the sentinel
-    keeps the ampersand intact while the fallback still runs in one context
-    so unknown tags preserve word boundaries.
-    """
-    protected = "\0" + text[1:]
-    return strip_ssml(protected, force_fallback=True).replace("\0", "&", 1)
-
-
 @dataclass(frozen=True)
 class TtsStreamResult:
     """Container for TTS streaming outcomes."""
@@ -253,7 +170,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer: list[str] = []
         self._synthesis_voice: SynthesizeVoice | None = None
         self._synthesis_text_format: str | SynthesizeTextFormat | None = None
-        self._ssml_carry: str = ""
+        self._ssml_transformer: SsmlTextTransformer | None = None
         self._is_synthesizing: bool = False
 
         # State for incremental sentence detection
@@ -1149,7 +1066,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._pysbd_segmenters.clear()
         self._synthesis_voice = None
         self._synthesis_text_format = None
-        self._ssml_carry = ""
+        self._ssml_transformer = None
 
         return False
 
@@ -1328,7 +1245,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer = []
         self._is_synthesizing = True
         self._synthesis_text_format = synthesize_start.text_format
-        self._ssml_carry = ""
+        self._ssml_transformer = SsmlTextTransformer() if self._is_ssml_format(synthesize_start.text_format) else None
 
         # Reset incremental detection state
         self._text_accumulator = ""
@@ -1362,78 +1279,15 @@ class OpenAIEventHandler(AsyncEventHandler):
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
         _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
 
-        # Strip per chunk so pysbd segments plain text. A tag or entity split
-        # across chunk boundaries ("<bre" + "ak/>", "&am" + "p;") is
-        # reassembled by holding a trailing partial fragment back until the
-        # next chunk (or synthesize-stop). The carry is bounded so a fragment
-        # that never completes cannot grow without limit; an oversized fragment
-        # is flushed literally instead of leaked as markup.
-        if self._is_ssml_format(self._synthesis_text_format):
-            chunk_text = self._ssml_carry + chunk_text
-            carry_len = len(self._ssml_carry)
-            carry_is_entity = self._ssml_carry.startswith("&")
-            self._ssml_carry = ""
+        if self._ssml_transformer is not None:
+            chunk_text = self._ssml_transformer.feed(chunk_text)
 
-            hold_at: int | None = None
-            tag_start = _find_partial_tag_start(chunk_text)
-            if tag_start is not None and len(chunk_text) - tag_start <= _MAX_SSML_CARRY:
-                hold_at = tag_start
-            last_amp = chunk_text.rfind("&")
-            if (
-                last_amp > chunk_text.rfind(";")
-                and len(chunk_text) - last_amp <= _MAX_SSML_CARRY
-                and _is_valid_entity_prefix(chunk_text[last_amp:])
-            ):
-                hold_at = last_amp if hold_at is None else min(hold_at, last_amp)
-
-            # A carried entity fragment followed by a tag split stays merged with
-            # the tag in one hold, so their seam keeps the tag's word boundary in
-            # the fallback context ("&amp;" + "<vendor>bar" stays "& bar", not
-            # "&bar")
-            if hold_at is not None:
-                if carry_is_entity and chunk_text[:carry_len].startswith("&"):
-                    hold_at = 0
-                self._ssml_carry = chunk_text[hold_at:]
-                chunk_text = chunk_text[:hold_at]
-                if hold_at < carry_len:
-                    carry_len = 0  # previous carry lives on in the new hold
-
-            if carry_len and chunk_text.startswith("&"):
-                merged_end = chunk_text.find(";") + 1 if ";" in chunk_text else 0
-                entity_complete = bool(merged_end) and _is_complete_entity(chunk_text[:merged_end])
-                if entity_complete:
-                    chunk_text = strip_ssml(chunk_text)
-                else:
-                    # The leading "&" is literal text; protect it from
-                    # html.unescape while unknown tags still preserve word
-                    # boundaries ("&" + "<vendor/>bar" stays "& bar", not
-                    # "&bar"). The carry is not sliced after decoding, so
-                    # entity-length changes cannot drop characters
-                    # ("&amp" + "regulations" keeps both).
-                    chunk_text = _strip_ssml_literal_ampersand(chunk_text)
-            else:
-                chunk_text = strip_ssml(chunk_text)
-
-            # Keep the fallback buffer normalized as one continuous stream, but
-            # normalize the sentence accumulator against its own pending text.
-            # pysbd can remove trailing whitespace when it retains only the
-            # final sentence; using the buffer's whitespace for both would then
-            # join the next chunk's first word to that pending sentence.
-            buffer_chunk_text = chunk_text
-            accumulator_chunk_text = chunk_text
-            if buffer_chunk_text.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
-                buffer_chunk_text = buffer_chunk_text.lstrip(" ")
-            if accumulator_chunk_text.startswith(" ") and self._text_accumulator.endswith(" "):
-                accumulator_chunk_text = accumulator_chunk_text.lstrip(" ")
-        else:
-            buffer_chunk_text = chunk_text
-            accumulator_chunk_text = chunk_text
-
-        # Store in buffer for fallback compatibility
-        self._synthesis_buffer.append(buffer_chunk_text)
+        # Keep the fallback buffer and sentence accumulator as one identical
+        # projected stream. The transformer owns all SSML whitespace repair.
+        self._synthesis_buffer.append(chunk_text)
 
         # Add to accumulator for sentence detection across chunks
-        self._text_accumulator += accumulator_chunk_text
+        self._text_accumulator += chunk_text
 
         # Get or create segmenter for the current language
         requested_language = self._synthesis_voice.language if self._synthesis_voice else None
@@ -1479,30 +1333,10 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._is_synthesizing = False
 
-        # Flush any held-back partial SSML tag or valid entity prefix; at end
-        # of stream it is either a malformed fragment (kept literally by
-        # strip_ssml) or literal text
-        if self._ssml_carry:
-            carry = self._ssml_carry
-            self._ssml_carry = ""
-            if carry.startswith("&"):
-                merged_end = carry.find(";") + 1 if ";" in carry else 0
-                if merged_end and _is_complete_entity(carry[:merged_end]):
-                    flushed = strip_ssml(carry)
-                else:
-                    flushed = _strip_ssml_literal_ampersand(carry)
-            else:
-                flushed = strip_ssml(carry)
-            # As in chunk processing, the fallback buffer and the pending
-            # sentence can have different trailing whitespace after a flush.
-            buffer_flushed = flushed
-            accumulator_flushed = flushed
-            if buffer_flushed.startswith(" ") and _ends_with_ascii_space(self._synthesis_buffer):
-                buffer_flushed = buffer_flushed.lstrip(" ")
-            if accumulator_flushed.startswith(" ") and self._text_accumulator.endswith(" "):
-                accumulator_flushed = accumulator_flushed.lstrip(" ")
-            self._text_accumulator += accumulator_flushed
-            self._synthesis_buffer.append(buffer_flushed)
+        if self._ssml_transformer is not None:
+            flushed = self._ssml_transformer.finish()
+            self._text_accumulator += flushed
+            self._synthesis_buffer.append(flushed)
 
         # Process any remaining text in the accumulator (even if it's incomplete)
         # This is the final text, so we process it regardless of sentence completion
@@ -1522,7 +1356,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer = []
         self._synthesis_voice = None
         self._synthesis_text_format = None
-        self._ssml_carry = ""
+        self._ssml_transformer = None
         self._text_accumulator = ""
         self._ready_chunks = []
         self._pysbd_segmenters.clear()  # Clear segmenter cache

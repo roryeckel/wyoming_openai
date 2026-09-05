@@ -6,6 +6,7 @@ import pytest
 
 from wyoming_openai.utilities import (
     NamedBytesIO,
+    SsmlTextTransformer,
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
@@ -32,9 +33,10 @@ def test_strip_ssml_handles_gt_in_quoted_attributes():
 
 
 def test_strip_ssml_fallback_recovers_from_unterminated_attribute_quote():
-    # The unmatched quote forces fallback; its tag and subsequent closing tags
-    # must still be removed.
-    assert strip_ssml('<speak>before<prosody rate="fast>after</prosody> &</speak>') == "beforeafter &"
+    # An unmatched quote is an incomplete invalid construct and remains literal.
+    assert strip_ssml('<speak>before<prosody rate="fast>after</prosody> &</speak>') == (
+        'before<prosody rate="fast>after</prosody> &</speak>'
+    )
 
 
 def test_strip_ssml_preserves_word_boundaries():
@@ -81,6 +83,83 @@ def test_strip_ssml_fallback_mixed_tag_run():
     assert strip_ssml("a<emphasis><vendor/></emphasis>b &") == "a b &"
     # A run of only known inline elements keeps its text flowing
     assert strip_ssml("a<emphasis><prosody></prosody></emphasis>b &") == "ab &"
+
+
+def test_ssml_transformer_handles_entities_and_lexical_constructs():
+    assert strip_ssml("Tom &amp; &#65; &#x42; &unknown;") == "Tom & A B &unknown;"
+    assert strip_ssml("A<!-- comment > -->B<?pi value?>C") == "ABC"
+    assert strip_ssml("A<![CDATA[<b>& c]]>D") == "A<b>& cD"
+
+
+def test_ssml_transformer_preserves_incomplete_and_invalid_literals():
+    assert strip_ssml("one<vendor") == "one<vendor"
+    assert strip_ssml("one&am") == "one&am"
+    assert strip_ssml("one<>two") == "one<>two"
+    assert strip_ssml("one<vendor two") == "one<vendor two"
+
+
+def test_ssml_transformer_handles_oversized_unfinished_token():
+    text = "one<" + ("x" * 4096) + "two"
+    transformer = SsmlTextTransformer()
+
+    streamed = transformer.feed(text[:3]) + transformer.feed(text[3:]) + transformer.finish()
+
+    assert streamed == text
+    assert strip_ssml(text) == text
+
+
+def test_ssml_transformer_delays_boundaries_until_text_or_finish():
+    transformer = SsmlTextTransformer()
+
+    assert transformer.feed("one<vendor/>") == "one"
+    assert transformer.feed("two") == " two"
+    assert transformer.finish() == ""
+
+    transformer = SsmlTextTransformer()
+    assert transformer.feed("one<break/>") == "one"
+    assert transformer.finish() == " "
+
+
+_SSML_PARTITION_CORPUS = (
+    "<speak>Hello<break/>world</speak>",
+    "<speak>Hello<break time='a>b'/>world</speak>",
+    "one<vendor/>two",
+    "<speak>a<emphasis>b</emphasis>c</speak>",
+    "Tom &amp; Jerry &#x1f600;",
+    "A<!-- comment > -->B<![CDATA[<raw>&]]>C<?pi?>D",
+    "one<vendor",
+    "one&am",
+    '<speak>one<prosody rate="fast>two</speak>',
+    "one  two",
+)
+
+
+@pytest.mark.parametrize("text", _SSML_PARTITION_CORPUS)
+def test_ssml_transformer_is_invariant_to_chunk_partitions(text):
+    expected = strip_ssml(text)
+    split_patterns: list[tuple[int, ...]] = [(split,) for split in range(len(text) + 1)]
+    if len(text) > 2:
+        split_patterns.extend(((1, len(text) - 1), (len(text) // 3, 2 * len(text) // 3)))
+
+    for split_pattern in split_patterns:
+        transformer = SsmlTextTransformer()
+        start = 0
+        actual_parts: list[str] = []
+        for split in (*split_pattern, len(text)):
+            actual_parts.append(transformer.feed(text[start:split]))
+            start = split
+        actual = "".join(actual_parts) + transformer.finish()
+        assert actual == expected, f"splits={split_pattern} text={text!r}"
+
+
+def test_ssml_transformer_regression_split_speak_and_break():
+    transformer = SsmlTextTransformer()
+
+    actual = transformer.feed("<speak>Hello")
+    actual += transformer.feed("<break/>world</speak>")
+    actual += transformer.finish()
+
+    assert actual == "Hello world"
 
 
 def test_named_bytes_io_name_property():
