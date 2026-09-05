@@ -7,20 +7,91 @@ from enum import Enum
 from io import BytesIO
 from xml.etree import ElementTree
 
-_SSML_TAG_RE = re.compile(r"<[^>]*>")
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
-_SSML_PAUSE_TAG_RE = re.compile(r"</?(?:break|p|s)\b[^>]*>", re.IGNORECASE)
-# Known inline elements removed without a separator in the regex fallback.
-_SSML_INLINE_TAG_RE = re.compile(
-    r"</?(?:audio|emphasis|lang|mark|phoneme|prosody|say-as|speak|sub|voice|w)\b[^>]*>",
-    re.IGNORECASE,
+_SSML_PAUSE_TAG_NAMES = frozenset(("break", "p", "s"))
+# Known inline elements removed without a separator in the malformed-markup fallback.
+_SSML_INLINE_TAG_NAMES = frozenset(
+    ("audio", "emphasis", "lang", "mark", "phoneme", "prosody", "say-as", "speak", "sub", "voice", "w")
 )
 _MULTI_SPACE_RE = re.compile(r" {2,}")
 
 
+def _iter_ssml_tag_spans(text: str):
+    """Yield complete tag spans, respecting quotes in attribute values."""
+    start = 0
+    while (tag_start := text.find("<", start)) >= 0:
+        quote: str | None = None
+        quoted_gt: int | None = None
+        index = tag_start + 1
+        while index < len(text):
+            char = text[index]
+            if quote:
+                if char == quote:
+                    quote = None
+                elif char == ">" and quoted_gt is None:
+                    # If the quote never closes, use this as a recovery point
+                    # so malformed markup does not leak into plain text.
+                    quoted_gt = index
+            elif char in "\"'":
+                quote = char
+            elif char == ">":
+                yield tag_start, index + 1
+                start = index + 1
+                break
+            elif char == "<":
+                # The previous opening bracket is literal/malformed; this one
+                # may start a tag that the fallback can still remove.
+                tag_start = index
+            index += 1
+        else:
+            if quoted_gt is not None:
+                yield tag_start, quoted_gt + 1
+                start = quoted_gt + 1
+                continue
+            return
+
+
+def _ssml_tag_name(tag: str) -> str | None:
+    """Return a lower-case local tag name from a complete XML-like tag."""
+    content = tag[1:-1].strip().lstrip("/").strip()
+    if not content or content[0] in "!?":
+        return None
+
+    name_end = 0
+    while name_end < len(content) and content[name_end] not in " \t\r\n/":
+        name_end += 1
+
+    return content[:name_end].rsplit(":", 1)[-1].lower()
+
+
+def _strip_ssml_tree(root: ElementTree.Element) -> str:
+    """Extract text from parsed SSML while retaining pause-element boundaries."""
+    parts: list[str] = []
+
+    def walk(element: ElementTree.Element) -> None:
+        tag = element.tag.rsplit("}", 1)[-1].lower() if isinstance(element.tag, str) else ""
+        is_pause = tag in _SSML_PAUSE_TAG_NAMES
+        if is_pause:
+            parts.append(" ")
+
+        if element.text:
+            parts.append(element.text)
+
+        for child in element:
+            walk(child)
+            if child.tail:
+                parts.append(child.tail)
+
+        if is_pause:
+            parts.append(" ")
+
+    walk(root)
+    return "".join(parts)
+
+
 def _strip_ssml_tags(text: str) -> str:
-    """Regex fallback for malformed markup.
+    """Fallback for malformed markup.
 
     Contiguous tag runs are handled as one unit: a run of only known inline
     elements (emphasis, prosody, ...) is removed without a separator, keeping
@@ -30,16 +101,19 @@ def _strip_ssml_tags(text: str) -> str:
     """
     parts: list[str] = []
     pos = 0
-    for match in _SSML_TAG_RE.finditer(text):
-        parts.append(text[pos : match.start()])
-        run_start = match.start()
-        run_end = match.end()
-        run = [match.group(0)]
-        while (next_match := _SSML_TAG_RE.search(text, run_end)) and next_match.start() == run_end:
-            run.append(next_match.group(0))
-            run_end = next_match.end()
+    tag_spans = list(_iter_ssml_tag_spans(text))
+    index = 0
+    while index < len(tag_spans):
+        run_start, run_end = tag_spans[index]
+        parts.append(text[pos:run_start])
+        run = [text[run_start:run_end]]
+        index += 1
+        while index < len(tag_spans) and tag_spans[index][0] == run_end:
+            _, run_end = tag_spans[index]
+            run.append(text[tag_spans[index][0]:run_end])
+            index += 1
         pos = run_end
-        if any(not _SSML_INLINE_TAG_RE.fullmatch(tag) for tag in run):
+        if any(_ssml_tag_name(tag) not in _SSML_INLINE_TAG_NAMES for tag in run):
             prev_char = text[run_start - 1] if run_start > 0 else ""
             next_char = text[run_end] if run_end < len(text) else ""
             if prev_char and next_char and not prev_char.isspace() and not next_char.isspace():
@@ -56,12 +130,11 @@ def strip_ssml(text: str, *, force_fallback: bool = False) -> str:
     entity decoding. With force_fallback=True the XML parser is skipped so a
     caller can protect raw "&" text from cross-context entity decoding.
     """
-    text = _SSML_PAUSE_TAG_RE.sub(" ", text)
     if force_fallback:
         return _MULTI_SPACE_RE.sub(" ", html.unescape(_strip_ssml_tags(text)))
     try:
         root = ElementTree.fromstring(f"<root>{text}</root>")
-        stripped = "".join(root.itertext())
+        stripped = _strip_ssml_tree(root)
     except ElementTree.ParseError:
         stripped = html.unescape(_strip_ssml_tags(text))
     return _MULTI_SPACE_RE.sub(" ", stripped)

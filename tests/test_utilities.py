@@ -23,6 +23,20 @@ def test_strip_ssml_strips_break_tags():
     assert strip_ssml("Hello world.") == "Hello world."
 
 
+def test_strip_ssml_handles_gt_in_quoted_attributes():
+    # A quoted XML attribute may contain ">"; it must not truncate the tag
+    # before the XML parser sees it.
+    assert strip_ssml('<speak>Hello<break foo="a>b"/>world</speak>') == "Hello world"
+    # The malformed-markup fallback uses the same quote-aware tag scanner.
+    assert strip_ssml('<speak>Hello<break foo="a>b"/>world &</speak>') == "Hello world &"
+
+
+def test_strip_ssml_fallback_recovers_from_unterminated_attribute_quote():
+    # The unmatched quote forces fallback; its tag and subsequent closing tags
+    # must still be removed.
+    assert strip_ssml('<speak>before<prosody rate="fast>after</prosody> &</speak>') == "beforeafter &"
+
+
 def test_strip_ssml_preserves_word_boundaries():
     # Pause/block elements separate words even without surrounding whitespace
     assert strip_ssml("<speak>Hello<break/>world</speak>") == "Hello world"
