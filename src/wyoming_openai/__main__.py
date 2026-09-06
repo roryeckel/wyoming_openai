@@ -27,12 +27,18 @@ from .utilities import (
 )
 
 
-def configure_logging(level):
-    """Configure logging based on a string level."""
+def configure_logging(level, log_file=None):
+    """Configure logging based on a string level, optionally also logging to a file."""
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {level}")
-    logging.basicConfig(level=numeric_level, force=True)
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+
+    logging.basicConfig(level=numeric_level, handlers=handlers, force=True)
 
 
 async def main():
@@ -84,6 +90,11 @@ async def main():
         "--log-level",
         default=os.getenv("WYOMING_LOG_LEVEL", "INFO"),
         help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=os.getenv("WYOMING_LOG_FILE", None),
+        help="Optional file path to additionally log to (created if missing)",
     )
     parser.add_argument(
         "--languages",
@@ -233,7 +244,7 @@ async def main():
     except ValueError as exc:
         parser.error(str(exc))
 
-    configure_logging(args.log_level)
+    configure_logging(args.log_level, args.log_file)
     _logger = logging.getLogger(__name__)
 
     _logger.info("Starting Wyoming OpenAI %s", __version__)

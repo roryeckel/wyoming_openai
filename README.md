@@ -134,6 +134,7 @@ Assuming you have installed the package in your current environment, you can run
 python -m wyoming_openai \
   --uri tcp://0.0.0.0:10300 \
   --log-level INFO \
+  --log-file /tmp/logs/wyoming_openai.log \
   --languages en \
   --stt-openai-key YOUR_STT_API_KEY_HERE \
   --stt-openai-url https://api.openai.com/v1 \
@@ -160,6 +161,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 |-----------------------------------------|--------------------------------------------|-----------------------------------------------|----------------------------------------------------------------------|
 | `--uri`                                 | `WYOMING_URI`                              | tcp://0.0.0.0:10300                           | The URI for the Wyoming server to bind to.                           |
 | `--log-level`                           | `WYOMING_LOG_LEVEL`                        | INFO                                          | Sets the logging level (e.g., INFO, DEBUG).                          |
+| `--log-file`                            | `WYOMING_LOG_FILE`                         | None                                          | Optional file path to additionally log to, in addition to stdout/stderr. Parent directories are created automatically if missing. |
 | `--languages`                           | `WYOMING_LANGUAGES`                        | en                                            | Space-separated list of supported languages to advertise.            |
 | `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible speech-to-text services.      |
 | `--stt-openai-url`                      | `STT_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible speech-to-text API            |

@@ -178,3 +178,10 @@ cython_debug/
 .claude/*
 !.claude/skills
 .codex
+
+# Local scratch/log output (e.g. agent debugging, file logging)
+/tmp/*
+!/tmp/logs/
+/tmp/logs/*
+!/tmp/logs/.gitkeep
+!/tmp/.gitkeep
