@@ -176,3 +176,57 @@ async def test_backend_autodetection_speaches(wyoming_client_autodetect: Wyoming
     voice = _first_voice_name(info)
     audio = await wyoming_client_autodetect.synthesize("Autodetect smoke test.", voice=voice)
     assert len(audio.pcm) >= MIN_TTS_PCM_BYTES
+
+
+@pytest.mark.asyncio
+async def test_select_program_round_trip(wyoming_client: WyomingTestClient) -> None:
+    """select-program (wyoming 1.10.0) pins the advertised program; flows still work.
+
+    The e2e server advertises one program per domain, so this proves real-socket
+    dispatch of the new event; cross-program restriction is covered by unit tests.
+    """
+    info = await wyoming_client.describe()
+    program_name = info.asr[0].name
+    assert program_name is not None
+
+    await wyoming_client.select_program(program_name)
+
+    phrase = "Program selection round trip."
+    voice = _first_voice_name(info)
+    audio = await wyoming_client.synthesize(phrase, voice=voice)
+    result = await wyoming_client.transcribe(audio.to_wav_bytes())
+
+    assert_fuzzy_match(result.text, phrase)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_ssml_round_trip(wyoming_client: WyomingTestClient) -> None:
+    """SSML tags must be stripped, not spoken: spoken markup would tank the match."""
+    info = await wyoming_client.describe()
+    voice = _first_voice_name(info)
+    plain_phrase = "The quick brown fox jumps over the lazy dog."
+    ssml_text = f'<speak>{plain_phrase}<break time="300ms"/></speak>'
+
+    audio = await wyoming_client.synthesize(ssml_text, voice=voice, text_format="ssml")
+    save_debug_wav("ssml_round_trip", audio)
+    result = await wyoming_client.transcribe(audio.to_wav_bytes())
+
+    assert_fuzzy_match(result.text, plain_phrase)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_with_new_fields_round_trip(wyoming_client: WyomingTestClient) -> None:
+    """vad_sensitivity/transcript_names/transcript_terms are ignored without disturbing STT."""
+    info = await wyoming_client.describe()
+    voice = _first_voice_name(info)
+    phrase = "What's the weather like tomorrow in Berlin?"
+
+    audio = await wyoming_client.synthesize(phrase, voice=voice)
+    result = await wyoming_client.transcribe(
+        audio.to_wav_bytes(),
+        vad_sensitivity="aggressive",
+        transcript_names=["Berlin"],
+        transcript_terms=["weather"],
+    )
+
+    assert_fuzzy_match(result.text, phrase)

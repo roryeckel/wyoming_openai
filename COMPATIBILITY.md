@@ -20,6 +20,15 @@ These are the core surfaces this project intentionally targets.
 | Wyoming `synthesize-start/chunk/stop` input flow | Supported | Wyoming-side incremental text input is supported, while still targeting OpenAI-compatible TTS upstream. |
 | Wyoming transcription and synthesis event handling | Supported | Core project behavior. |
 
+### SSML Text Projection
+
+Wyoming `text_format=ssml` is projected to backend-safe plain text before it
+is sent upstream. Markup effects such as prosody, voice, emphasis,
+`say-as`, and audio are not implemented or forwarded. `break`, `p`, and `s`
+tags preserve one spoken word boundary, as do complete unknown/custom tags;
+known inline tags are removed transparently. The projection is incremental,
+so splitting SSML across synthesis chunks does not change the resulting text.
+
 ## Limited Backend Shims
 
 This project includes a small backend compatibility layer for some known backends.

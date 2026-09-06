@@ -20,7 +20,7 @@ from wyoming.asr import (
 )
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
-from wyoming.info import AsrModel, Describe, Info, TtsVoice
+from wyoming.info import AsrModel, AsrProgram, Describe, Info, SelectProgram, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler
 from wyoming.tts import (
     Synthesize,
@@ -28,11 +28,19 @@ from wyoming.tts import (
     SynthesizeStart,
     SynthesizeStop,
     SynthesizeStopped,
+    SynthesizeTextFormat,
     SynthesizeVoice,
 )
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
-from .utilities import NamedBytesIO, get_extra_body_boolean_field, validate_stt_extra_body, validate_tts_extra_body
+from .utilities import (
+    NamedBytesIO,
+    SsmlTextTransformer,
+    get_extra_body_boolean_field,
+    strip_ssml,
+    validate_stt_extra_body,
+    validate_tts_extra_body,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,8 +62,6 @@ TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when streaming sentences
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
-
-
 @dataclass(frozen=True)
 class TtsStreamResult:
     """Container for TTS streaming outcomes."""
@@ -118,6 +124,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         super().__init__(*args, **kwargs)
         self._wyoming_info = info
 
+        # Connection-lifetime program selection (select-program event). The
+        # server constructs a fresh handler per connection, so no reset needed.
+        self._selected_asr_program: AsrProgram | None = None
+        self._selected_tts_program: TtsProgram | None = None
+
         self._stt_client = stt_client
         self._stt_temperature = stt_temperature
         self._stt_prompt = stt_prompt
@@ -158,6 +169,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State for streaming synthesis
         self._synthesis_buffer: list[str] = []
         self._synthesis_voice: SynthesizeVoice | None = None
+        self._synthesis_text_format: str | SynthesizeTextFormat | None = None
+        self._ssml_transformer: SsmlTextTransformer | None = None
         self._is_synthesizing: bool = False
 
         # State for incremental sentence detection
@@ -215,6 +228,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         if SynthesizeStop.is_type(event.type):
             return await self._handle_synthesize_stop()
 
+        if SelectProgram.is_type(event.type):
+            return await self._handle_select_program(SelectProgram.from_event(event))
+
         if Describe.is_type(event.type):
             await self.write_event(self._wyoming_info.event())
             return True
@@ -231,8 +247,49 @@ class OpenAIEventHandler(AsyncEventHandler):
         await self._cleanup_realtime_transcription()
         await super().stop()
 
+    async def _handle_select_program(self, select_program: SelectProgram) -> bool:
+        """Handle select-program request pinning a program for this connection.
+
+        Program names are only unique within a domain, so the name is resolved
+        against ASR and TTS programs independently; one event may select both.
+        A selection applies only to the domains whose programs match: prior
+        selections in other domains remain active for the lifetime of the
+        connection (per the Wyoming protocol), so clients can pick a distinct
+        program per domain before sending request events. Unrecognized names
+        are dropped per the Wyoming protocol.
+        """
+        name = select_program.name
+        matched = False
+
+        for program in self._wyoming_info.asr:
+            if program.name == name:
+                self._selected_asr_program = program
+                matched = True
+                _LOGGER.debug("Selected ASR program: %s", name)
+                break
+
+        for program in self._wyoming_info.tts:
+            if program.name == name:
+                self._selected_tts_program = program
+                matched = True
+                _LOGGER.debug("Selected TTS program: %s", name)
+                break
+
+        if not matched:
+            _LOGGER.info("Ignoring select-program for unknown program: %s", name)
+
+        return True
+
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
+        # No OpenAI-compatible endpoint accepts VAD sensitivity or hotword biasing
+        if transcribe.vad_sensitivity is not None:
+            _LOGGER.debug("Ignoring unsupported Transcribe field vad_sensitivity: %s", transcribe.vad_sensitivity)
+        if transcribe.transcript_names:
+            _LOGGER.debug("Ignoring unsupported Transcribe field transcript_names: %s", transcribe.transcript_names)
+        if transcribe.transcript_terms:
+            _LOGGER.debug("Ignoring unsupported Transcribe field transcript_terms: %s", transcribe.transcript_terms)
+
         requested_model = self._get_asr_model(transcribe.name)
         requested_language = transcribe.language
 
@@ -672,8 +729,15 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._wav_buffer = None
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
-        """Get an ASR model by name or None"""
-        for program in self._wyoming_info.asr:
+        """Get an ASR model by name or None.
+
+        Without a select-program event, nameless requests resolve to the first
+        program (per wyoming 1.10 defaults) but explicit names deliberately
+        resolve across all programs: every advertised model stays addressable
+        by clients that cannot send select-program.
+        """
+        programs = [self._selected_asr_program] if self._selected_asr_program else self._wyoming_info.asr
+        for program in programs:
             for model in program.models:
                 if model.name == model_name or not model_name:
                     return model
@@ -690,11 +754,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _has_asr_models(self) -> bool:
         """Return True when STT is configured for this handler."""
-        return any(getattr(program, "models", None) for program in self._wyoming_info.asr)
+        return any(program.models for program in self._wyoming_info.asr)
 
     def _has_tts_voices(self) -> bool:
         """Return True when TTS is configured for this handler."""
-        return any(getattr(program, "voices", None) for program in self._wyoming_info.tts)
+        return any(program.voices for program in self._wyoming_info.tts)
 
     def _get_stt_extra_body(self) -> dict[str, object] | None:
         """Get STT extra_body merged with backend-specific fields."""
@@ -721,8 +785,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         return "wav"
 
     def _is_asr_model_streaming(self, model_name: str) -> bool:
-        """Check if an ASR model supports streaming"""
-        for program in self._wyoming_info.asr:
+        """Check if an ASR model supports streaming.
+
+        Restricted to the selected program when set, so the streaming decision
+        matches the program the model was resolved from.
+        """
+        programs = [self._selected_asr_program] if self._selected_asr_program else self._wyoming_info.asr
+        for program in programs:
             for model in program.models:
                 if model.name == model_name:
                     return program.supports_transcript_streaming
@@ -733,16 +802,27 @@ class OpenAIEventHandler(AsyncEventHandler):
         return model_name in self._stt_realtime_models
 
     def _is_tts_voice_streaming(self, voice_name: str) -> bool:
-        """Check if a TTS voice supports streaming synthesis"""
-        for program in self._wyoming_info.tts:
+        """Check if a TTS voice supports streaming synthesis.
+
+        Restricted to the selected program when set, so the streaming decision
+        matches the program the voice was resolved from.
+        """
+        programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
+        for program in programs:
             for voice in program.voices:
                 if voice.name == voice_name:
                     return getattr(program, "supports_synthesize_streaming", False)
         return False
 
     def _iter_tts_voices(self):
-        """Iterate over configured TTS voices."""
-        for program in self._wyoming_info.tts:
+        """Iterate over configured TTS voices, limited to the selected program when set.
+
+        Without a selection all programs' voices stay addressable by name; the
+        collision-aware public voice names (e.g. "alloy (tts-1)") exist so
+        clients without select-program support can reach any advertised voice.
+        """
+        programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
+        for program in programs:
             for voice in program.voices:
                 yield cast(TtsVoiceModel, voice)
 
@@ -985,6 +1065,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._ready_chunks = []
         self._pysbd_segmenters.clear()
         self._synthesis_voice = None
+        self._synthesis_text_format = None
+        self._ssml_transformer = None
 
         return False
 
@@ -1107,6 +1189,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             available,
         )
 
+    @staticmethod
+    def _is_ssml_format(text_format: str | SynthesizeTextFormat | None) -> bool:
+        """Check for SSML text format; str-enum equality also matches a raw "ssml" string."""
+        return text_format == SynthesizeTextFormat.SSML
+
     async def _handle_synthesize(self, synthesize: Synthesize) -> bool:
         """Handle text-to-speech synthesis request"""
         try:
@@ -1131,13 +1218,18 @@ class OpenAIEventHandler(AsyncEventHandler):
             if not voice:
                 return False
 
+            text = synthesize.text
+            if self._is_ssml_format(synthesize.text_format):
+                text = strip_ssml(text)
+                _LOGGER.debug("Stripped SSML markup from synthesize text (text_format=ssml)")
+
             # Use shared streaming logic
-            final_timestamp = await self._stream_tts_audio(voice, synthesize.text, send_audio_start=True)
+            final_timestamp = await self._stream_tts_audio(voice, text, send_audio_start=True)
 
             if final_timestamp is not None:
                 # Send audio stop after streaming completes
                 await self.write_event(AudioStop(timestamp=int(final_timestamp)).event())
-                _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(synthesize.text))
+                _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(text))
                 return True
             return False
 
@@ -1152,6 +1244,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Reset synthesis state
         self._synthesis_buffer = []
         self._is_synthesizing = True
+        self._synthesis_text_format = synthesize_start.text_format
+        self._ssml_transformer = SsmlTextTransformer() if self._is_ssml_format(synthesize_start.text_format) else None
 
         # Reset incremental detection state
         self._text_accumulator = ""
@@ -1185,8 +1279,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
         _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
 
-        # Store in buffer for fallback compatibility
-        self._synthesis_buffer.append(synthesize_chunk.text)
+        if self._ssml_transformer is not None:
+            chunk_text = self._ssml_transformer.feed(chunk_text)
+
+        # Keep the fallback buffer and sentence accumulator as one identical
+        # projected stream. The transformer owns all SSML whitespace repair.
+        self._synthesis_buffer.append(chunk_text)
 
         # Add to accumulator for sentence detection across chunks
         self._text_accumulator += chunk_text
@@ -1235,6 +1333,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._is_synthesizing = False
 
+        if self._ssml_transformer is not None:
+            flushed = self._ssml_transformer.finish()
+            self._text_accumulator += flushed
+            self._synthesis_buffer.append(flushed)
+
         # Process any remaining text in the accumulator (even if it's incomplete)
         # This is the final text, so we process it regardless of sentence completion
         if self._text_accumulator.strip():
@@ -1252,6 +1355,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Clear synthesis state early
         self._synthesis_buffer = []
         self._synthesis_voice = None
+        self._synthesis_text_format = None
+        self._ssml_transformer = None
         self._text_accumulator = ""
         self._ready_chunks = []
         self._pysbd_segmenters.clear()  # Clear segmenter cache

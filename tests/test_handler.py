@@ -2,6 +2,7 @@ import asyncio
 import base64
 import builtins
 import io
+import logging
 import struct
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -13,7 +14,13 @@ from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
 from wyoming.tts import SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
-from wyoming_openai.compatibility import OpenAIBackend
+from wyoming_openai.compatibility import (
+    OpenAIBackend,
+    create_asr_programs,
+    create_info,
+    create_tts_programs,
+    create_tts_voices,
+)
 from wyoming_openai.handler import (
     OpenAIEventHandler,
     TtsStreamError,
@@ -1871,3 +1878,787 @@ class TestOpenAIEventHandlerComprehensive:
         voice = enhanced_handler._get_voice("alloy")
         assert enhanced_handler._validate_tts_language("en", voice) is True
         assert enhanced_handler._validate_tts_language("fr", voice) is False
+
+
+@pytest.fixture
+def multi_program_info():
+    """Real Info built by the compatibility factories, with two programs per domain."""
+    asr_programs = create_asr_programs(["whisper-1"], ["gpt-4o-transcribe"], "http://stt.test", ["en"])
+    voices = create_tts_voices(["tts-1"], ["gpt-4o-mini-tts"], ["alloy"], "http://tts.test", ["en"])
+    tts_programs = create_tts_programs(voices, ["gpt-4o-mini-tts"])
+    return create_info(asr_programs, tts_programs)
+
+
+@pytest.fixture
+def multi_program_handler(multi_program_info, dummy_clients, dummy_reader_writer):
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=multi_program_info,
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+    return handler
+
+
+@pytest.fixture
+def distinct_names_handler(multi_program_info, dummy_clients, dummy_reader_writer):
+    """Handler whose program names are unique within a domain (asr-*/tts-*).
+
+    Exercises cross-domain selection, where a name can never match both
+    domains in one event.
+    """
+    asr_programs = list(multi_program_info.asr)
+    tts_programs = list(multi_program_info.tts)
+    for program in asr_programs:
+        program.name = f"asr-{program.name}"
+    for program in tts_programs:
+        program.name = f"tts-{program.name}"
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=create_info(asr_programs, tts_programs),
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_select_program_picks_asr_program_by_name(multi_program_handler):
+    result = await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+
+    assert result is True
+    assert multi_program_handler._selected_asr_program is not None
+    assert multi_program_handler._selected_asr_program.name == "openai"
+    # "openai" is a program name in both domains, so one event selects both
+    assert multi_program_handler._selected_tts_program is not None
+    assert multi_program_handler._selected_tts_program.name == "openai"
+
+
+@pytest.mark.asyncio
+async def test_select_program_picks_tts_program_by_name(multi_program_handler):
+    result = await multi_program_handler.handle_event(
+        Event(type="select-program", data={"name": "openai-streaming"})
+    )
+
+    assert result is True
+    assert multi_program_handler._selected_tts_program is not None
+    assert multi_program_handler._selected_tts_program.name == "openai-streaming"
+    assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"
+
+
+@pytest.mark.asyncio
+async def test_select_program_unknown_name_is_dropped(multi_program_handler):
+    result = await multi_program_handler.handle_event(
+        Event(type="select-program", data={"name": "does-not-exist"})
+    )
+
+    assert result is True
+    assert multi_program_handler._selected_asr_program is None
+    assert multi_program_handler._selected_tts_program is None
+    # Resolution still spans all programs
+    assert multi_program_handler._get_asr_model("whisper-1") is not None
+    assert multi_program_handler._get_voice("alloy (tts-1)") is not None
+
+
+@pytest.mark.asyncio
+async def test_select_program_selections_persist_independently_per_domain(distinct_names_handler):
+    """select-program only affects matching domains: a later TTS-only event must
+    not clear a prior ASR selection (or vice versa). Each selection stays active
+    for the lifetime of the connection and constrains its own domain."""
+    handler = distinct_names_handler
+
+    # Select an ASR-only program, then a TTS-only program
+    result = await handler.handle_event(Event(type="select-program", data={"name": "asr-openai"}))
+    assert result is True
+    assert handler._selected_asr_program is not None
+    assert handler._selected_asr_program.name == "asr-openai"
+    assert handler._selected_tts_program is None
+
+    result = await handler.handle_event(Event(type="select-program", data={"name": "tts-openai"}))
+    assert result is True
+    assert handler._selected_asr_program is not None
+    assert handler._selected_asr_program.name == "asr-openai"
+    assert handler._selected_tts_program is not None
+    assert handler._selected_tts_program.name == "tts-openai"
+
+    # Each selection still constrains its own domain
+    result = await handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "language": "en"})
+    )
+    assert result is True
+    assert handler._current_asr_model.name == "whisper-1"
+
+    assert handler._get_voice("alloy (gpt-4o-mini-tts)") is None
+
+
+@pytest.fixture
+def streaming_collision_info():
+    """Info where a model/voice name exists in both a streaming and a non-streaming program.
+
+    The streaming program is listed first, so a name-only scan returns the
+    streaming flag even when the non-streaming program is selected.
+    """
+    asr_programs = create_asr_programs(["shared"], ["shared"], "http://stt.test", ["en"]) + create_asr_programs(
+        ["shared"], [], "http://stt.test", ["en"]
+    )
+    streaming_voices = create_tts_voices(["tts-1"], ["tts-1"], ["alloy"], "http://tts.test", ["en"])
+    non_streaming_voices = create_tts_voices(["tts-1"], [], ["alloy"], "http://tts.test", ["en"])
+    tts_programs = create_tts_programs(streaming_voices, ["tts-1"]) + create_tts_programs(non_streaming_voices)
+    return create_info(asr_programs, tts_programs)
+
+
+@pytest.fixture
+def streaming_collision_handler(streaming_collision_info, dummy_clients, dummy_reader_writer):
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=streaming_collision_info,
+        stt_client=stt_client,
+        tts_client=tts_client,
+    )
+    handler.write_event = AsyncMock()
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_streaming_flag_follows_selected_asr_program(streaming_collision_handler):
+    handler = streaming_collision_handler
+
+    # Without selection the first name match across programs wins (pre-existing)
+    assert handler._is_asr_model_streaming("shared") is True
+
+    # Selecting the non-streaming program must not pick up the streaming program's flag
+    await handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+    assert handler._is_asr_model_streaming("shared") is False
+
+    await handler.handle_event(Event(type="select-program", data={"name": "openai-streaming"}))
+    assert handler._is_asr_model_streaming("shared") is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_flag_follows_selected_tts_program(streaming_collision_handler):
+    handler = streaming_collision_handler
+
+    assert handler._is_tts_voice_streaming("alloy") is True
+
+    # Selecting the non-streaming program must not pick up the streaming program's flag
+    await handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+    assert handler._is_tts_voice_streaming("alloy") is False
+
+    await handler.handle_event(Event(type="select-program", data={"name": "openai-streaming"}))
+    assert handler._is_tts_voice_streaming("alloy") is True
+
+
+@pytest.mark.asyncio
+async def test_select_program_then_transcribe_resolves_within_selected_program(multi_program_handler):
+    await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+
+    # Model from the non-selected "openai-streaming" program is rejected
+    result = await multi_program_handler.handle_event(
+        Event(type="transcribe", data={"name": "gpt-4o-transcribe", "language": "en"})
+    )
+    assert result is False
+
+    # Nameless transcribe resolves to the selected program's first model
+    result = await multi_program_handler.handle_event(Event(type="transcribe", data={"language": "en"}))
+    assert result is True
+    assert multi_program_handler._current_asr_model.name == "whisper-1"
+
+
+@pytest.mark.asyncio
+async def test_no_select_program_defaults_to_first_program(multi_program_handler):
+    result = await multi_program_handler.handle_event(Event(type="transcribe", data={"language": "en"}))
+
+    assert result is True
+    assert multi_program_handler._current_asr_model.name == "gpt-4o-transcribe"
+    assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_vad_sensitivity_logged_and_ignored(enhanced_handler, caplog):
+    caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+
+    result = await enhanced_handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "language": "en", "vad_sensitivity": "aggressive"})
+    )
+
+    assert result is True
+    assert enhanced_handler._current_asr_model is not None
+    assert "vad_sensitivity" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transcribe_transcript_names_logged_and_ignored(enhanced_handler, caplog):
+    caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+
+    result = await enhanced_handler.handle_event(
+        Event(
+            type="transcribe",
+            data={
+                "name": "whisper-1",
+                "language": "en",
+                "transcript_names": ["Alice"],
+                "transcript_terms": ["Kubernetes"],
+            },
+        )
+    )
+
+    assert result is True
+    assert "transcript_names" in caplog.text
+    assert "transcript_terms" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_ssml_strips_tags_before_sending(enhanced_handler):
+    enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
+
+    result = await enhanced_handler.handle_event(
+        Event(
+            type="synthesize",
+            data={
+                "text": '<speak>Hello <break time="1s"/>world</speak>',
+                "text_format": "ssml",
+                "voice": {"name": "alloy"},
+            },
+        )
+    )
+
+    assert result is True
+    enhanced_handler._stream_tts_audio.assert_awaited_once()
+    assert enhanced_handler._stream_tts_audio.await_args_list[0].args[1] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_text_format_text_passes_through(enhanced_handler):
+    enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
+    text = "Hello <break/>world"
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": text, "text_format": "text", "voice": {"name": "alloy"}})
+    )
+
+    assert result is True
+    assert enhanced_handler._stream_tts_audio.await_args_list[0].args[1] == text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_text_format_none_passes_through(enhanced_handler):
+    enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
+    text = "Hello <break/>world"
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": text, "voice": {"name": "alloy"}})
+    )
+
+    assert result is True
+    assert enhanced_handler._stream_tts_audio.await_args_list[0].args[1] == text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_start_ssml_strips_chunk_tags(enhanced_handler):
+    result = await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+    assert result is True
+    assert enhanced_handler._synthesis_text_format == "ssml"
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize-chunk", data={"text": "Hello <break/>world"})
+    )
+
+    assert result is True
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert enhanced_handler._synthesis_buffer == ["Hello world"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_split_speak_and_break(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<speak>Hello"}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<break/>world</speak>"}))
+
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+    assert enhanced_handler._text_accumulator == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_tag_split_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # Tag split mid-name across chunk boundaries must not leak markup
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<speak>Hello <em"}))
+    await enhanced_handler.handle_event(
+        Event(type="synthesize-chunk", data={"text": "phasis>world</emphasis></speak>"})
+    )
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_tag_split_across_three_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    for chunk in ("Hello<br", "ea", "k/>world"):
+        await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": chunk}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_split_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # An entity split mid-name across chunk boundaries must be reassembled and
+    # decoded, not left as a literal fragment
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Tom &am"}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "p; Jerry"}))
+
+    assert enhanced_handler._text_accumulator == "Tom & Jerry"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Tom & Jerry"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_bare_ampersand_at_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A literal ampersand ending a chunk is held as a pending candidate; when
+    # the next chunk cannot extend it to a valid entity, it must be stripped
+    # separately so html.unescape cannot decode across the boundary
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Rules &"}))
+    assert enhanced_handler._text_accumulator == "Rules"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "regulations"}))
+
+    assert enhanced_handler._text_accumulator == "Rules &regulations"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Rules &regulations"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_prefix_then_plain_text(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # An entity-looking pending token rejected by the next chunk must keep every
+    # character: html.unescape may shorten the prefix, so the result must not
+    # be sliced by a previous chunk length
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "regulations"}))
+
+    assert enhanced_handler._text_accumulator == "Foo &ampregulations"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo &ampregulations"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_split_after_ampersand(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # An entity split immediately after "&" must still be reassembled and decoded
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Tom &"}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "amp; Jerry"}))
+
+    assert enhanced_handler._text_accumulator == "Tom & Jerry"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Tom & Jerry"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_bare_ampersand_preserves_tag_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A rejected "&" token followed by an unknown tag must keep the tag's word
+    # boundary: the malformed fallback would produce "Foo& bar" for the
+    # combined text, so the split path must not join the words
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo&"}))
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<vendor/>bar"}))
+
+    assert enhanced_handler._text_accumulator == "Foo& bar"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo& bar"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_completed_entity_preserves_tag_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A pending entity completed by the next chunk followed by an unknown tag
+    # must keep the tag's word boundary: the malformed fallback would produce
+    # "Foo & bar" for the combined text, so the seam must not join the words
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ";<vendor>bar"}))
+
+    assert enhanced_handler._text_accumulator == "Foo & bar"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo & bar"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_entity_then_split_tag_preserves_boundary(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A pending entity completed by the next chunk that then starts a tag split
+    # across the following chunk must keep the tag's word boundary: the
+    # malformed fallback would produce "Foo & bar" for the combined text, so
+    # the seams must not join the words
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+    assert enhanced_handler._text_accumulator == "Foo"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ";<vendor"}))
+    assert enhanced_handler._text_accumulator == "Foo &"
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ">bar"}))
+
+    assert enhanced_handler._text_accumulator == "Foo & bar"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Foo & bar"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_normalizes_spaces_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # The stripped stream must match one-shot stripping regardless of where the
+    # client split the text around a pause tag
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hello "}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<break/>world"}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_split_pause_tag_normalizes_spaces(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A pause tag split mid-name still contributes exactly one separator
+    for chunk in ("Hello ", "<bre", "ak/> world"):
+        await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": chunk}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_normalizes_spaces_before_split_tag(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # The leading space must be normalized even while the trailing tag is held.
+    for chunk in ("Hello ", " <voice", ">world"):
+        await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": chunk}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_plain_ssml_spaces_normalize_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hello "}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": " world"}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_normalizes_spaces_after_sentence_flush(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # Sentence detection retains only the final segment, which drops the
+    # trailing space still present in the emitted synthesis buffer.
+    segmenter = MagicMock()
+    segmenter.segment.side_effect = [["First.", "Second."], ["Second. Next"]]
+    enhanced_handler._pysbd_segmenters["en"] = segmenter
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "First. Second. "}))
+    assert enhanced_handler._text_accumulator == "Second."
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": " Next"}))
+
+    assert "".join(enhanced_handler._synthesis_buffer) == "First. Second. Next"
+    assert segmenter.segment.call_args_list[1].args == ("Second. Next",)
+    assert enhanced_handler._text_accumulator == "Second. Next"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_long_tag_split_across_chunks(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A valid tag longer than the old carry limit must still be
+    # reassembled and stripped; one-shot stripping keeps the literal space
+    tag = '<audio src="https://example.com/' + ("a" * 50) + '"/>'
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hello " + tag[:-2]}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[-2:] + "world"}))
+
+    assert enhanced_handler._text_accumulator == "Hello world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_long_tag_growing_past_previous_limit(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A valid fragment longer than the old carry limit must still be completed
+    # by the next chunks is still reassembled as one tag
+    tag = '<audio src="https://example.com/' + ("a" * 50) + '"/>'
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[:64]}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[64:65]}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": tag[65:] + "world"}))
+
+    assert enhanced_handler._text_accumulator == "world"
+    assert "".join(enhanced_handler._synthesis_buffer) == "world"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_quoted_tag_close_waits_for_real_tag_end(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # ">" inside a quoted attribute is not the tag end
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": '<voice name="a>'}))
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": 'b"/>spoken'}))
+
+    assert enhanced_handler._text_accumulator == "spoken"
+    assert "".join(enhanced_handler._synthesis_buffer) == "spoken"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_unclosed_tag_is_bounded(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A client sending an unclosed "<" followed by endless text must not grow
+    # the pending token (and its per-chunk rescan/copy) without bound: after
+    # the cap it is released and subsequent chunks stream normally
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "<"}))
+
+    flooded = "x" * 5000
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": flooded}))
+    assert "<" + flooded in "".join(enhanced_handler._synthesis_buffer)
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "more text"}))
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_unterminated_numeric_entity_is_bounded(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A numeric entity prefix never terminated by ";" must not grow unbounded
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "&#123"}))
+
+    flooded = "4" * 5000
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": flooded}))
+    assert "&#123" + flooded in "".join(enhanced_handler._synthesis_buffer)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_oversized_token_flushes_literally_at_stop(enhanced_handler):
+    enhanced_handler.write_event = AsyncMock()
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A fragment held at the cap and released at stop is literal text, not decoded
+    fragment = "<" + "x" * 5000
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": fragment}))
+
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+    enhanced_handler._audio_started = True  # take the incremental early-exit path
+    await enhanced_handler.handle_event(Event(type="synthesize-stop", data={}))
+    flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
+    assert flushed_text == [fragment]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chunk_ssml_complete_entity_decodes_despite_oversized_split_tag(enhanced_handler):
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+
+    # A pending "&amp" completed by ";" stays decoded: an oversized trailing
+    # tag split must not re-mark the already-complete entity as literal text
+    # ("&amp;<..." is emitted, not "<...>"), even though the merged fragment
+    # crossed the token bound
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "&amp"}))
+
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": ";<"}))
+
+    flood = "x" * 4096
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": flood}))
+
+    assert enhanced_handler._text_accumulator == "&" + "<" + flood
+    assert "".join(enhanced_handler._synthesis_buffer) == "&" + "<" + flood
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stop_flushes_pending_ssml_token(enhanced_handler):
+    enhanced_handler.write_event = AsyncMock()
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Hi <"}))
+
+    # A trailing "<" never completed into a tag is literal text, not markup
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+    enhanced_handler._audio_started = True  # take the incremental early-exit path
+    await enhanced_handler.handle_event(Event(type="synthesize-stop", data={}))
+
+    flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
+    assert flushed_text == ["Hi <"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stop_flushes_ssml_incomplete_entity(enhanced_handler):
+    enhanced_handler.write_event = AsyncMock()
+    await enhanced_handler.handle_event(
+        Event(
+            type="synthesize-start",
+            data={"text_format": "ssml", "voice": {"name": "alloy", "language": "en"}},
+        )
+    )
+    await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "Foo &amp"}))
+    assert enhanced_handler._text_accumulator == "Foo"
+
+    # A trailing entity-like fragment never completed into an entity is literal
+    # text; flushing must not decode it ("&amp" must not become "&")
+    enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
+    enhanced_handler._audio_started = True  # take the incremental early-exit path
+    await enhanced_handler.handle_event(Event(type="synthesize-stop", data={}))
+
+    flushed_text = enhanced_handler._process_ready_sentences.await_args_list[0].args[0]
+    assert flushed_text == ["Foo &amp"]
+
+
+@pytest.mark.asyncio
+async def test_no_select_program_explicit_cross_program_names_resolve(multi_program_handler):
+    """Without select-program, every advertised model/voice stays addressable by
+    explicit name across programs (deliberate: pre-1.10 clients cannot select)."""
+    result = await multi_program_handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "language": "en"})
+    )
+    assert result is True
+    assert multi_program_handler._current_asr_model.name == "whisper-1"
+
+    assert multi_program_handler._get_voice("alloy (tts-1)") is not None
