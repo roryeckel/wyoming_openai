@@ -10,6 +10,8 @@ Wyoming OpenAI is a proxy middleware that bridges the Wyoming protocol with Open
 
 ### Testing
 ```bash
+# Create and activate a repository virtual environment first
+
 # Install development dependencies
 pip install -e ".[dev]"
 
@@ -25,6 +27,7 @@ pytest tests/test_handler.py
 
 ### Code Quality
 ```bash
+# Run these commands with the repository virtual environment activated
 # Run linting with Ruff
 ruff check .
 

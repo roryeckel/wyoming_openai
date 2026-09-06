@@ -539,7 +539,7 @@ This project uses [Ruff](https://github.com/astral-sh/ruff) for linting and code
 
 To use Ruff during development:
 
-1. Install development dependencies:
+1. Create and activate a virtual environment, then install development dependencies:
    ```bash
    pip install -e ".[dev]"
    ```
@@ -557,7 +557,7 @@ This project uses [Pyright](https://github.com/microsoft/pyright) for static typ
 
 To use Pyright during development:
 
-1. Install development dependencies:
+1. Create and activate a virtual environment, then install development dependencies:
    ```bash
    pip install -e ".[dev]"
    ```

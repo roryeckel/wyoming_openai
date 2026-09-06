@@ -110,7 +110,7 @@ PRs that mainly add support for one provider's custom route, schema, or transpor
 
 ## Development Setup
 
-Install development dependencies:
+Create and activate a virtual environment, then install development dependencies:
 
 ```bash
 pip install -e ".[dev]"
