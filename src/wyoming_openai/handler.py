@@ -870,12 +870,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         sd_language = self._get_segmenter_language(language)
         segmenter = BoundaryDetector(lang=sd_language)
         # preserve_whitespace=False strips leading/trailing whitespace from each sentence
-        sentences = list(segmenter.segment(text))
 
         chunks = []
         current_chunk = ""
 
-        for sentence in sentences:
+        for sentence in segmenter.segment(text):
             # Check if adding this sentence would exceed max_chars
             potential_chunk = current_chunk + " " + sentence if current_chunk else sentence
 
@@ -1306,10 +1305,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # Process complete sentences (all but the last one)
         if len(sentences) > 1:
-            ready_sentences = sentences[:-1]
-
             # Keep only the last sentence in the accumulator
-            self._text_accumulator = sentences[-1]
+            self._text_accumulator = sentences.pop()
+            ready_sentences = sentences
 
             _LOGGER.info(
                 "Detected %d ready sentences for immediate synthesis: %s",
