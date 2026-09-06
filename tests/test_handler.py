@@ -1474,11 +1474,12 @@ class TestOpenAIEventHandlerComprehensive:
         assert await handler.handle_event(Event(type="synthesize-start", data={"voice": {"name": "voice1"}})) is True
         assert await handler.handle_event(Event(type="synthesize-chunk", data={"text": "First sentence. "})) is True
         assert await handler.handle_event(Event(type="synthesize-chunk", data={"text": "Todo "})) is True
-        assert handler._text_accumulator == "Todo "
+        # yasbd keeps the inter-sentence space but attributes it to the retained tail
+        assert handler._text_accumulator == " Todo "
 
         assert await handler.handle_event(Event(type="synthesize-chunk", data={"text": "listo."})) is True
-        assert handler._text_accumulator == "Todo listo."
-        handler._process_ready_sentences.assert_awaited_once_with(["First sentence. "], None)
+        assert handler._text_accumulator == " Todo listo."
+        handler._process_ready_sentences.assert_awaited_once_with(["First sentence."], None)
 
     @pytest.mark.asyncio
     async def test_stream_tts_audio_incremental_includes_configured_tts_extra_body(
@@ -2457,7 +2458,7 @@ async def test_synthesize_chunk_ssml_normalizes_spaces_after_sentence_flush(enha
     # trailing space still present in the emitted synthesis buffer.
     segmenter = MagicMock()
     segmenter.segment.side_effect = [["First.", "Second."], ["Second. Next"]]
-    enhanced_handler._pysbd_segmenters["en"] = segmenter
+    enhanced_handler._segmenters["en"] = segmenter
     enhanced_handler._process_ready_sentences = AsyncMock(return_value=True)
 
     await enhanced_handler.handle_event(Event(type="synthesize-chunk", data={"text": "First. Second. "}))

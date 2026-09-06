@@ -8,7 +8,6 @@ import wave
 from dataclasses import dataclass
 from typing import Any, cast
 
-import pysbd
 from openai import AsyncStream, omit
 from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
 from wyoming.asr import (
@@ -31,6 +30,7 @@ from wyoming.tts import (
     SynthesizeTextFormat,
     SynthesizeVoice,
 )
+from yasbd import BoundaryDetector, get_supported_langs
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .utilities import (
@@ -176,7 +176,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State for incremental sentence detection
         self._text_accumulator: str = ""
         self._ready_chunks: list[str] = []
-        self._pysbd_segmenters: dict[str, pysbd.Segmenter] = {}  # Cache segmenters per language
+        self._segmenters: dict[str, BoundaryDetector] = {}  # Cache sentence segmenters per language
         self._audio_started: bool = False  # Track if AudioStart has been sent
         self._current_timestamp: float = 0  # Track timestamp continuity across chunks
 
@@ -826,15 +826,15 @@ class OpenAIEventHandler(AsyncEventHandler):
             for voice in program.voices:
                 yield cast(TtsVoiceModel, voice)
 
-    def _get_pysbd_language(self, language: str | None) -> str:
+    def _get_segmenter_language(self, language: str | None) -> str:
         """
-        Get pysbd-compatible language code.
+        Get a yasbd-compatible language code.
 
         Args:
             language (str | None): Language code (e.g., 'en', 'en-US', 'es', etc.)
 
         Returns:
-            str: pysbd-compatible language code, defaults to 'en' if unsupported
+            str: yasbd-compatible language code, defaults to 'en' if unsupported
         """
         if not language:
             return "en"
@@ -842,19 +842,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Extract base language code from potential BCP-47 tags (e.g., 'en-US' -> 'en')
         base_lang = language[:2].lower() if len(language) >= 2 else "en"
 
-        # Test if the language is supported by trying to create a segmenter
-        try:
-            pysbd.Segmenter(language=base_lang)
-            return base_lang
-        except (ValueError, KeyError):
-            _LOGGER.warning(f"Language '{base_lang}' not supported by pysbd, using English")
+        # Test if the language is supported by querying the known language set
+        if base_lang not in get_supported_langs():
+            _LOGGER.warning(f"Language '{base_lang}' not supported by yasbd, using English")
             return "en"
+        return base_lang
 
     def _chunk_text_for_streaming(
         self, text: str, min_words: int | None = None, max_chars: int | None = None, language: str | None = None
     ) -> list[str]:
         """
-        Chunk text into meaningful segments using pySBD sentence segmentation.
+        Chunk text into meaningful segments using yasbd sentence segmentation.
 
         Args:
             text (str): The text to chunk.
@@ -868,10 +866,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not text.strip():
             return []
 
-        # Get pysbd-compatible language code
-        pysbd_language = self._get_pysbd_language(language)
-        segmenter = pysbd.Segmenter(language=pysbd_language, clean=True)
-        sentences = segmenter.segment(text)
+        # Get yasbd-compatible language code
+        sd_language = self._get_segmenter_language(language)
+        segmenter = BoundaryDetector(lang=sd_language)
+        # preserve_whitespace=False strips leading/trailing whitespace from each sentence
+        sentences = list(segmenter.segment(text))
 
         chunks = []
         current_chunk = ""
@@ -1063,7 +1062,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._synthesis_buffer = []
         self._text_accumulator = ""
         self._ready_chunks = []
-        self._pysbd_segmenters.clear()
+        self._segmenters.clear()
         self._synthesis_voice = None
         self._synthesis_text_format = None
         self._ssml_transformer = None
@@ -1250,7 +1249,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Reset incremental detection state
         self._text_accumulator = ""
         self._ready_chunks = []
-        self._pysbd_segmenters.clear()  # Clear segmenter cache for new session
+        self._segmenters.clear()  # Clear segmenter cache for new session
         self._audio_started = False  # Reset audio started flag
         self._current_timestamp = 0  # Reset timestamp for new synthesis session
 
@@ -1291,18 +1290,19 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # Get or create segmenter for the current language
         requested_language = self._synthesis_voice.language if self._synthesis_voice else None
-        pysbd_language = self._get_pysbd_language(requested_language)
+        sd_language = self._get_segmenter_language(requested_language)
 
         # Use cached segmenter or create a new one
-        if pysbd_language not in self._pysbd_segmenters:
-            _LOGGER.debug("Creating new pysbd segmenter for language: %s", pysbd_language)
-            # The final segment is retained and appended to by later events, so whitespace must be lossless.
-            self._pysbd_segmenters[pysbd_language] = pysbd.Segmenter(language=pysbd_language, clean=False)
+        if sd_language not in self._segmenters:
+            _LOGGER.debug("Creating new yasbd segmenter for language: %s", sd_language)
+            self._segmenters[sd_language] = BoundaryDetector(lang=sd_language)
 
-        segmenter = self._pysbd_segmenters[pysbd_language]
+        segmenter = self._segmenters[sd_language]
 
-        # Segment the entire accumulated text
-        sentences: list[str] = list(segmenter.segment(self._text_accumulator))
+        # Segment the entire accumulated text. preserve_whitespace=True keeps every
+        # character (the retained last segment is appended to by later events), so no
+        # text is lost at sentence boundaries even when yasbd redistributes the space.
+        sentences: list[str] = list(segmenter.segment(self._text_accumulator, preserve_whitespace=True))
 
         # Process complete sentences (all but the last one)
         if len(sentences) > 1:
@@ -1359,7 +1359,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._ssml_transformer = None
         self._text_accumulator = ""
         self._ready_chunks = []
-        self._pysbd_segmenters.clear()  # Clear segmenter cache
+        self._segmenters.clear()  # Clear segmenter cache
 
         # Send audio stop if we processed any audio incrementally
         if self._audio_started:
@@ -1370,7 +1370,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
             self._audio_started = False  # Reset for next session
             self._current_timestamp = 0  # Reset for next session
-            self._pysbd_segmenters.clear()  # Clear segmenter cache
+            self._segmenters.clear()  # Clear segmenter cache
             return True  # Exit early to prevent duplicate events
 
         if not full_text.strip():

@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "openai[realtime]==2.37.0",
     "wyoming==1.10.2",
-    "pysbd==0.3.4"
+    "yasbd-lib==0.16.0"
 ]
 
 [project.urls]
