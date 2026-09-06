@@ -8,17 +8,6 @@ OpenAI-Compatible Proxy Middleware for the Wyoming Protocol
 
 Note: This project is not affiliated with OpenAI or the Wyoming project.
 
-## Scope and Community Support
-
-Wyoming OpenAI primarily targets OpenAI-compatible APIs and the Wyoming protocol event flows built around them.
-
-- Questions, setup help, and general support: use [GitHub Discussions](https://github.com/roryeckel/wyoming_openai/discussions)
-- Bug reports, compatibility reports, and scoped feature requests: use [GitHub Issues](https://github.com/roryeckel/wyoming_openai/issues)
-- Project scope and compatibility policy: see [COMPATIBILITY.md](COMPATIBILITY.md)
-- Contribution expectations: see [CONTRIBUTING.md](CONTRIBUTING.md)
-
-Provider-specific custom endpoints and bespoke transports are generally out of scope unless explicitly approved. If another project exposes both an OpenAI-compatible route and a custom route, Wyoming OpenAI targets the OpenAI-compatible route.
-
 ## Overview
 
 This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries with [pySBD](https://github.com/nipunsadvilkar/pySBD) for responsive audio delivery. When streaming is enabled, Wyoming OpenAI prefetches up to three OpenAI synthesis requests in parallel while playing the audio sequentially, keeping latency low without breaking event order.
@@ -538,7 +527,9 @@ sequenceDiagram
 
 ## Contributing
 
-Contributions are welcome! Please feel free to open issues or submit pull requests. For major changes, please first discuss the proposed changes in an issue.
+Contributions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or submitting a pull request. For major changes, please first discuss the proposed changes in an issue.
+
+For setup help and general support, use [GitHub Discussions](https://github.com/roryeckel/wyoming_openai/discussions). Use [GitHub Issues](https://github.com/roryeckel/wyoming_openai/issues) for reproducible bugs, compatibility reports, and scoped feature requests. Wyoming OpenAI targets OpenAI-compatible APIs and the Wyoming protocol; see [COMPATIBILITY.md](COMPATIBILITY.md) for the project scope and compatibility policy.
 
 ## Quality Assurance
 
