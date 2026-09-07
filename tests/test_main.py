@@ -32,6 +32,18 @@ async def test_main_rejects_invalid_stt_strip_regex_env(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_main_rejects_empty_stt_strip_regex_env(monkeypatch, capsys):
+    monkeypatch.setenv("STT_STRIP_REGEX", "")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "Invalid STT strip regex" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
 async def test_main_rejects_empty_stt_strip_regex_cli(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-strip-regex", ""])
 

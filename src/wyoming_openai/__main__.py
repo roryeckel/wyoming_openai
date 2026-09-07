@@ -86,7 +86,7 @@ async def main():
 
     stt_strip_regex_env = os.getenv("STT_STRIP_REGEX")
     stt_strip_regex_default = None
-    if stt_strip_regex_env:
+    if stt_strip_regex_env is not None:
         try:
             stt_strip_regex_default = stt_strip_regex_parser(stt_strip_regex_env)
         except argparse.ArgumentTypeError as exc:
