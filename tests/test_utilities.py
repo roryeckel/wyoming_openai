@@ -1,4 +1,5 @@
 import argparse
+import re
 from enum import Enum
 from io import BytesIO
 
@@ -9,8 +10,10 @@ from wyoming_openai.utilities import (
     SsmlTextTransformer,
     create_enum_parser,
     create_json_object_parser,
+    create_stt_strip_regex_parser,
     get_extra_body_boolean_field,
     strip_ssml,
+    strip_stt_text,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -288,3 +291,58 @@ def test_get_extra_body_boolean_field_returns_default_or_override():
         get_extra_body_boolean_field({"stream": True}, field_name="stream", default=False, body_name="STT")
         is True
     )
+
+
+def test_strip_stt_text_without_pattern_is_identity():
+    assert strip_stt_text("hello world", None) == "hello world"
+    # Non-matching pattern also leaves the text untouched (and preserves spacing)
+    assert strip_stt_text("hello world", re.compile(r"never-matches")) == "hello world"
+
+
+def test_strip_stt_text_removal_and_strip():
+    pattern = re.compile(r"<\|tag>.*?<tag\|>", re.DOTALL)
+    # Match removed; surrounding non-matching content preserved
+    assert strip_stt_text("before<|tag>hidden<tag|>after", pattern) == "beforeafter"
+    # Whitespace left over from the removal is stripped to produce a clean transcript
+    assert strip_stt_text("<|tag>reasoning<tag|> answer", pattern) == "answer"
+    assert strip_stt_text("  answer <|tag>reasoning<tag|>  ", pattern) == "answer"
+    # Multiple matches are removed in a single pass
+    assert strip_stt_text("<a>x</a>keep<a>y</a>", re.compile(r"<a>.*?</a>")) == "keep"
+
+
+def test_strip_stt_text_spans_newlines_with_dotall_pattern():
+    # The pattern is compiled with re.DOTALL at parse time, so .* spans newlines.
+    pattern = re.compile(r"<cot>.*?</cot>", re.DOTALL)
+    assert strip_stt_text("<cot>reasoning\nacross\nlines</cot>answer", pattern) == "answer"
+
+
+def test_strip_stt_text_handles_empty_text():
+    assert strip_stt_text("", None) == ""
+
+
+def test_create_stt_strip_regex_parser_compiles_with_dotall():
+    parser = create_stt_strip_regex_parser("STT strip regex")
+    pattern = parser(r"<cot>.*?</cot>")
+    # The parser compiles with re.DOTALL so .* spans newlines
+    assert pattern.sub("", "a<cot>x\ny</cot>b") == "ab"
+
+
+def test_create_stt_strip_regex_parser_rejects_invalid_regex():
+    parser = create_stt_strip_regex_parser("STT strip regex")
+    with pytest.raises(argparse.ArgumentTypeError) as exc_info:
+        parser("(unclosed")
+    assert "Invalid STT strip regex" in str(exc_info.value)
+
+
+def test_create_stt_strip_regex_parser_rejects_empty_value():
+    parser = create_stt_strip_regex_parser("STT strip regex")
+    with pytest.raises(argparse.ArgumentTypeError) as exc_info:
+        parser("")
+    assert "Invalid STT strip regex" in str(exc_info.value)
+
+
+def test_create_stt_strip_regex_parser_works_with_argparse():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stt-strip-regex", type=create_stt_strip_regex_parser("STT strip regex"))
+    args = parser.parse_args(["--stt-strip-regex", "<cot>.*?</cot>"])
+    assert args.stt_strip_regex.sub("", "<cot>hidden</cot>") == ""

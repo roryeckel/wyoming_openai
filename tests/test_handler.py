@@ -3,6 +3,7 @@ import base64
 import builtins
 import io
 import logging
+import re
 import struct
 import wave
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -763,6 +764,128 @@ class TestOpenAIEventHandlerComprehensive:
         assert transcript_found
 
     @pytest.mark.asyncio
+    async def test_transcribe_strips_matching_text_for_non_streaming(self, enhanced_handler, mock_clients):
+        """Test STT strip regex removes CoT-like tags from a non-streaming transcript."""
+        stt_client, _ = mock_clients
+        enhanced_handler._stt_strip_regex = re.compile(r"<\|channel>thought.*?<channel\|>", re.DOTALL)
+
+        mock_transcription = Mock()
+        mock_transcription.text = "<|channel>thought I'm thinking...\n<channel|> hello  world "
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
+
+        assert (
+            await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": "whisper-1"}))
+            is True
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+
+        with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
+            def isinstance_side_effect(obj, class_or_tuple):
+                if obj is mock_transcription:
+                    from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
+
+                    return class_or_tuple is TranscriptionCreateResponse
+                return builtins.isinstance(obj, class_or_tuple)
+
+            mock_isinstance.side_effect = isinstance_side_effect
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        transcript_event = next(
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
+        )
+        assert Transcript.from_event(transcript_event).text == "hello  world"
+
+    @pytest.mark.asyncio
+    async def test_transcribe_strips_matching_text_for_streaming(self, enhanced_handler, mock_clients):
+        """Test STT strip regex removes CoT-like tags from a streamed transcript."""
+        stt_client, _ = mock_clients
+        enhanced_handler._stt_strip_regex = re.compile(r"<\|channel>thought.*?<channel\|>", re.DOTALL)
+
+        class Delta:
+            def __init__(self, text):
+                self.type = "transcript.text.delta"
+                self.delta = text
+
+        class FakeAsyncStream:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._chunks:
+                    raise StopAsyncIteration
+                return self._chunks.pop(0)
+
+        stream = FakeAsyncStream(
+            [
+                Delta("<|channel>thought "),
+                Delta("I'm thinking..."),
+                Delta("<channel|> hello"),
+                Delta(" world"),
+            ]
+        )
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=stream)
+
+        assert (
+            await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": "whisper-1"}))
+            is True
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+
+        with patch("wyoming_openai.handler.AsyncStream", FakeAsyncStream):
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        transcript_event = next(
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
+        )
+        assert Transcript.from_event(transcript_event).text == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_transcribe_without_strip_regex_leaves_text_unchanged(self, enhanced_handler, mock_clients):
+        """Test the default (no regex) preserves transcription text verbatim."""
+        stt_client, _ = mock_clients
+
+        mock_transcription = Mock()
+        mock_transcription.text = "<|channel>thought should survive<channel|> plain transcription"
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
+
+        assert (
+            await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": "whisper-1"}))
+            is True
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+
+        with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
+            def isinstance_side_effect(obj, class_or_tuple):
+                if obj is mock_transcription:
+                    from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
+
+                    return class_or_tuple is TranscriptionCreateResponse
+                return builtins.isinstance(obj, class_or_tuple)
+
+            mock_isinstance.side_effect = isinstance_side_effect
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        transcript_event = next(
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
+        )
+        expected = "<|channel>thought should survive<channel|> plain transcription"
+        assert Transcript.from_event(transcript_event).text == expected
+
+    @pytest.mark.asyncio
     async def test_handle_realtime_transcription_flow(self, enhanced_handler, mock_info, mock_clients):
         """Test realtime STT emits deltas, final transcript, and cleanup without audio transcriptions API."""
         stt_client, _ = mock_clients
@@ -877,6 +1000,33 @@ class TestOpenAIEventHandlerComprehensive:
         transcript_event = enhanced_handler.write_event.call_args_list[0].args[0]
         assert Transcript.from_event(transcript_event).text == ""
         connection.input_audio_buffer.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_realtime_transcript_strips_matching_text(self, enhanced_handler):
+        """Test the realtime final transcript also applies the STT strip regex."""
+        enhanced_handler._stt_strip_regex = re.compile(r"<\|channel>thought.*?<channel\|>", re.DOTALL)
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        future.set_result("<|channel>thought hidden<channel|>  real text  ")
+
+        connection = Mock()
+        connection.input_audio_buffer.commit = AsyncMock()
+        connection.close = AsyncMock()
+
+        enhanced_handler._is_recording = True
+        enhanced_handler._realtime_connection = connection
+        enhanced_handler._realtime_transcript_future = future
+        enhanced_handler._realtime_connection_manager = None
+        enhanced_handler._realtime_receive_task = None
+        enhanced_handler.write_event = AsyncMock()
+
+        await enhanced_handler._handle_realtime_audio_stop()
+
+        transcript_event = next(
+            call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
+        )
+        assert Transcript.from_event(transcript_event).text == "real text"
 
     def test_convert_audio_to_realtime_pcm_resamples_to_24khz(self, enhanced_handler):
         """Test Wyoming PCM is converted to OpenAI Realtime's 24 kHz PCM16 format."""

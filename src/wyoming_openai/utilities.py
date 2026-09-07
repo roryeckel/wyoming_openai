@@ -1,6 +1,7 @@
 import argparse
 import html.entities
 import json
+import re
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
@@ -272,6 +273,18 @@ def strip_ssml(text: str) -> str:
     return transformer.feed(text) + transformer.finish()
 
 
+def strip_stt_text(text: str, pattern: re.Pattern[str] | None) -> str:
+    """Strip matches of an optional precompiled pattern from a transcription.
+
+    A single pass is applied with the pattern's own flags (so e.g. `re.DOTALL`
+    spans newlines) and the result is stripped. A falsy or None pattern returns
+    the text unchanged, so callers always send a valid string to the client.
+    """
+    if not pattern:
+        return text
+    return pattern.sub("", text).strip()
+
+
 def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = True) -> Callable[[str], E]:
     """
     Create a type-safe parser function for argparse that converts strings to enum members.
@@ -344,6 +357,34 @@ def create_json_object_parser(option_name: str) -> Callable[[str], dict[str, obj
         return parsed
 
     return parse_json_object
+
+
+def create_stt_strip_regex_parser(option_name: str) -> Callable[[str], re.Pattern[str]]:
+    """
+    Create an argparse parser that compiles an STT post-processing regex.
+
+    The pattern is compiled with `re.DOTALL` so it can span newlines, which is
+    what CoT/reasoning blocks in reasoning-model output typically require.
+
+    Args:
+        option_name: Human-readable option name to include in error messages.
+
+    Returns:
+        A callable that compiles the pattern string into a `re.Pattern`.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is empty or is not a valid regex.
+    """
+
+    def parse_stt_strip_regex(value: str) -> re.Pattern[str]:
+        if not value:
+            raise argparse.ArgumentTypeError(f"Invalid {option_name}: value must not be empty")
+        try:
+            return re.compile(value, re.DOTALL)
+        except re.error as exc:
+            raise argparse.ArgumentTypeError(f"Invalid {option_name}: {exc}") from exc
+
+    return parse_stt_strip_regex
 
 
 def validate_extra_body_response_format(

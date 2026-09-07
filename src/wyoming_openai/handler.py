@@ -3,6 +3,7 @@ import base64
 import contextlib
 import io
 import logging
+import re
 import struct
 import wave
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from .utilities import (
     SsmlTextTransformer,
     get_extra_body_boolean_field,
     strip_ssml,
+    strip_stt_text,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -96,6 +98,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         stt_prompt: str | None = None,
         stt_extra_body: dict[str, object] | None = None,
         stt_realtime_models: list[str] | set[str] | None = None,
+        stt_strip_regex: re.Pattern[str] | None = None,
         tts_speed: float | None = None,
         tts_instructions: str | None = None,
         tts_extra_body: dict[str, object] | None = None,
@@ -115,6 +118,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             stt_prompt (str | None): An optional prompt for STT.
             stt_extra_body (dict[str, object] | None): Optional JSON body fields merged into STT requests.
             stt_realtime_models (list[str] | set[str] | None): STT models that use OpenAI Realtime transcription.
+            stt_strip_regex (re.Pattern[str] | None): Regex removed from STT transcripts before sending to clients.
             tts_speed (float | None): The speed for TTS, or None for default.
             tts_instructions (str | None): Optional instructions for TTS.
             tts_extra_body (dict[str, object] | None): Optional JSON body fields merged into TTS requests.
@@ -136,6 +140,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_prompt = stt_prompt
         self._stt_extra_body = dict(stt_extra_body) if stt_extra_body else None
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
+        self._stt_strip_regex = stt_strip_regex
         if self._has_asr_models():
             validate_stt_extra_body(self._stt_extra_body)
 
@@ -414,9 +419,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                 raise RealtimeTranscriptionError("Realtime transcription future was not initialized")
 
             await self._realtime_connection.input_audio_buffer.commit()
-            transcript = await self._realtime_transcript_future
+            raw_transcript = await self._realtime_transcript_future or ""
+            transcript = strip_stt_text(raw_transcript, self._stt_strip_regex)
             if transcript:
                 _LOGGER.info("Successfully transcribed realtime stream: %s", _truncate_for_log(transcript))
+            elif raw_transcript:
+                _LOGGER.debug("STT strip regex emptied the transcript: %s", _truncate_for_log(raw_transcript))
             else:
                 _LOGGER.warning("Received empty realtime transcription result")
             await self.write_event(Transcript(text=transcript).event())
@@ -707,16 +715,22 @@ class OpenAIEventHandler(AsyncEventHandler):
                         " If this is unexpected, please check your"
                         " STT_STREAMING_MODELS configuration."
                     )
-                await self.write_event(Transcript(text=full_text).event())
+                transcript_final = strip_stt_text(full_text, self._stt_strip_regex)
+                if full_text and not transcript_final:
+                    _LOGGER.debug("STT strip regex emptied the transcript: %s", _truncate_for_log(full_text))
+                await self.write_event(Transcript(text=transcript_final).event())
 
             elif isinstance(transcription, TranscriptionCreateResponse):
                 # Handle non-streaming response
                 _LOGGER.debug("Handling non-streaming transcription response")
-                if transcription.text:
-                    _LOGGER.info("Successfully transcribed: %s", _truncate_for_log(transcription.text))
+                text = strip_stt_text(transcription.text or "", self._stt_strip_regex)
+                if text:
+                    _LOGGER.info("Successfully transcribed: %s", _truncate_for_log(text))
+                elif transcription.text:
+                    _LOGGER.debug("STT strip regex emptied the transcript: %s", _truncate_for_log(transcription.text))
                 else:
                     _LOGGER.warning("Received empty transcription result")
-                await self.write_event(Transcript(text=transcription.text).event())
+                await self.write_event(Transcript(text=text).event())
 
             else:
                 _LOGGER.error("Unexpected transcription response type: %s", type(transcription))

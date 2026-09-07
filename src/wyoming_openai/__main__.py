@@ -22,6 +22,7 @@ from .handler import OpenAIEventHandler
 from .utilities import (
     create_enum_parser,
     create_json_object_parser,
+    create_stt_strip_regex_parser,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -49,6 +50,7 @@ async def main():
     backend_parser = create_enum_parser(OpenAIBackend)
     stt_extra_body_parser = create_json_object_parser("STT extra body")
     tts_extra_body_parser = create_json_object_parser("TTS extra body")
+    stt_strip_regex_parser = create_stt_strip_regex_parser("STT strip regex")
 
     stt_backend_env = os.getenv("STT_BACKEND")
     stt_backend_default = None
@@ -79,6 +81,14 @@ async def main():
     if tts_extra_body_env:
         try:
             tts_extra_body_default = tts_extra_body_parser(tts_extra_body_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+
+    stt_strip_regex_env = os.getenv("STT_STRIP_REGEX")
+    stt_strip_regex_default = None
+    if stt_strip_regex_env:
+        try:
+            stt_strip_regex_default = stt_strip_regex_parser(stt_strip_regex_env)
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
@@ -145,6 +155,15 @@ async def main():
             "overlapping keys override top-level request fields. "
             "'response_format' must remain 'json' and 'stream' must be a boolean. "
             "Incompatible values cause a startup error"
+        ),
+    )
+    parser.add_argument(
+        "--stt-strip-regex",
+        type=stt_strip_regex_parser,
+        default=stt_strip_regex_default,
+        help=(
+            "Optional regex removed from STT transcripts before they are sent to the client "
+            "(e.g. to strip CoT/reasoning tags); compiled with re.DOTALL and the result is stripped"
         ),
     )
     parser.add_argument(
@@ -398,6 +417,7 @@ async def main():
                 stt_prompt=args.stt_prompt,
                 stt_extra_body=args.stt_extra_body,
                 stt_realtime_models=args.stt_realtime_models,
+                stt_strip_regex=args.stt_strip_regex,
                 tts_extra_body=args.tts_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
