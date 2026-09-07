@@ -421,10 +421,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self._realtime_connection.input_audio_buffer.commit()
             raw_transcript = await self._realtime_transcript_future or ""
             transcript = strip_stt_text(raw_transcript, self._stt_strip_regex)
+            if raw_transcript:
+                _LOGGER.debug("Transcribed realtime stream (unstripped): %s", _truncate_for_log(raw_transcript))
             if transcript:
                 _LOGGER.info("Successfully transcribed realtime stream: %s", _truncate_for_log(transcript))
             elif raw_transcript:
-                _LOGGER.debug("STT strip regex emptied the transcript: %s", _truncate_for_log(raw_transcript))
+                _LOGGER.debug("STT strip regex emptied the transcript")
             else:
                 _LOGGER.warning("Received empty realtime transcription result")
             await self.write_event(Transcript(text=transcript).event())
@@ -707,27 +709,31 @@ class OpenAIEventHandler(AsyncEventHandler):
                             full_text += chunk.delta
                             _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
                             await self.write_event(TranscriptChunk(text=chunk.delta).event())
+                transcript_final = strip_stt_text(full_text, self._stt_strip_regex)
                 if full_text:
-                    _LOGGER.info("Successfully transcribed stream: %s", full_text)
+                    _LOGGER.debug("Transcribed stream (unstripped): %s", _truncate_for_log(full_text))
+                    if transcript_final:
+                        _LOGGER.info("Successfully transcribed stream: %s", _truncate_for_log(transcript_final))
+                    else:
+                        _LOGGER.debug("STT strip regex emptied the transcript")
                 else:
                     _LOGGER.warning(
                         "Received empty transcription from stream."
                         " If this is unexpected, please check your"
                         " STT_STREAMING_MODELS configuration."
                     )
-                transcript_final = strip_stt_text(full_text, self._stt_strip_regex)
-                if full_text and not transcript_final:
-                    _LOGGER.debug("STT strip regex emptied the transcript: %s", _truncate_for_log(full_text))
                 await self.write_event(Transcript(text=transcript_final).event())
 
             elif isinstance(transcription, TranscriptionCreateResponse):
                 # Handle non-streaming response
                 _LOGGER.debug("Handling non-streaming transcription response")
                 text = strip_stt_text(transcription.text or "", self._stt_strip_regex)
+                if transcription.text:
+                    _LOGGER.debug("Transcribed (unstripped): %s", _truncate_for_log(transcription.text))
                 if text:
                     _LOGGER.info("Successfully transcribed: %s", _truncate_for_log(text))
                 elif transcription.text:
-                    _LOGGER.debug("STT strip regex emptied the transcript: %s", _truncate_for_log(transcription.text))
+                    _LOGGER.debug("STT strip regex emptied the transcript")
                 else:
                     _LOGGER.warning("Received empty transcription result")
                 await self.write_event(Transcript(text=text).event())

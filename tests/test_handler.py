@@ -800,6 +800,44 @@ class TestOpenAIEventHandlerComprehensive:
         assert Transcript.from_event(transcript_event).text == "hello  world"
 
     @pytest.mark.asyncio
+    async def test_non_streaming_transcript_logs_unstripped_only_at_debug(self, enhanced_handler, mock_clients, caplog):
+        """Test unstripped transcript is debug-only and the stripped transcript is the INFO log (non-streaming)."""
+        stt_client, _ = mock_clients
+        enhanced_handler._stt_strip_regex = re.compile(r"<\|channel>thought.*?<channel\|>", re.DOTALL)
+
+        mock_transcription = Mock()
+        mock_transcription.text = "<|channel>thought I'm thinking...\n<channel|> hello  world "
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
+
+        caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+        assert (
+            await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": "whisper-1"}))
+            is True
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+        with patch("wyoming_openai.handler.isinstance") as mock_isinstance:
+
+            def isinstance_side_effect(obj, class_or_tuple):
+                if obj is mock_transcription:
+                    from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
+
+                    return class_or_tuple is TranscriptionCreateResponse
+                return builtins.isinstance(obj, class_or_tuple)
+
+            mock_isinstance.side_effect = isinstance_side_effect
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        debug_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
+        info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+        assert "Transcribed (unstripped)" in debug_text
+        assert "I'm thinking..." in debug_text  # reasoning leaked only at DEBUG
+        assert "Successfully transcribed: hello  world" in info_text
+        assert "I'm thinking..." not in info_text  # reasoning never reached INFO
+
+    @pytest.mark.asyncio
     async def test_transcribe_strips_matching_text_for_streaming(self, enhanced_handler, mock_clients):
         """Test STT strip regex removes CoT-like tags from a streamed transcript."""
         stt_client, _ = mock_clients
@@ -848,6 +886,96 @@ class TestOpenAIEventHandlerComprehensive:
             call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
         )
         assert Transcript.from_event(transcript_event).text == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_streaming_transcript_logs_unstripped_only_at_debug(self, enhanced_handler, mock_clients, caplog):
+        """Test unstripped transcript is debug-only and the stripped transcript is the INFO log."""
+        stt_client, _ = mock_clients
+        enhanced_handler._stt_strip_regex = re.compile(r"<\|channel>thought.*?<channel\|>", re.DOTALL)
+
+        class Delta:
+            def __init__(self, text):
+                self.type = "transcript.text.delta"
+                self.delta = text
+
+        class FakeAsyncStream:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._chunks:
+                    raise StopAsyncIteration
+                return self._chunks.pop(0)
+
+        stream = FakeAsyncStream([Delta("<|channel>thought I'm thinking...<channel|> "), Delta("hello world")])
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=stream)
+
+        caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+        assert (
+            await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": "whisper-1"}))
+            is True
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+        with patch("wyoming_openai.handler.AsyncStream", FakeAsyncStream):
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        debug_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
+        info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+        assert "Transcribed stream (unstripped)" in debug_text
+        assert "I'm thinking..." in debug_text  # reasoning leaked only at DEBUG
+        assert "Successfully transcribed stream: hello world" in info_text
+        assert "I'm thinking..." not in info_text  # reasoning never reached INFO
+
+    @pytest.mark.asyncio
+    async def test_streaming_transcript_emptied_logs_unstripped_at_debug(self, enhanced_handler, mock_clients, caplog):
+        """Test when the strip regex removes everything, unstripped is visible only at DEBUG."""
+        stt_client, _ = mock_clients
+        enhanced_handler._stt_strip_regex = re.compile(r".+", re.DOTALL)
+
+        class Delta:
+            def __init__(self, text):
+                self.type = "transcript.text.delta"
+                self.delta = text
+
+        class FakeAsyncStream:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._chunks:
+                    raise StopAsyncIteration
+                return self._chunks.pop(0)
+
+        stream = FakeAsyncStream([Delta("only removed text")])
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=stream)
+
+        caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
+        assert (
+            await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": "whisper-1"}))
+            is True
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+        with patch("wyoming_openai.handler.AsyncStream", FakeAsyncStream):
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        debug_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
+        info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+        assert "Transcribed stream (unstripped)" in debug_text
+        assert "STT strip regex emptied the transcript" in debug_text
+        assert "STT strip regex emptied the transcript" not in info_text
+        assert "only removed text" not in info_text
 
     @pytest.mark.asyncio
     async def test_transcribe_without_strip_regex_leaves_text_unchanged(self, enhanced_handler, mock_clients):
