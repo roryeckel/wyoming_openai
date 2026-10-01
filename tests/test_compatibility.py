@@ -152,6 +152,7 @@ async def test_keyless_request_omits_authorization(monkeypatch):
     without an Authorization header — openai>=2.34 otherwise refuses to send
     the request. Guards [compatibility.py] _prepare_options injection."""
     from openai import APIConnectionError, Omit
+    from openai._models import FinalRequestOptions
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
@@ -162,7 +163,7 @@ async def test_keyless_request_omits_authorization(monkeypatch):
         captured["headers"] = dict(request.headers)
         raise APIConnectionError(request=request)
 
-    monkeypatch.setattr("httpx.AsyncClient.send", fake_send)
+    monkeypatch.setattr("httpx2.AsyncClient.send", fake_send)
 
     client = CustomAsyncOpenAI(
         backend=OpenAIBackend.SPEACHES,
@@ -180,11 +181,7 @@ async def test_keyless_request_omits_authorization(monkeypatch):
 
     # The Omit sentinel must be exposed on per-request options for SDK validation.
     options = await client._prepare_options(
-        type(
-            "Opts",
-            (),
-            {"headers": None, "security": None},
-        )()  # type: ignore[reportArgumentType]
+        FinalRequestOptions.construct(method="POST", url="/audio/transcriptions")
     )
     assert isinstance(options.headers["Authorization"], Omit)  # type: ignore[reportIndexIssue]
 
