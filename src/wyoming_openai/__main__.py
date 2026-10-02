@@ -18,10 +18,11 @@ from .compatibility import (
     tts_voice_to_string,
 )
 from .const import DEFAULT_OPENAI_BASE_URL, __version__
-from .handler import OpenAIEventHandler
+from .handler import TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
 from .utilities import (
     create_enum_parser,
     create_json_object_parser,
+    parse_positive_int,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -229,6 +230,15 @@ async def main():
         default=int(_v) if (_v := os.getenv("TTS_STREAMING_MAX_CHARS")) else None,
         help="Maximum characters per chunk for streaming TTS (optional)",
     )
+    parser.add_argument(
+        "--tts-concurrent-requests",
+        type=parse_positive_int,
+        default=os.getenv("TTS_CONCURRENT_REQUESTS") or TTS_CONCURRENT_REQUESTS,
+        help=(
+            "Maximum number of simultaneous TTS requests per connection when synthesizing sentences "
+            f"(default: {TTS_CONCURRENT_REQUESTS})"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -401,6 +411,7 @@ async def main():
                 tts_extra_body=args.tts_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
+                tts_concurrent_requests=args.tts_concurrent_requests,
             )
         )
 

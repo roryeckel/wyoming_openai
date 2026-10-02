@@ -60,7 +60,7 @@ REALTIME_AUDIO_WIDTH = 2  # 16-bit audio
 REALTIME_AUDIO_CHANNELS = 1  # Mono audio
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
-TTS_CONCURRENT_REQUESTS = 3  # Number of concurrent OpenAI TTS requests when streaming sentences
+TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests per connection when streaming sentences
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
 WAV_UNBOUNDED_SIZE = 0xFFFFFFFF  # Streaming WAV data chunk size sentinel
 
@@ -101,6 +101,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_extra_body: dict[str, object] | None = None,
         tts_streaming_min_words: int | None = None,
         tts_streaming_max_chars: int | None = None,
+        tts_concurrent_requests: int = TTS_CONCURRENT_REQUESTS,
         **kwargs,
     ) -> None:
         """
@@ -120,6 +121,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_extra_body (dict[str, object] | None): Optional JSON body fields merged into TTS requests.
             tts_streaming_min_words (int | None): Minimum words per chunk for streaming TTS.
             tts_streaming_max_chars (int | None): Maximum characters per chunk for streaming TTS.
+            tts_concurrent_requests (int): Maximum simultaneous TTS requests per connection.
             Note: The caller owns the STT/TTS clients and is responsible for closing them.
             **kwargs: Arbitrary keyword arguments for the superclass.
         """
@@ -182,7 +184,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._audio_started: bool = False  # Track if AudioStart has been sent
         self._current_timestamp: float = 0  # Track timestamp continuity across chunks
 
-        self._tts_semaphore = asyncio.Semaphore(TTS_CONCURRENT_REQUESTS)
+        if tts_concurrent_requests < 1:
+            raise ValueError(f"tts_concurrent_requests must be at least 1, got {tts_concurrent_requests}")
+        self._tts_semaphore = asyncio.Semaphore(tts_concurrent_requests)
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
 
     async def handle_event(self, event: Event) -> bool:
@@ -915,7 +919,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         Concurrency Strategy:
         - Create tasks for ALL sentences immediately (API calls start concurrently)
         - Await tasks in order for sequential playback
-        - Semaphore naturally limits concurrency to TTS_CONCURRENT_REQUESTS
+        - Semaphore naturally limits concurrency to the configured number of concurrent TTS requests
 
         Args:
             sentences (list[str]): Complete sentences ready for synthesis.
@@ -946,7 +950,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.info("Starting concurrent synthesis for %d sentences", len(valid_sentences))
 
                 # Create ALL tasks with IDs - API calls start concurrently
-                # Semaphore limits actual concurrency to TTS_CONCURRENT_REQUESTS
+                # Semaphore limits actual concurrency to the configured number of concurrent TTS requests
                 synthesis_tasks = [
                     (
                         f"sentence_{i}",
@@ -1404,7 +1408,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.debug("Text chunked into %d parts for streaming synthesis", len(chunks))
 
                 # Create ALL tasks with IDs - API calls start concurrently
-                # Semaphore limits actual concurrency to TTS_CONCURRENT_REQUESTS
+                # Semaphore limits actual concurrency to the configured number of concurrent TTS requests
                 _LOGGER.info("Starting concurrent synthesis for %d chunks", len(chunks))
                 synthesis_tasks = [
                     (

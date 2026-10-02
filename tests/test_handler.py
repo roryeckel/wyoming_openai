@@ -2751,3 +2751,65 @@ async def test_no_select_program_explicit_cross_program_names_resolve(multi_prog
     assert multi_program_handler._current_asr_model.name == "whisper-1"
 
     assert multi_program_handler._get_voice("alloy (tts-1)") is not None
+
+
+class _OverlapRecordingSpeech:
+    """Stand-in for ``audio.speech.with_streaming_response`` that records how many requests are in flight at once."""
+
+    def __init__(self):
+        self.in_flight = 0
+        self.peak = 0
+
+    def create(self, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        await asyncio.sleep(0)  # let every other request that is allowed to start do so
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.in_flight -= 1
+
+    async def iter_bytes(self, chunk_size):
+        yield b"\x00\x01" * 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("configured", "expected_peak"), [(None, 3), (1, 1), (2, 2), (5, 5)])
+async def test_tts_requests_overlap_up_to_configured_limit(
+    dummy_info, dummy_clients, dummy_reader_writer, configured, expected_peak
+):
+    """Three sentences are synthesized at once by default; tts_concurrent_requests changes that limit."""
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    speech = _OverlapRecordingSpeech()
+    tts_client.audio.speech.with_streaming_response = speech
+    extra_kwargs = {} if configured is None else {"tts_concurrent_requests": configured}
+    handler = OpenAIEventHandler(
+        reader, writer, info=dummy_info, stt_client=stt_client, tts_client=tts_client, **extra_kwargs
+    )
+    voice = handler._get_voice("voice1")
+    assert voice is not None
+
+    results = await asyncio.gather(*(handler._get_tts_audio_stream(f"Sentence {i}.", voice) for i in range(6)))
+
+    assert all(result.audio for result in results)
+    assert speech.peak == expected_peak
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_init_rejects_non_positive_tts_concurrent_requests(dummy_info, dummy_clients, dummy_reader_writer, value):
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+
+    with pytest.raises(ValueError, match="tts_concurrent_requests must be at least 1"):
+        OpenAIEventHandler(
+            reader,
+            writer,
+            info=dummy_info,
+            stt_client=stt_client,
+            tts_client=tts_client,
+            tts_concurrent_requests=value,
+        )

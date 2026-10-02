@@ -180,9 +180,10 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
 | `--tts-extra-body`                      | `TTS_EXTRA_BODY`                           | None                                          | JSON object merged into the TTS request body via `extra_body` for backend-specific fields. Audio settings such as `response_format`, `speed`, and `instructions` may override top-level values, but `stream` and `stream_format` are rejected. |
-| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `tts-1`) with up to three concurrent synthesis requests. |
+| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `tts-1`) with up to three concurrent synthesis requests by default (see `TTS_CONCURRENT_REQUESTS`). |
 | `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
 | `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
+| `--tts-concurrent-requests`             | `TTS_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of simultaneous TTS requests per Wyoming connection while streaming TTS synthesizes several sentences at once. Lower it for a backend that cannot serve parallel requests, raise it for one that can. Must be a whole number of at least 1. |
 
 `STT_STREAMING_MODELS` and `STT_REALTIME_MODELS` select different STT transports. `STT_STREAMING_MODELS` still uses `/v1/audio/transcriptions` with response streaming after Wyoming `AudioStop`. `STT_REALTIME_MODELS` opens a `/v1/realtime` transcription session, sends 24 kHz mono PCM16 audio chunks as Wyoming audio arrives, commits on Wyoming `AudioStop`, and emits `TranscriptChunk` deltas plus a final `Transcript`.
 
@@ -486,11 +487,11 @@ sequenceDiagram
     WY->>HA: AudioStop event
   else Streaming TTS (SynthesizeStart/Chunk/Stop)
     HA->>WY: SynthesizeStart event (voice config)
-    Note over WY: Initialize incremental synthesis<br/>with yasbd-powered sentence boundary detection<br/>and up to three concurrent OpenAI TTS requests
+    Note over WY: Initialize incremental synthesis<br/>with yasbd-powered sentence boundary detection<br/>and up to three concurrent OpenAI TTS requests by default
     WY->>HA: AudioStart event
     loop Sending text chunks
       HA->>WY: SynthesizeChunk events
-      Note over WY: Accumulate text and detect<br/>complete sentences using yasbd sentence chunking<br/>while prefetching audio in parallel (max 3 concurrent requests)
+      Note over WY: Accumulate text and detect<br/>complete sentences using yasbd sentence chunking<br/>while prefetching audio in parallel (max 3 concurrent requests by default)
       alt Complete sentences detected
         loop For each complete sentence
           WY->>OAPI: Speech synthesis request
