@@ -22,6 +22,7 @@ from .handler import OpenAIEventHandler
 from .utilities import (
     create_enum_parser,
     create_json_object_parser,
+    parse_boolean,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -81,6 +82,14 @@ async def main():
             tts_extra_body_default = tts_extra_body_parser(tts_extra_body_env)
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
+
+    stt_early_transcribe_env = os.getenv("STT_EARLY_TRANSCRIBE")
+    stt_early_transcribe_default = False
+    if stt_early_transcribe_env:
+        try:
+            stt_early_transcribe_default = parse_boolean(stt_early_transcribe_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(f"STT_EARLY_TRANSCRIBE: {exc}")
 
     # General configuration
     parser.add_argument(
@@ -158,6 +167,15 @@ async def main():
         nargs="+",
         default=os.getenv("STT_REALTIME_MODELS", "").split(),
         help="Space-separated list of STT model names that use Realtime transcription (e.g. gpt-realtime-whisper)",
+    )
+    parser.add_argument(
+        "--stt-early-transcribe",
+        action=argparse.BooleanOptionalAction,
+        default=stt_early_transcribe_default,
+        help=(
+            "Start transcribing when the speaker pauses instead of waiting for the end of the audio "
+            "(not used for streaming or realtime STT models)"
+        ),
     )
 
     # TTS configuration
@@ -263,6 +281,8 @@ async def main():
 
         stt_client = await stt_factory(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
         _logger.debug("Detected STT backend: %s", stt_client.backend)
+        if args.stt_early_transcribe:
+            _logger.info("Early transcription is enabled")
 
     tts_client: CustomAsyncOpenAI | None = None
     if tts_requested:
@@ -398,6 +418,7 @@ async def main():
                 stt_prompt=args.stt_prompt,
                 stt_extra_body=args.stt_extra_body,
                 stt_realtime_models=args.stt_realtime_models,
+                stt_early_transcribe=args.stt_early_transcribe,
                 tts_extra_body=args.tts_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,

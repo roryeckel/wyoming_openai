@@ -370,6 +370,89 @@ async def test_main_skips_stt_client_creation_in_tts_only_mode(monkeypatch):
     assert server.handlers[0]._tts_client is not None
 
 
+async def _handler_created_by_main(monkeypatch, *cli_args):
+    """Run main() with a fake STT backend and return the handler the server created."""
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(
+        main_module.AsyncServer,
+        "from_uri",
+        staticmethod(lambda uri: server),
+    )
+    for env_var in ("TTS_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1", *cli_args])
+
+    await main()
+
+    assert len(server.handlers) == 1
+    return server.handlers[0]
+
+
+@pytest.mark.asyncio
+async def test_main_leaves_early_transcription_off_by_default(monkeypatch):
+    monkeypatch.delenv("STT_EARLY_TRANSCRIBE", raising=False)
+
+    handler = await _handler_created_by_main(monkeypatch)
+
+    assert handler._stt_early_transcribe is False
+
+
+@pytest.mark.asyncio
+async def test_main_enables_early_transcription_from_cli(monkeypatch):
+    monkeypatch.delenv("STT_EARLY_TRANSCRIBE", raising=False)
+
+    handler = await _handler_created_by_main(monkeypatch, "--stt-early-transcribe")
+
+    assert handler._stt_early_transcribe is True
+
+
+@pytest.mark.asyncio
+async def test_main_enables_early_transcription_from_env(monkeypatch):
+    monkeypatch.setenv("STT_EARLY_TRANSCRIBE", "true")
+
+    handler = await _handler_created_by_main(monkeypatch)
+
+    assert handler._stt_early_transcribe is True
+
+
+@pytest.mark.asyncio
+async def test_main_cli_can_turn_early_transcription_off_when_env_enables_it(monkeypatch):
+    monkeypatch.setenv("STT_EARLY_TRANSCRIBE", "true")
+
+    handler = await _handler_created_by_main(monkeypatch, "--no-stt-early-transcribe")
+
+    assert handler._stt_early_transcribe is False
+
+
+@pytest.mark.asyncio
+async def test_main_treats_empty_early_transcription_env_as_off(monkeypatch):
+    monkeypatch.setenv("STT_EARLY_TRANSCRIBE", "")
+
+    handler = await _handler_created_by_main(monkeypatch)
+
+    assert handler._stt_early_transcribe is False
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_invalid_early_transcription_env(monkeypatch, capsys):
+    monkeypatch.setenv("STT_EARLY_TRANSCRIBE", "maybe")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "STT_EARLY_TRANSCRIBE: Invalid boolean: 'maybe'" in capsys.readouterr().err
+
 @pytest.mark.asyncio
 async def test_main_configures_realtime_stt_models(monkeypatch):
     server = _CapturingServer()
