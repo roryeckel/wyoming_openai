@@ -10,6 +10,7 @@ from wyoming.server import AsyncServer
 from .compatibility import (
     CustomAsyncOpenAI,
     OpenAIBackend,
+    apply_tts_voice_labels,
     asr_model_to_string,
     create_asr_programs,
     create_info,
@@ -22,6 +23,7 @@ from .handler import OpenAIEventHandler
 from .utilities import (
     create_enum_parser,
     create_json_object_parser,
+    parse_voice_labels,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -183,6 +185,15 @@ async def main():
         help="List of available TTS voices",
     )
     parser.add_argument(
+        "--tts-voice-labels",
+        type=parse_voice_labels,
+        default=os.getenv("TTS_VOICE_LABELS") or None,
+        help=(
+            "Optional JSON object mapping a TTS voice name to the display name shown by Wyoming clients such as "
+            'Home Assistant, for example \'{"af_heart": "Heart"}\'. Only the displayed name changes'
+        ),
+    )
+    parser.add_argument(
         "--tts-backend",
         type=backend_parser,
         required=False,
@@ -307,6 +318,9 @@ async def main():
             tts_voices = await tts_client.list_supported_voices(
                 args.tts_models, args.tts_streaming_models, args.languages
             )
+
+        if args.tts_voice_labels and tts_voices:
+            apply_tts_voice_labels(tts_voices, args.tts_voice_labels)
 
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 

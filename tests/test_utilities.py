@@ -10,6 +10,7 @@ from wyoming_openai.utilities import (
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
+    parse_voice_labels,
     strip_ssml,
     validate_stt_extra_body,
     validate_tts_extra_body,
@@ -262,6 +263,32 @@ def test_create_json_object_parser_rejects_non_object():
         parser('["stream"]')
 
     assert "expected a JSON object" in str(exc_info.value)
+
+
+def test_parse_voice_labels_returns_trimmed_labels_by_voice_name():
+    """Test that voice labels are parsed from a JSON object and surrounding whitespace is dropped."""
+    assert parse_voice_labels('{"af_heart": " Heart ", "af_bella": "Bella (warm)"}') == {
+        "af_heart": "Heart",
+        "af_bella": "Bella (warm)",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('{"af_heart": "Heart"', "Invalid TTS voice labels"),
+        ('["af_heart"]', "expected a JSON object"),
+        ('{"af_heart": 3}', "label for 'af_heart' must be a non-empty string"),
+        ('{"af_heart": null}', "label for 'af_heart' must be a non-empty string"),
+        ('{"af_heart": "  "}', "label for 'af_heart' must be a non-empty string"),
+    ],
+)
+def test_parse_voice_labels_rejects_invalid_values(value, message):
+    """Test that voice labels must be a JSON object of non-empty strings."""
+    with pytest.raises(argparse.ArgumentTypeError) as exc_info:
+        parse_voice_labels(value)
+
+    assert message in str(exc_info.value)
 
 
 def test_validate_stt_extra_body_allows_boolean_stream_override():

@@ -5,6 +5,7 @@ import pytest
 
 import wyoming_openai.__main__ as main_module
 from wyoming_openai.__main__ import main
+from wyoming_openai.compatibility import create_tts_voices
 
 
 @pytest.mark.asyncio
@@ -198,6 +199,112 @@ async def test_main_allows_invalid_unused_tts_extra_body_when_voice_discovery_re
     )
 
     await main()
+
+
+async def _advertised_tts_voices(monkeypatch, client, *cli_args):
+    """Run main() with a fake TTS backend and return (name, description) of every voice the server advertises."""
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        return client
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(
+        main_module.AsyncServer,
+        "from_uri",
+        staticmethod(lambda uri: server),
+    )
+    for env_var in ("STT_MODELS", "STT_STREAMING_MODELS", "STT_REALTIME_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-models", "tts-1", *cli_args])
+
+    await main()
+
+    assert len(server.handlers) == 1
+    info = server.handlers[0]._wyoming_info
+    return [(voice.name, voice.description) for program in info.tts for voice in program.voices]
+
+
+@pytest.mark.asyncio
+async def test_main_keeps_voice_names_as_descriptions_by_default(monkeypatch):
+    monkeypatch.delenv("TTS_VOICE_LABELS", raising=False)
+
+    voices = await _advertised_tts_voices(monkeypatch, _FakeClient(), "--tts-voices", "alloy", "echo")
+
+    assert voices == [("alloy", "alloy"), ("echo", "echo")]
+
+
+@pytest.mark.asyncio
+async def test_main_applies_tts_voice_labels_from_cli(monkeypatch):
+    monkeypatch.delenv("TTS_VOICE_LABELS", raising=False)
+
+    voices = await _advertised_tts_voices(
+        monkeypatch, _FakeClient(), "--tts-voices", "alloy", "echo", "--tts-voice-labels", '{"alloy": "Allie"}'
+    )
+
+    assert voices == [("alloy", "Allie"), ("echo", "echo")]
+
+
+@pytest.mark.asyncio
+async def test_main_applies_tts_voice_labels_from_env(monkeypatch):
+    monkeypatch.setenv("TTS_VOICE_LABELS", '{"echo": "Echo (low)"}')
+
+    voices = await _advertised_tts_voices(monkeypatch, _FakeClient(), "--tts-voices", "alloy", "echo")
+
+    assert voices == [("alloy", "alloy"), ("echo", "Echo (low)")]
+
+
+@pytest.mark.asyncio
+async def test_main_ignores_empty_tts_voice_labels_env(monkeypatch):
+    monkeypatch.setenv("TTS_VOICE_LABELS", "")
+
+    voices = await _advertised_tts_voices(monkeypatch, _FakeClient(), "--tts-voices", "alloy")
+
+    assert voices == [("alloy", "alloy")]
+
+
+@pytest.mark.asyncio
+async def test_main_applies_tts_voice_labels_to_voices_listed_by_the_backend(monkeypatch):
+    class VoiceListingClient(_FakeClient):
+        async def list_supported_voices(self, model_names, streaming_model_names, languages):
+            voices = ["alloy", "echo"]
+            return create_tts_voices(model_names, streaming_model_names, voices, "http://tts.test", languages)
+
+    monkeypatch.delenv("TTS_VOICE_LABELS", raising=False)
+
+    voices = await _advertised_tts_voices(
+        monkeypatch, VoiceListingClient(), "--tts-voice-labels", '{"alloy": "Allie"}'
+    )
+
+    assert voices == [("alloy", "Allie"), ("echo", "echo")]
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_invalid_tts_voice_labels(monkeypatch, capsys):
+    monkeypatch.delenv("TTS_VOICE_LABELS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-voice-labels", '{"alloy": 3}'])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "label for 'alloy' must be a non-empty string" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_invalid_tts_voice_labels_env(monkeypatch, capsys):
+    monkeypatch.setenv("TTS_VOICE_LABELS", "not json")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "Invalid TTS voice labels" in capsys.readouterr().err
 
 
 class _FakeClient:
