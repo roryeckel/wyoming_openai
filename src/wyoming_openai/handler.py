@@ -6,6 +6,7 @@ import logging
 import struct
 import wave
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, cast
 
 from openai import AsyncStream, omit
@@ -33,6 +34,7 @@ from wyoming.tts import (
 from yasbd import BoundaryDetector, get_supported_langs
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
+from .early_transcription import EarlyTranscription
 from .utilities import (
     NamedBytesIO,
     SsmlTextTransformer,
@@ -96,6 +98,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         stt_prompt: str | None = None,
         stt_extra_body: dict[str, object] | None = None,
         stt_realtime_models: list[str] | set[str] | None = None,
+        stt_early_transcribe: bool = False,
         tts_speed: float | None = None,
         tts_instructions: str | None = None,
         tts_extra_body: dict[str, object] | None = None,
@@ -115,6 +118,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             stt_prompt (str | None): An optional prompt for STT.
             stt_extra_body (dict[str, object] | None): Optional JSON body fields merged into STT requests.
             stt_realtime_models (list[str] | set[str] | None): STT models that use OpenAI Realtime transcription.
+            stt_early_transcribe (bool): Start transcribing when the speaker pauses instead of at the end of the audio.
             tts_speed (float | None): The speed for TTS, or None for default.
             tts_instructions (str | None): Optional instructions for TTS.
             tts_extra_body (dict[str, object] | None): Optional JSON body fields merged into TTS requests.
@@ -138,6 +142,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
         if self._has_asr_models():
             validate_stt_extra_body(self._stt_extra_body)
+        self._stt_early_transcribe = stt_early_transcribe
 
         self._tts_client = tts_client
         self._tts_speed = tts_speed
@@ -157,6 +162,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._audio_sample_rate: int = DEFAULT_ASR_AUDIO_RATE
         self._audio_width: int = DEFAULT_AUDIO_WIDTH
         self._audio_channels: int = DEFAULT_AUDIO_CHANNELS
+        self._early_transcription: EarlyTranscription | None = None
 
         # State for realtime transcription
         self._realtime_connection_manager: Any | None = None
@@ -241,11 +247,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         return True
 
     async def disconnect(self) -> None:
-        """Clean up handler-owned realtime resources when the Wyoming client disconnects."""
+        """Clean up handler-owned transcription resources when the Wyoming client disconnects."""
+        self._cancel_early_transcription()
         await self._cleanup_realtime_transcription()
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
+        self._cancel_early_transcription()
         await self._cleanup_realtime_transcription()
         await super().stop()
 
@@ -284,6 +292,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
+        # An early transcription was started with the previous model and language
+        self._cancel_early_transcription()
+
         # No OpenAI-compatible endpoint accepts VAD sensitivity or hotword biasing
         if transcribe.vad_sensitivity is not None:
             _LOGGER.debug("Ignoring unsupported Transcribe field vad_sensitivity: %s", transcribe.vad_sensitivity)
@@ -328,6 +339,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             "Recording started at %d Hz, %d channels, %d bytes per sample", sample_rate, audio_channels, audio_width
         )
 
+        self._start_early_transcription(sample_rate, audio_width, audio_channels)
+
     async def _handle_audio_chunk(self, chunk: AudioChunk) -> None:
         """Handle audio chunk"""
         if self._realtime_connection is not None:
@@ -336,6 +349,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if self._is_recording and chunk.audio and self._wav_write_buffer:
             self._wav_write_buffer.writeframes(chunk.audio)
+            if self._early_transcription is not None:
+                self._early_transcription.feed(chunk.audio)
         else:
             _LOGGER.warning("Problem handling audio chunk")
 
@@ -665,28 +680,13 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.error("No STT client configured for transcription")
                 return
 
-            # Send to OpenAI for transcription
-            extra_body = self._get_stt_extra_body()
-            use_streaming = get_extra_body_boolean_field(
-                extra_body,
-                field_name="stream",
-                default=self._is_asr_model_streaming(self._current_asr_model.name),
-                body_name="STT",
-            )
-
-            transcription_kwargs = {
-                "file": self._wav_buffer,
-                "model": self._current_asr_model.name,
-                "language": self._current_language if self._current_language is not None else omit,
-                "temperature": self._stt_temperature if self._stt_temperature is not None else omit,
-                "prompt": self._stt_prompt if self._stt_prompt is not None else omit,
-                "response_format": "json",
-                "stream": use_streaming if use_streaming else omit,
-            }
-            if extra_body:
-                transcription_kwargs["extra_body"] = extra_body
-
-            transcription = await self._stt_client.audio.transcriptions.create(**transcription_kwargs)
+            # Use the early transcription if it still covers the whole recording, otherwise send it to OpenAI
+            early_transcription = self._early_transcription
+            transcription = await early_transcription.result() if early_transcription is not None else None
+            if transcription is None:
+                transcription = await self._request_transcription(
+                    self._stt_client, self._current_asr_model, self._wav_buffer
+                )
 
             await self.write_event(TranscriptStart().event())
 
@@ -726,9 +726,55 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error during transcription: %s", e)
         finally:
+            self._cancel_early_transcription()
             if self._wav_buffer:
                 self._wav_buffer.close()
                 self._wav_buffer = None
+
+    async def _request_transcription(self, stt_client: CustomAsyncOpenAI, model: AsrModel, file: NamedBytesIO) -> Any:
+        """Send a recording to the STT backend with the configured settings."""
+        extra_body = self._get_stt_extra_body()
+        use_streaming = self._use_stt_streaming(model, extra_body)
+
+        transcription_kwargs = {
+            "file": file,
+            "model": model.name,
+            "language": self._current_language if self._current_language is not None else omit,
+            "temperature": self._stt_temperature if self._stt_temperature is not None else omit,
+            "prompt": self._stt_prompt if self._stt_prompt is not None else omit,
+            "response_format": "json",
+            "stream": use_streaming if use_streaming else omit,
+        }
+        if extra_body:
+            transcription_kwargs["extra_body"] = extra_body
+
+        return await stt_client.audio.transcriptions.create(**transcription_kwargs)
+
+    def _start_early_transcription(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
+        """Begin early transcription for the recording that just started, when it is enabled and possible."""
+        self._cancel_early_transcription()
+
+        model = self._current_asr_model
+        if not self._stt_early_transcribe or model is None or self._stt_client is None:
+            return
+
+        # A streamed response is relayed as it arrives, so it cannot be prepared ahead of time. Pause detection
+        # reads 16-bit audio.
+        if audio_width != 2 or self._use_stt_streaming(model, self._get_stt_extra_body()):
+            return
+
+        self._early_transcription = EarlyTranscription(
+            partial(self._request_transcription, self._stt_client, model),
+            rate=sample_rate,
+            width=audio_width,
+            channels=audio_channels,
+        )
+
+    def _cancel_early_transcription(self) -> None:
+        """Abandon early transcription for the current recording, if there is any."""
+        if self._early_transcription is not None:
+            self._early_transcription.cancel()
+            self._early_transcription = None
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
         """Get an ASR model by name or None.
@@ -798,6 +844,18 @@ class OpenAIEventHandler(AsyncEventHandler):
                 if model.name == model_name:
                     return program.supports_transcript_streaming
         return False
+
+    def _use_stt_streaming(self, model: AsrModel, extra_body: dict[str, object] | None) -> bool:
+        """Check if an STT request for an ASR model asks for a streamed response.
+
+        The model's streaming support is the default; ``stream`` in the STT extra body overrides it.
+        """
+        return get_extra_body_boolean_field(
+            extra_body,
+            field_name="stream",
+            default=self._is_asr_model_streaming(model.name),
+            body_name="STT",
+        )
 
     def _is_asr_model_realtime(self, model_name: str) -> bool:
         """Check if an ASR model should use OpenAI Realtime transcription."""

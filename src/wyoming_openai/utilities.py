@@ -316,6 +316,24 @@ def create_enum_parser[E: Enum](enum_class: type[E], case_insensitive: bool = Tr
     return parse_enum
 
 
+def parse_boolean(value: str) -> bool:
+    """
+    Parse a yes/no setting such as an environment variable value.
+
+    Accepts true/false, yes/no, on/off and 1/0 in any letter case.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is none of these.
+    """
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+
+    raise argparse.ArgumentTypeError(f"Invalid boolean: '{value}'. Use true or false")
+
+
 def create_json_object_parser(option_name: str) -> Callable[[str], dict[str, object]]:
     """
     Create an argparse parser that validates a JSON object string.

@@ -10,6 +10,7 @@ from wyoming_openai.utilities import (
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
+    parse_boolean,
     strip_ssml,
     validate_stt_extra_body,
     validate_tts_extra_body,
@@ -262,6 +263,33 @@ def test_create_json_object_parser_rejects_non_object():
         parser('["stream"]')
 
     assert "expected a JSON object" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1", True),
+        ("true", True),
+        ("TRUE", True),
+        (" Yes ", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("False", False),
+        ("no", False),
+        (" OFF", False),
+    ],
+)
+def test_parse_boolean_accepts_common_spellings(value, expected):
+    assert parse_boolean(value) is expected
+
+
+@pytest.mark.parametrize("value", ["", "maybe", "2", "truee"])
+def test_parse_boolean_rejects_anything_else(value):
+    with pytest.raises(argparse.ArgumentTypeError) as exc_info:
+        parse_boolean(value)
+
+    assert f"Invalid boolean: '{value}'" in str(exc_info.value)
 
 
 def test_validate_stt_extra_body_allows_boolean_stream_override():

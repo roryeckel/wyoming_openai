@@ -61,6 +61,7 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 ### Core Components
 
 - **`handler.py`**: Contains `OpenAIEventHandler` - the main Wyoming protocol event handler that processes ASR and TTS requests
+- **`early_transcription.py`**: Optional early transcription (`--stt-early-transcribe`): pause detection and the speculative STT request
 - **`compatibility.py`**: Provides `CustomAsyncOpenAI` class with backend detection and OpenAI API compatibility layer
 - **`__main__.py`**: Entry point with argument parsing and server initialization
 - **`utilities.py`**: Helper functions for audio processing and data handling
@@ -101,6 +102,7 @@ The server accepts both command-line arguments and environment variables. Key co
 
 Tests are organized by module:
 - `test_handler.py`: Event handler logic
+- `test_early_transcription.py`: Pause detection and early transcription
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
 - `test_main.py`: CLI argument parsing and startup validation
