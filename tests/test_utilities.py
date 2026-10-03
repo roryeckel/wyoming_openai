@@ -11,6 +11,7 @@ from wyoming_openai.utilities import (
     create_json_object_parser,
     get_extra_body_boolean_field,
     strip_ssml,
+    validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -288,3 +289,34 @@ def test_get_extra_body_boolean_field_returns_default_or_override():
         get_extra_body_boolean_field({"stream": True}, field_name="stream", default=False, body_name="STT")
         is True
     )
+
+
+@pytest.mark.parametrize(
+    "extra_body",
+    [
+        None,
+        {"speed": 1.2, "response_format": "pcm", "reasoning": {"effort": "low"}},
+        {"audio": {"output": {"format": {"type": "audio/pcm"}, "speed": 1}}},
+        {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}}},
+    ],
+)
+def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body):
+    """Realtime TTS accepts overrides that keep 24 kHz PCM output."""
+    validate_realtime_tts_extra_body(extra_body)
+
+
+@pytest.mark.parametrize(
+    ("extra_body", "message"),
+    [
+        ({"audio": {"output": {"format": {"type": "audio/pcmu"}}}}, r"audio\.output\.format"),
+        ({"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}}, r"audio\.output\.format"),
+        ({"audio": {"output": {"format": "pcm16"}}}, r"audio\.output\.format"),
+        ({"audio": "pcm"}, "audio must be an object"),
+        ({"speed": "fast"}, "speed must be a number"),
+        ({"audio": {"output": {"speed": True}}}, "speed must be a number"),
+    ],
+)
+def test_validate_realtime_tts_extra_body_rejects_incompatible_overrides(extra_body, message):
+    """Realtime TTS rejects overrides that would change the audio Wyoming is told to expect."""
+    with pytest.raises(ValueError, match=message):
+        validate_realtime_tts_extra_body(extra_body)

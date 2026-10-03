@@ -5,6 +5,8 @@ from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
 
+from .const import REALTIME_TTS_AUDIO_FORMAT
+
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
 SSML_PAUSE_TAG_NAMES = frozenset(("break", "p", "s"))
@@ -436,6 +438,35 @@ def validate_tts_extra_body(extra_body: dict[str, object] | None) -> None:
         extra_body,
         field_names={"stream", "stream_format"},
         body_name="TTS",
+    )
+
+
+def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> None:
+    """Validate TTS extra_body fields that are mapped onto a Realtime session's audio output."""
+    if not extra_body:
+        return
+
+    audio = extra_body.get("audio", {})
+    output = audio.get("output", {}) if isinstance(audio, dict) else None
+    if not isinstance(output, dict):
+        raise ValueError("TTS extra_body audio must be an object whose output, if set, is an object")
+
+    for speed in (extra_body.get("speed"), output.get("speed")):
+        if speed is not None and (isinstance(speed, bool) or not isinstance(speed, int | float)):
+            raise ValueError(f"TTS extra_body speed must be a number for Realtime models; got {speed!r}")
+
+    if "format" not in output:
+        return
+
+    audio_format = output["format"]
+    if isinstance(audio_format, dict) and {"rate": REALTIME_TTS_AUDIO_FORMAT["rate"], **audio_format} == (
+        REALTIME_TTS_AUDIO_FORMAT
+    ):
+        return
+
+    raise ValueError(
+        f"TTS extra_body audio.output.format must be {REALTIME_TTS_AUDIO_FORMAT!r} for Realtime models; "
+        f"got {audio_format!r}"
     )
 
 

@@ -22,6 +22,7 @@ from .handler import OpenAIEventHandler
 from .utilities import (
     create_enum_parser,
     create_json_object_parser,
+    validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -252,6 +253,8 @@ async def main():
             validate_stt_extra_body(args.stt_extra_body)
         if tts_requested and args.tts_voices:
             validate_tts_extra_body(args.tts_extra_body)
+        if args.tts_realtime_models:
+            validate_realtime_tts_extra_body(args.tts_extra_body)
     except ValueError as exc:
         parser.error(str(exc))
 

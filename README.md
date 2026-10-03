@@ -206,7 +206,7 @@ OpenAI has announced shutdown dates for most of its older audio models. This onl
 - Realtime models are conversational. The proxy instructs the model to read the text word for word, but this is not guaranteed; a warning is logged when the spoken transcript differs from the requested text.
 - The voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` and `cedar`. `fable`, `onyx` and `nova` are not available.
 - `TTS_INSTRUCTIONS` is appended to the read-aloud instructions as a delivery style, and `TTS_SPEED` is capped at 1.5.
-- `TTS_EXTRA_BODY` fields other than `response_format` are merged into the Realtime session, for example `{"reasoning": {"effort": "low"}}`.
+- `TTS_EXTRA_BODY` is applied to the Realtime session, for example `{"reasoning": {"effort": "low"}}`. `speed` and `instructions` are mapped to their Realtime equivalents, `response_format` is ignored, and an `audio.output.format` other than 24 kHz `audio/pcm` causes a startup error.
 
 ```bash
 python -m wyoming_openai \

@@ -2989,3 +2989,45 @@ def test_realtime_tts_session_clamps_speed_and_merges_extra_body(enhanced_handle
     assert session["reasoning"] == {"effort": "low"}
     assert "response_format" not in session
     assert "Delivery style" not in session["instructions"]
+
+
+def test_realtime_tts_session_maps_speech_overrides_to_realtime_fields(enhanced_handler, mock_info):
+    """Test /v1/audio/speech style overrides land on their Realtime session fields."""
+    enhanced_handler._tts_extra_body = {"speed": 2.0, "instructions": "Whisper"}
+
+    session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
+
+    assert "speed" not in session
+    assert session["audio"]["output"]["speed"] == 1.5
+    assert session["instructions"].startswith("You are a text-to-speech engine.")
+    assert session["instructions"].endswith("Delivery style: Whisper")
+
+
+def test_realtime_tts_session_merges_audio_overrides_without_changing_format(enhanced_handler, mock_info):
+    """Test audio overrides are merged into the session while the PCM output format is kept."""
+    enhanced_handler._tts_extra_body = {
+        "audio": {"output": {"speed": 0.5, "voice": "cedar", "format": {"type": "audio/pcmu"}}},
+    }
+
+    session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
+
+    assert session["audio"] == {
+        "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "cedar", "speed": 0.5}
+    }
+
+
+def test_handler_rejects_incompatible_realtime_audio_format(mock_info, mock_clients, dummy_reader_writer):
+    """Test a Realtime output format Wyoming cannot play is rejected at construction."""
+    stt_client, tts_client = mock_clients
+    reader, writer = dummy_reader_writer
+
+    with pytest.raises(ValueError, match=r"audio\.output\.format"):
+        OpenAIEventHandler(
+            reader,
+            writer,
+            info=mock_info,
+            stt_client=stt_client,
+            tts_client=tts_client,
+            tts_realtime_models=["gpt-realtime-2.1-mini"],
+            tts_extra_body={"audio": {"output": {"format": {"type": "audio/pcmu"}}}},
+        )

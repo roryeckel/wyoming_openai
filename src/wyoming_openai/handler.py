@@ -36,6 +36,7 @@ from yasbd import BoundaryDetector, get_supported_langs
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .const import (
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
+    REALTIME_TTS_AUDIO_FORMAT,
     REALTIME_TTS_INSTRUCTIONS,
     REALTIME_TTS_MAX_SPEED,
     REALTIME_TTS_MIN_SPEED,
@@ -45,6 +46,7 @@ from .utilities import (
     SsmlTextTransformer,
     get_extra_body_boolean_field,
     strip_ssml,
+    validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -175,6 +177,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._tts_realtime_models = set(tts_realtime_models or [])
         if self._has_tts_voices():
             validate_tts_extra_body(self._tts_extra_body)
+            if self._tts_realtime_models:
+                validate_realtime_tts_extra_body(self._tts_extra_body)
         self._tts_streaming_min_words = tts_streaming_min_words
         self._tts_streaming_max_chars = tts_streaming_max_chars
 
@@ -1622,37 +1626,49 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _get_realtime_tts_session(self, voice: TtsVoiceModel) -> dict[str, object]:
         """Build a Realtime session update payload that speaks text as PCM audio."""
+        # extra_body is written for /v1/audio/speech, so its audio settings are mapped onto
+        # their Realtime session fields instead of being merged at the top level
+        extra_body = dict(self._tts_extra_body or {})
+        extra_body.pop("response_format", None)
+        style = extra_body.pop("instructions", self._tts_instructions)
+        requested_speed = extra_body.pop("speed", self._tts_speed)
+        audio_override = extra_body.pop("audio", None)
+        audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
+        output_override = audio_override.pop("output", None)
+        output_override = dict(output_override) if isinstance(output_override, dict) else {}
+        requested_speed = output_override.pop("speed", requested_speed)
+
         instructions = REALTIME_TTS_INSTRUCTIONS
-        if self._tts_instructions:
-            instructions = f"{instructions}\n\nDelivery style: {self._tts_instructions}"
+        if style:
+            instructions = f"{instructions}\n\nDelivery style: {style}"
 
         audio_output: dict[str, object] = {
-            "format": {"type": "audio/pcm", "rate": REALTIME_AUDIO_RATE},
             "voice": self._get_backend_voice_name(voice),
+            **output_override,
+            # Wyoming is told 24 kHz PCM16, so the output encoding is not overridable
+            "format": dict(REALTIME_TTS_AUDIO_FORMAT),
         }
-        if self._tts_speed is not None:
-            speed = min(max(self._tts_speed, REALTIME_TTS_MIN_SPEED), REALTIME_TTS_MAX_SPEED)
-            if speed != self._tts_speed:
+        if isinstance(requested_speed, int | float) and not isinstance(requested_speed, bool):
+            speed = min(max(requested_speed, REALTIME_TTS_MIN_SPEED), REALTIME_TTS_MAX_SPEED)
+            if speed != requested_speed:
                 _warn_once(
                     "realtime_tts_speed",
                     "Realtime TTS speed must be between %s and %s; using %s instead of %s",
                     REALTIME_TTS_MIN_SPEED,
                     REALTIME_TTS_MAX_SPEED,
                     speed,
-                    self._tts_speed,
+                    requested_speed,
                 )
             audio_output["speed"] = speed
 
-        session: dict[str, object] = {
+        return {
             "type": "realtime",
             "output_modalities": ["audio"],
-            "instructions": instructions,
             "tool_choice": "none",
-            "audio": {"output": audio_output},
+            **extra_body,
+            "instructions": instructions,
+            "audio": {**audio_override, "output": audio_output},
         }
-        # response_format only applies to /v1/audio/speech requests
-        session.update({key: value for key, value in (self._tts_extra_body or {}).items() if key != "response_format"})
-        return session
 
     async def _iter_realtime_tts_audio(self, text: str, voice: TtsVoiceModel) -> AsyncGenerator[bytes, None]:
         """Yield PCM audio for a text chunk from a single out-of-band Realtime response."""
