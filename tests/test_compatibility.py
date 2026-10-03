@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -7,6 +8,7 @@ from wyoming_openai.compatibility import (
     CustomAsyncOpenAI,
     OpenAIBackend,
     TtsVoiceModel,
+    apply_tts_voice_labels,
     asr_model_to_string,
     create_asr_programs,
     create_info,
@@ -581,3 +583,62 @@ class TestBackendSpecificBehavior:
                 voices = await custom_client._list_kokoro_fastapi_voices()
 
             assert voices == ["af_sky", "bf_emma"]
+
+
+class TestApplyTtsVoiceLabels:
+    """Test apply_tts_voice_labels."""
+
+    @staticmethod
+    def _single_model_voices():
+        return create_tts_voices(["tts-1"], [], ["alloy", "echo"], "https://api.openai.com", ["en"])
+
+    def test_label_replaces_only_the_description(self):
+        voices = self._single_model_voices()
+
+        apply_tts_voice_labels(voices, {"alloy": "Allie"})
+
+        assert [voice.description for voice in voices] == ["Allie", "echo"]
+        assert [voice.name for voice in voices] == ["alloy", "echo"]
+        assert [voice.backend_voice_name for voice in voices] == ["alloy", "echo"]
+
+    def test_without_labels_descriptions_stay_the_voice_names(self):
+        voices = self._single_model_voices()
+
+        apply_tts_voice_labels(voices, {})
+
+        assert [voice.description for voice in voices] == ["alloy", "echo"]
+
+    def test_backend_voice_name_label_covers_every_model_offering_the_voice(self):
+        voices = create_tts_voices(["model-a", "model-b"], [], ["shared", "echo"], "https://api.openai.com", ["en"])
+
+        apply_tts_voice_labels(voices, {"shared": "Shared voice"})
+
+        assert {voice.name: voice.description for voice in voices} == {
+            "shared (model-a)": "Shared voice (model-a)",
+            "echo (model-a)": "echo (model-a)",
+            "shared (model-b)": "Shared voice (model-b)",
+            "echo (model-b)": "echo (model-b)",
+        }
+
+    def test_public_name_label_wins_over_backend_voice_name_label(self):
+        voices = create_tts_voices(["model-a", "model-b"], [], ["shared"], "https://api.openai.com", ["en"])
+
+        apply_tts_voice_labels(voices, {"shared": "Shared voice", "shared (model-b)": "Shared voice (B)"})
+
+        assert [voice.description for voice in voices] == ["Shared voice (model-a)", "Shared voice (B)"]
+
+    def test_unknown_label_is_logged_and_ignored(self, caplog):
+        voices = self._single_model_voices()
+
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.compatibility"):
+            apply_tts_voice_labels(voices, {"alloyy": "Typo", "echo": "Echo"})
+
+        assert [voice.description for voice in voices] == ["alloy", "Echo"]
+        assert "unknown voice 'alloyy'" in caplog.text
+        assert "Available voices: ['alloy', 'echo']" in caplog.text
+
+    def test_labels_without_any_voices_are_logged_and_ignored(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.compatibility"):
+            apply_tts_voice_labels([], {"alloy": "Allie"})
+
+        assert "unknown voice 'alloy'" in caplog.text
