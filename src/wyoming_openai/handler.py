@@ -5,6 +5,7 @@ import io
 import logging
 import re
 import struct
+import unicodedata
 import wave
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from .utilities import (
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
+    get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_stt_extra_body,
@@ -70,6 +72,18 @@ def _normalize_for_comparison(text: str) -> str:
     return "".join(char for char in text.lower() if char.isalnum())
 
 
+# Symbols that are read aloud on their own ("plus", "and", "percent"), unlike punctuation or emoji
+_SPEAKABLE_SYMBOLS = frozenset("+=±×÷&@%#")
+
+
+def _has_speakable_content(text: str) -> bool:
+    """Check if text has anything to read aloud: a letter, a digit, or a symbol with a spoken name."""
+    return any(
+        char.isalnum() or char in _SPEAKABLE_SYMBOLS or unicodedata.category(char) == "Sc"  # Sc: currency
+        for char in text
+    )
+
+
 # A voice advertised next to other models, e.g. "alloy (gpt-4o-mini-tts)"
 _SUFFIXED_VOICE_NAME = re.compile(r"(?P<voice>.+) \((?P<model>[^()]+)\)")
 
@@ -90,7 +104,14 @@ class TtsStreamResult:
 
     streamed: bool
     audio: bytes | None = None
-    raw_pcm: bool = False  # Buffered audio is headerless PCM rather than a WAV file
+
+
+@dataclass(frozen=True)
+class TtsAudioFormat:
+    """How the audio bytes a voice's transport yields are framed."""
+
+    headerless: bool  # Raw PCM16 mono rather than a WAV file
+    rate: int  # Hz; for WAV only a fallback until the header is parsed
 
 
 class TtsStreamError(Exception):
@@ -228,6 +249,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
         self._synthesis_tasks: set[asyncio.Task[TtsStreamResult]] = set()  # Sentence tasks still running
         self._background_tasks: set[asyncio.Task[None]] = set()  # Cleanup that must not delay audio
+        self._warned_voice_fallbacks: set[str] = set()  # Requested names already warned about on this connection
 
     async def handle_event(self, event: Event) -> bool:
         """
@@ -286,16 +308,22 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def disconnect(self) -> None:
         """Clean up handler-owned realtime resources when the Wyoming client disconnects."""
-        await self._cancel_synthesis_tasks()
-        await self._cleanup_realtime_transcription()
-        await self._drain_background_tasks()
+        try:
+            await self._cancel_synthesis_tasks()
+            await self._cleanup_realtime_transcription()
+        finally:
+            # Closed before the drain so the client is not kept waiting on websocket closing handshakes
+            self.writer.close()
+            await self._drain_background_tasks()
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
-        await self._cancel_synthesis_tasks()
-        await self._cleanup_realtime_transcription()
-        await self._drain_background_tasks()
-        await super().stop()
+        try:
+            await self._cancel_synthesis_tasks()
+            await self._cleanup_realtime_transcription()
+        finally:
+            await super().stop()
+            await self._drain_background_tasks()
 
     async def _handle_select_program(self, select_program: SelectProgram) -> bool:
         """Handle select-program request pinning a program for this connection.
@@ -894,7 +922,13 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _is_tts_text_speakable(self, text: str, voice: TtsVoiceModel) -> bool:
         """Check if a voice's model can be given this text; Realtime models need something to read aloud."""
         # A conversational model handed only punctuation or emoji may improvise a reply instead of staying silent
-        return not self._is_tts_voice_realtime(voice) or bool(_normalize_for_comparison(text))
+        return not self._is_tts_voice_realtime(voice) or _has_speakable_content(text)
+
+    def _get_tts_audio_format(self, voice: TtsVoiceModel) -> TtsAudioFormat:
+        """Describe the audio bytes `_iter_tts_audio` yields for a voice."""
+        if self._is_tts_voice_realtime(voice):
+            return TtsAudioFormat(headerless=True, rate=REALTIME_AUDIO_RATE)
+        return TtsAudioFormat(headerless=self._get_tts_response_format() != "wav", rate=TTS_AUDIO_RATE)
 
     def _is_tts_voice_streaming(self, voice_name: str) -> bool:
         """Check if a TTS voice supports streaming synthesis.
@@ -1099,7 +1133,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         audio_data,
                         is_first_chunk=(not self._audio_started),
                         start_timestamp=self._current_timestamp,
-                        raw_pcm=result.raw_pcm,
+                        audio_format=self._get_tts_audio_format(voice),
                     )
 
                     if chunk_timestamp is None:
@@ -1245,13 +1279,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             return None
 
         # A model that is gone falls back to the speech API where possible rather than onto a Realtime model
-        candidates = [
-            [voice for voice in matches if voice.model_name == match["model"]],
-            [voice for voice in matches if not self._is_tts_voice_realtime(voice)],
-            matches,
-        ]
-        voice = next(group for group in candidates if group)[0]
-        _LOGGER.warning(
+        model_matches = [voice for voice in matches if voice.model_name == match["model"]]
+        voice = (model_matches or self._prefer_speech_api_voices(matches))[0]
+        _LOGGER.log(
+            self._get_voice_fallback_log_level(requested_voice),
             "Voice %s is no longer advertised under that name. Falling back to %s for backward compatibility. "
             "Update the client to use one of: %s",
             requested_voice,
@@ -1259,6 +1290,17 @@ class OpenAIEventHandler(AsyncEventHandler):
             [voice.name for voice in matches],
         )
         return voice
+
+    def _prefer_speech_api_voices(self, voices: list[TtsVoiceModel]) -> list[TtsVoiceModel]:
+        """Narrow voices a legacy name could mean to the speech API ones, so it never moves onto Realtime unasked."""
+        return [voice for voice in voices if not self._is_tts_voice_realtime(voice)] or voices
+
+    def _get_voice_fallback_log_level(self, requested_voice: str) -> int:
+        """Warn once per connection about a legacy voice name; a synthesis validates its voice several times."""
+        if requested_voice in self._warned_voice_fallbacks:
+            return logging.DEBUG
+        self._warned_voice_fallbacks.add(requested_voice)
+        return logging.WARNING
 
     def _get_backend_voice_name(self, voice: TtsVoice) -> str:
         """Get the raw backend voice identifier for synthesis requests."""
@@ -1315,7 +1357,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             if language_matches:
                 compatible_matches = language_matches
 
-        voice = compatible_matches[0]
+        voice = self._prefer_speech_api_voices(compatible_matches)[0]
         self._log_legacy_voice_fallback(requested_voice, voice, backend_matches)
         if not self._validate_tts_language(requested_language, voice):
             return None
@@ -1346,7 +1388,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     ) -> None:
         """Log when a legacy raw voice name falls back to a configured voice."""
         available = [voice.name for voice in matches]
-        _LOGGER.warning(
+        _LOGGER.log(
+            self._get_voice_fallback_log_level(requested_voice),
             "Voice %s matched multiple configured voices. Falling back to %s for backward compatibility. "
             "Update the client to use one of: %s",
             requested_voice,
@@ -1637,7 +1680,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         audio_data,
                         is_first_chunk=(i == 0),
                         start_timestamp=total_timestamp,
-                        raw_pcm=result.raw_pcm,
+                        audio_format=self._get_tts_audio_format(voice),
                     )
 
                     if chunk_timestamp is None:
@@ -1711,7 +1754,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 raise TtsStreamError("OpenAI returned empty audio response", chunk_preview, voice.name)
 
             _LOGGER.debug("Completed buffered synthesis for chunk: %s", chunk_preview)
-            return TtsStreamResult(streamed=False, audio=audio_data, raw_pcm=self._is_tts_voice_realtime(voice))
+            return TtsStreamResult(streamed=False, audio=audio_data)
 
         except TtsStreamError:
             raise
@@ -1750,8 +1793,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         extra_body = dict(self._tts_realtime_extra_body or {})
         audio_override = extra_body.pop("audio", None)
         audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
-        output_override = audio_override.pop("output", None)
-        output_override = dict(output_override) if isinstance(output_override, dict) else {}
+        audio_override.pop("output", None)
+        output_override = get_realtime_tts_audio_output(self._tts_realtime_extra_body)
         output_override.pop("speed", None)
 
         instructions = REALTIME_TTS_INSTRUCTIONS
@@ -1857,7 +1900,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
 
     async def _stream_audio_to_wyoming(
-        self, audio_data: bytes, is_first_chunk: bool, start_timestamp: float, raw_pcm: bool = False
+        self,
+        audio_data: bytes,
+        is_first_chunk: bool,
+        start_timestamp: float,
+        audio_format: TtsAudioFormat | None = None,
     ) -> float | None:
         """
         Stream audio data to Wyoming with proper timestamp calculation.
@@ -1866,13 +1913,15 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_data (bytes): Complete audio data to stream.
             is_first_chunk (bool): Whether this is the first chunk (sends AudioStart).
             start_timestamp (float): Starting timestamp for this chunk.
-            raw_pcm (bool): Whether the audio is known to be headerless 24 kHz PCM (Realtime transport).
+            audio_format (TtsAudioFormat | None): How the audio is framed, from `_get_tts_audio_format`.
+                Without it the audio is treated as a WAV file, falling back to PCM at the default rate.
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
         """
         try:
-            audio_rate = REALTIME_AUDIO_RATE if raw_pcm else TTS_AUDIO_RATE
+            raw_pcm = audio_format is not None and audio_format.headerless
+            audio_rate = audio_format.rate if audio_format is not None else TTS_AUDIO_RATE
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
             timestamp = start_timestamp
@@ -1974,12 +2023,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         audio_start_requested = send_audio_start
         timestamp = start_timestamp
         try:
-            # Realtime audio is always headerless PCM at the Realtime rate
-            is_realtime = self._is_tts_voice_realtime(voice)
-            audio_rate = REALTIME_AUDIO_RATE if is_realtime else TTS_AUDIO_RATE
+            audio_format = self._get_tts_audio_format(voice)
+            audio_rate = audio_format.rate
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
-            awaiting_wav_header = self._get_tts_response_format() == "wav" and not is_realtime
+            awaiting_wav_header = not audio_format.headerless
             wrote_audio = False
             declared_empty_wav = False
             pending_header = b""
@@ -1995,7 +2043,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                     await self.write_event(
                         AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
                     )
-                    send_audio_start = False
                 return timestamp
 
             async with self._tts_semaphore:
@@ -2017,7 +2064,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                                     pcm_size = f"{data_size} bytes"
                                 pending_header = b""
                                 awaiting_wav_header = False
-                                declared_empty_wav = data_size == 0
+                                declared_empty_wav = not data_size
                                 _LOGGER.debug(
                                     "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
                                     "header offset: %d, PCM size: %s",
@@ -2105,8 +2152,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             if not wrote_audio and not declared_empty_wav:
                 # Reporting success here would let callers close or continue an audio stream that never started.
-                # A WAV declaring zero samples is not a failure: the backend had nothing to say. One that
-                # declares samples and delivers none is truncated
+                # A WAV declaring zero samples, or an unknown length, is not a failure: the backend had nothing
+                # to say. One that declares samples and delivers none is truncated
                 _LOGGER.error("TTS backend returned no audio for: %s", _truncate_for_log(text, 50))
                 await self._stop_failed_tts_stream(audio_start_requested and not send_audio_start, timestamp)
                 return None

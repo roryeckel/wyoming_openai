@@ -1,6 +1,7 @@
 import argparse
 import html.entities
 import json
+import math
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
@@ -465,8 +466,11 @@ def validate_realtime_stt_extra_body(extra_body: dict[str, object] | None) -> No
         raise ValueError("STT Realtime extra_body does not support overriding 'model'; use STT_REALTIME_MODELS")
 
 
-# Session fields Realtime TTS relies on to get speech, and only speech, back
-REALTIME_TTS_FIXED_SESSION_FIELDS = frozenset(("type", "output_modalities", "tool_choice", "tools"))
+# Session fields Realtime TTS sets itself: the ones it relies on to get speech, and only speech, back,
+# the model the Wyoming client selected, and the read-aloud instructions
+REALTIME_TTS_FIXED_SESSION_FIELDS = frozenset(
+    ("type", "output_modalities", "tool_choice", "tools", "model", "instructions")
+)
 
 
 def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> None:
@@ -478,7 +482,8 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
     if fixed_fields:
         raise ValueError(
             f"TTS Realtime extra_body does not support overriding {', '.join(map(repr, fixed_fields))}; "
-            "the session has to stay audio-only speech"
+            "the session has to stay audio-only speech, the model comes from TTS_REALTIME_MODELS "
+            "and the delivery style from TTS_INSTRUCTIONS"
         )
 
     audio = extra_body.get("audio", {})
@@ -493,8 +498,10 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         )
 
     speed = output.get("speed")
-    if speed is not None and (isinstance(speed, bool) or not isinstance(speed, int | float)):
-        raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a number; got {speed!r}")
+    if speed is not None and (
+        isinstance(speed, bool) or not isinstance(speed, int | float) or not math.isfinite(speed)
+    ):
+        raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a finite number; got {speed!r}")
 
     if "format" not in output:
         return
@@ -520,7 +527,8 @@ def get_realtime_tts_audio_output(extra_body: dict[str, object] | None) -> dict[
 def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
     """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
     speed = get_realtime_tts_audio_output(extra_body).get("speed", tts_speed)
-    if isinstance(speed, bool) or not isinstance(speed, int | float):
+    if isinstance(speed, bool) or not isinstance(speed, int | float) or not math.isfinite(speed):
+        # A speed that is not a finite number cannot be clamped or serialized, so the default is used
         return None
     return speed
 

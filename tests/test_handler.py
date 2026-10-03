@@ -24,6 +24,7 @@ from wyoming_openai.compatibility import (
 )
 from wyoming_openai.handler import (
     OpenAIEventHandler,
+    TtsAudioFormat,
     TtsStreamError,
 )
 
@@ -3037,6 +3038,7 @@ def test_realtime_tts_session_clamps_speed_and_merges_realtime_extra_body(enhanc
     enhanced_handler._tts_speed = 3.0
     enhanced_handler._tts_instructions = None
     enhanced_handler._tts_extra_body = {"response_format": "pcm", "lang_code": "en"}
+    # Validation rejects `instructions`; the session builder still never lets it through
     enhanced_handler._tts_realtime_extra_body = {"reasoning": {"effort": "low"}, "instructions": "Answer the user"}
 
     session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
@@ -3150,8 +3152,15 @@ async def test_realtime_tts_abort_does_not_wait_for_websocket_close(enhanced_han
 
     assert result is False
     assert manager.connection.closed is False
+
+    # The Wyoming client is released before the closing handshake finishes
+    disconnect = asyncio.create_task(enhanced_handler.disconnect())
+    await asyncio.sleep(0.01)
+    enhanced_handler.writer.close.assert_called_once()
+    assert not disconnect.done()
+
     release_close.set()
-    await enhanced_handler.disconnect()
+    await disconnect
     assert manager.connection.closed is True
 
 
@@ -3180,14 +3189,16 @@ async def test_realtime_tts_fidelity_joins_transcript_parts(enhanced_handler, re
 
 @pytest.mark.asyncio
 async def test_buffered_realtime_tts_is_forwarded_as_raw_pcm(enhanced_handler, mock_info, realtime_tts):
-    """Test buffered Realtime audio is marked as headerless PCM and sent without WAV sniffing."""
+    """Test buffered Realtime audio is known to be headerless PCM and sent without WAV sniffing."""
     realtime_tts(_realtime_tts_events())
+    voice = mock_info.tts[0].voices[0]
 
-    result = await enhanced_handler._get_tts_audio_stream("Hello world", mock_info.tts[0].voices[0])
-    assert result.raw_pcm is True
+    result = await enhanced_handler._get_tts_audio_stream("Hello world", voice)
+    audio_format = enhanced_handler._get_tts_audio_format(voice)
+    assert audio_format == TtsAudioFormat(headerless=True, rate=24000)
 
     with patch.object(enhanced_handler, "_parse_wav_header") as parse_wav_header:
-        await enhanced_handler._stream_audio_to_wyoming(result.audio, True, 0, raw_pcm=result.raw_pcm)
+        await enhanced_handler._stream_audio_to_wyoming(result.audio, True, 0, audio_format=audio_format)
 
     parse_wav_header.assert_not_called()
     events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
@@ -3245,25 +3256,52 @@ def _header_only_wav():
     return wav_buffer.getvalue()
 
 
+def _unbounded_header_only_wav():
+    """Build a header-only WAV whose data size is the unknown-length sentinel streaming servers write."""
+    return _header_only_wav()[:-4] + struct.pack("<I", 0xFFFFFFFF)
+
+
 @pytest.mark.asyncio
-async def test_http_tts_header_only_wav_is_an_empty_success(enhanced_handler, mock_info, mock_clients):
+@pytest.mark.parametrize("header_only_wav", [_header_only_wav, _unbounded_header_only_wav])
+async def test_http_tts_header_only_wav_is_an_empty_success(enhanced_handler, mock_info, mock_clients, header_only_wav):
     """Test a WAV without samples is not a failure on the standalone, direct and buffered paths."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
 
-    _mock_speech_response(tts_client, [_header_only_wav()])
+    _mock_speech_response(tts_client, [header_only_wav()])
     assert await enhanced_handler.handle_event(
         Event(type="synthesize", data={"text": "...", "voice": {"name": "alloy"}})
     )
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
     assert event_types == ["audio-start", "audio-stop"]
 
-    _mock_speech_response(tts_client, [_header_only_wav()])
+    _mock_speech_response(tts_client, [header_only_wav()])
     assert await enhanced_handler._stream_tts_audio(voice, "...", send_audio_start=False, start_timestamp=5) == 5
 
-    _mock_speech_response(tts_client, [_header_only_wav()])
+    _mock_speech_response(tts_client, [header_only_wav()])
     result = await enhanced_handler._get_tts_audio_stream("...", voice)
     assert await enhanced_handler._stream_audio_to_wyoming(result.audio, False, 5) == 5
+
+
+@pytest.mark.asyncio
+async def test_buffered_http_pcm_is_forwarded_without_wav_sniffing(enhanced_handler, mock_info, mock_clients):
+    """Test the buffered path reads the format the direct path uses, so `response_format: pcm` is not sniffed."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    assert enhanced_handler._get_tts_audio_format(voice) == TtsAudioFormat(headerless=False, rate=24000)
+
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    audio_format = enhanced_handler._get_tts_audio_format(voice)
+    assert audio_format == TtsAudioFormat(headerless=True, rate=24000)
+
+    pcm = b"\x00\x01" * 240
+    _mock_speech_response(tts_client, [pcm])
+    result = await enhanced_handler._get_tts_audio_stream("Hello", voice)
+    with patch.object(enhanced_handler, "_parse_wav_header") as parse_wav_header:
+        assert await enhanced_handler._stream_audio_to_wyoming(result.audio, True, 0, audio_format=audio_format) == 10
+
+    parse_wav_header.assert_not_called()
+    assert enhanced_handler.write_event.call_args.args[0].payload == pcm
 
 
 @pytest.mark.asyncio
@@ -3321,6 +3359,31 @@ async def test_realtime_tts_skips_text_with_nothing_to_speak(enhanced_handler, m
     assert event_types == ["audio-start", "audio-stop"]
 
 
+@pytest.mark.parametrize(
+    ("text", "speakable"),
+    [
+        ("Hello", True),
+        ("42", True),
+        # Symbols with a spoken name are read aloud
+        ("+", True),
+        ("=", True),
+        ("&", True),
+        ("\u20ac", True),
+        # Punctuation and emoji are not
+        ("...", False),
+        ("\u2014 !?", False),
+        ("\U0001f642", False),
+    ],
+)
+def test_realtime_tts_speakable_text(enhanced_handler, mock_info, text, speakable):
+    """Test only text with nothing to read aloud is kept from a Realtime model."""
+    voice = mock_info.tts[0].voices[0]
+    assert enhanced_handler._is_tts_text_speakable(text, voice) is True
+
+    enhanced_handler._tts_realtime_models = {voice.model_name}
+    assert enhanced_handler._is_tts_text_speakable(text, voice) is speakable
+
+
 @pytest.mark.asyncio
 async def test_incremental_realtime_tts_skips_unspeakable_sentences(enhanced_handler, mock_info, realtime_tts):
     """Test unspeakable sentences are dropped from a streaming batch instead of aborting it."""
@@ -3352,9 +3415,11 @@ def test_suffixed_voice_name_resolves_after_models_change(enhanced_handler, mock
     """Test a "voice (model)" name from a multi-model setup still resolves once the suffix is gone."""
     with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
         voice = enhanced_handler._validate_tts_voice_and_language("alloy (gpt-4o-mini-tts)", None)
+        # A synthesis validates its voice several times; the warning is logged once per connection
+        assert enhanced_handler._validate_tts_voice_and_language("alloy (gpt-4o-mini-tts)", None) is voice
 
     assert voice is mock_info.tts[0].voices[0]
-    assert "no longer advertised" in caplog.text
+    assert caplog.text.count("no longer advertised") == 1
     assert enhanced_handler._validate_tts_voice_and_language("unknown (gpt-4o-mini-tts)", None) is None
 
 
@@ -3375,6 +3440,9 @@ def test_suffixed_voice_name_of_a_removed_model_prefers_the_speech_api(enhanced_
     enhanced_handler._tts_realtime_models = {REALTIME_TTS_MODEL}
 
     assert enhanced_handler._validate_tts_voice_and_language("alloy (tts-1-hd)", None) is speech_voice
+    # A plain name shared by both transports follows the same rule
+    speech_voice.name = "alloy (gpt-4o-mini-tts)"
+    assert enhanced_handler._validate_tts_voice_and_language("alloy", None) is speech_voice
 
 
 @pytest.mark.asyncio

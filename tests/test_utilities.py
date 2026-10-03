@@ -316,12 +316,16 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         ({"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}}, r"audio\.output\.format"),
         ({"audio": {"output": {"format": "pcm16"}}}, r"audio\.output\.format"),
         ({"audio": "pcm"}, "audio must be an object"),
-        ({"audio": {"output": {"speed": "fast"}}}, "speed must be a number"),
-        ({"audio": {"output": {"speed": True}}}, "speed must be a number"),
+        ({"audio": {"output": {"speed": "fast"}}}, "speed must be a finite number"),
+        ({"audio": {"output": {"speed": True}}}, "speed must be a finite number"),
+        ({"audio": {"output": {"speed": float("nan")}}}, "speed must be a finite number"),
         ({"audio": {"output": {"voice": "cedar"}}}, r"audio\.output\.voice"),
         ({"output_modalities": ["text"]}, "'output_modalities'"),
         ({"type": "transcription", "tools": []}, "'tools', 'type'"),
         ({"tool_choice": "required"}, "'tool_choice'"),
+        # The Wyoming client selects the model, and the read-aloud instructions are not replaceable
+        ({"model": "gpt-realtime"}, "'model'"),
+        ({"instructions": "Answer the user"}, "'instructions'.*TTS_INSTRUCTIONS"),
     ],
 )
 def test_validate_realtime_tts_extra_body_rejects_incompatible_overrides(extra_body, message):
@@ -344,6 +348,9 @@ def test_realtime_tts_speed_prefers_audio_output_override_and_clamps():
     assert get_realtime_tts_speed(1.2, None) == 1.2
     assert get_realtime_tts_speed(1.2, {"audio": {"output": {"speed": 0.5}}}) == 0.5
     assert get_realtime_tts_speed(1.2, {"audio": {"output": {"voice": "cedar"}}}) == 1.2
+    # A speed that is not a finite number is never sent
+    assert get_realtime_tts_speed(float("nan"), None) is None
+    assert get_realtime_tts_speed(float("inf"), None) is None
     assert clamp_realtime_tts_speed(3.0) == 1.5
     assert clamp_realtime_tts_speed(0.1) == 0.25
     assert clamp_realtime_tts_speed(1.0) == 1.0
