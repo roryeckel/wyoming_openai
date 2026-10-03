@@ -5,7 +5,7 @@ from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
 
-from .const import REALTIME_TTS_AUDIO_FORMAT
+from .const import REALTIME_TTS_AUDIO_FORMAT, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED
 
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
@@ -442,18 +442,18 @@ def validate_tts_extra_body(extra_body: dict[str, object] | None) -> None:
 
 
 def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> None:
-    """Validate TTS extra_body fields that are mapped onto a Realtime session's audio output."""
+    """Validate Realtime TTS extra_body fields that affect the audio Wyoming is told to expect."""
     if not extra_body:
         return
 
     audio = extra_body.get("audio", {})
     output = audio.get("output", {}) if isinstance(audio, dict) else None
     if not isinstance(output, dict):
-        raise ValueError("TTS extra_body audio must be an object whose output, if set, is an object")
+        raise ValueError("TTS Realtime extra_body audio must be an object whose output, if set, is an object")
 
-    for speed in (extra_body.get("speed"), output.get("speed")):
-        if speed is not None and (isinstance(speed, bool) or not isinstance(speed, int | float)):
-            raise ValueError(f"TTS extra_body speed must be a number for Realtime models; got {speed!r}")
+    speed = output.get("speed")
+    if speed is not None and (isinstance(speed, bool) or not isinstance(speed, int | float)):
+        raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a number; got {speed!r}")
 
     if "format" not in output:
         return
@@ -465,9 +465,23 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         return
 
     raise ValueError(
-        f"TTS extra_body audio.output.format must be {REALTIME_TTS_AUDIO_FORMAT!r} for Realtime models; "
-        f"got {audio_format!r}"
+        f"TTS Realtime extra_body audio.output.format must be {REALTIME_TTS_AUDIO_FORMAT!r}; got {audio_format!r}"
     )
+
+
+def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
+    """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
+    audio = (extra_body or {}).get("audio")
+    output = audio.get("output") if isinstance(audio, dict) else None
+    speed = output.get("speed", tts_speed) if isinstance(output, dict) else tts_speed
+    if isinstance(speed, bool) or not isinstance(speed, int | float):
+        return None
+    return speed
+
+
+def clamp_realtime_tts_speed(speed: float) -> float:
+    """Clamp a speed to the range the Realtime API accepts."""
+    return min(max(speed, REALTIME_TTS_MIN_SPEED), REALTIME_TTS_MAX_SPEED)
 
 
 class NamedBytesIO(BytesIO):

@@ -183,6 +183,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-extra-body`                      | `TTS_EXTRA_BODY`                           | None                                          | JSON object merged into the TTS request body via `extra_body` for backend-specific fields. Audio settings such as `response_format`, `speed`, and `instructions` may override top-level values, but `stream` and `stream_format` are rejected. |
 | `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `gpt-4o-mini-tts`) with up to three concurrent synthesis requests. |
 | `--tts-realtime-models`                 | `TTS_REALTIME_MODELS`                      | None                                          | Space-separated list of TTS models that synthesize over OpenAI's `/v1/realtime` API instead of `/v1/audio/speech` (e.g. `gpt-realtime-2.1-mini`). These are added to the TTS models and can also be listed in `TTS_STREAMING_MODELS`. Experimental; see [OpenAI Model Deprecations](#openai-model-deprecations). |
+| `--tts-realtime-extra-body`             | `TTS_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the Realtime session of `TTS_REALTIME_MODELS`, for example `{"reasoning": {"effort": "low"}}`. `TTS_EXTRA_BODY` is not applied to Realtime models. `audio.output.format` must remain 24 kHz `audio/pcm`. |
 | `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
 | `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
 
@@ -199,14 +200,16 @@ OpenAI has announced shutdown dates for most of its older audio models. This onl
 | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe-diarize` | February 26, 2027 | `gpt-transcribe` (`STT_MODELS` / `STT_STREAMING_MODELS`) or `gpt-live-transcribe` (`STT_REALTIME_MODELS`) |
 | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` snapshots | January 6, 2027 | `gpt-realtime-2.1-mini` (`TTS_REALTIME_MODELS`) |
 
-**Speech-to-text:** `gpt-transcribe` and `gpt-live-transcribe` take a `languages` list instead of the singular `language` field. On the official OpenAI backend the proxy sends the Wyoming request language as `languages` for these models. Additional hints can be passed with `STT_EXTRA_BODY`, for example `{"keywords": ["Wyoming"]}`.
+**Speech-to-text:** `gpt-transcribe` and `gpt-live-transcribe` take a `languages` list instead of the singular `language` field. On the official OpenAI backend the proxy sends the Wyoming request language as `languages` for these models. Additional hints can be passed with `STT_EXTRA_BODY`, for example `{"keywords": ["Wyoming"]}`; for `STT_REALTIME_MODELS` these fields are merged into the session's transcription settings.
 
 **Text-to-speech:** OpenAI's replacement is not available on `/v1/audio/speech`, so `TTS_REALTIME_MODELS` opens a `/v1/realtime` session per synthesis request instead. Things to know before switching:
 
 - Realtime models are conversational. The proxy instructs the model to read the text word for word, but this is not guaranteed; a warning is logged when the spoken transcript differs from the requested text.
-- The voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` and `cedar`. `fable`, `onyx` and `nova` are not available.
+- The voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` and `cedar`. `fable`, `onyx` and `nova` are not available, and are skipped for Realtime models when listed in `TTS_VOICES`.
 - `TTS_INSTRUCTIONS` is appended to the read-aloud instructions as a delivery style, and `TTS_SPEED` is capped at 1.5.
-- `TTS_EXTRA_BODY` is applied to the Realtime session, for example `{"reasoning": {"effort": "low"}}`. `speed` and `instructions` are mapped to their Realtime equivalents, `response_format` is ignored, and an `audio.output.format` other than 24 kHz `audio/pcm` causes a startup error.
+- `TTS_EXTRA_BODY` only applies to `/v1/audio/speech`. Use `TTS_REALTIME_EXTRA_BODY` for the Realtime session, for example `{"reasoning": {"effort": "low"}}`. An `audio.output.format` other than 24 kHz `audio/pcm` causes a startup error.
+- Voice names change with the number of TTS models. With one model a voice is advertised as `alloy`; with several, shared voices become `alloy (gpt-4o-mini-tts)` and `alloy (gpt-realtime-2.1-mini)`. Re-select the voice in your Wyoming client after adding or removing models.
+- A Realtime request that produces no audio, or stalls for 30 seconds, fails the synthesis.
 
 ```bash
 python -m wyoming_openai \

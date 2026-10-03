@@ -2938,13 +2938,17 @@ async def test_realtime_tts_buffered_stream_returns_pcm(enhanced_handler, mock_i
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "events",
+    ("events", "expected_event_types"),
     [
-        [_FakeRealtimeServerEvent("error", error={"message": "invalid voice"})],
-        _realtime_tts_events(status="failed"),
+        # A failure before any audio emits nothing
+        ([_FakeRealtimeServerEvent("error", error={"message": "invalid voice"})], []),
+        # Audio that was already started is terminated
+        (_realtime_tts_events(status="failed"), ["audio-start", "audio-chunk", "audio-stop"]),
+        # A completed response that never produced audio is a failure, not an empty success
+        ([_FakeRealtimeServerEvent("response.done", response=Mock(status="completed"))], []),
     ],
 )
-async def test_realtime_tts_failure_closes_connection(enhanced_handler, realtime_tts, events):
+async def test_realtime_tts_failure_closes_connection(enhanced_handler, realtime_tts, events, expected_event_types):
     """Test Realtime TTS errors fail the synthesis and still close the websocket."""
     _, manager = realtime_tts(events)
 
@@ -2954,9 +2958,7 @@ async def test_realtime_tts_failure_closes_connection(enhanced_handler, realtime
 
     assert result is False
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-    # Audio that was already started is terminated; a failure before any audio emits nothing
-    assert event_types in ([], ["audio-start", "audio-chunk", "audio-stop"])
-    assert event_types.count("audio-start") == event_types.count("audio-stop")
+    assert event_types == expected_event_types
     assert manager.exited is True
 
 
@@ -3013,35 +3015,27 @@ async def test_realtime_tts_warns_when_spoken_text_differs(
     assert ("differs from the request" in caplog.text) is expect_warning
 
 
-def test_realtime_tts_session_clamps_speed_and_merges_extra_body(enhanced_handler, mock_info):
-    """Test the Realtime session caps speed and takes extra_body overrides except response_format."""
+def test_realtime_tts_session_clamps_speed_and_merges_realtime_extra_body(enhanced_handler, mock_info):
+    """Test the Realtime session caps speed and takes only the Realtime extra_body."""
     enhanced_handler._tts_speed = 3.0
     enhanced_handler._tts_instructions = None
-    enhanced_handler._tts_extra_body = {"response_format": "pcm", "reasoning": {"effort": "low"}}
+    enhanced_handler._tts_extra_body = {"response_format": "pcm", "lang_code": "en"}
+    enhanced_handler._tts_realtime_extra_body = {"reasoning": {"effort": "low"}, "instructions": "Answer the user"}
 
     session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
 
     assert session["audio"]["output"]["speed"] == 1.5
     assert session["reasoning"] == {"effort": "low"}
+    # /v1/audio/speech fields never reach the session, and the read-aloud instructions are not replaceable
     assert "response_format" not in session
-    assert "Delivery style" not in session["instructions"]
-
-
-def test_realtime_tts_session_maps_speech_overrides_to_realtime_fields(enhanced_handler, mock_info):
-    """Test /v1/audio/speech style overrides land on their Realtime session fields."""
-    enhanced_handler._tts_extra_body = {"speed": 2.0, "instructions": "Whisper"}
-
-    session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
-
-    assert "speed" not in session
-    assert session["audio"]["output"]["speed"] == 1.5
+    assert "lang_code" not in session
     assert session["instructions"].startswith("You are a text-to-speech engine.")
-    assert session["instructions"].endswith("Delivery style: Whisper")
+    assert "Delivery style" not in session["instructions"]
 
 
 def test_realtime_tts_session_merges_audio_overrides_without_changing_format(enhanced_handler, mock_info):
     """Test audio overrides are merged into the session while the PCM output format is kept."""
-    enhanced_handler._tts_extra_body = {
+    enhanced_handler._tts_realtime_extra_body = {
         "audio": {"output": {"speed": 0.5, "voice": "cedar", "format": {"type": "audio/pcmu"}}},
     }
 
@@ -3065,5 +3059,117 @@ def test_handler_rejects_incompatible_realtime_audio_format(mock_info, mock_clie
             stt_client=stt_client,
             tts_client=tts_client,
             tts_realtime_models=["gpt-realtime-2.1-mini"],
-            tts_extra_body={"audio": {"output": {"format": {"type": "audio/pcmu"}}}},
+            tts_realtime_extra_body={"audio": {"output": {"format": {"type": "audio/pcmu"}}}},
         )
+
+
+@pytest.mark.asyncio
+async def test_incremental_realtime_tts_without_audio_never_starts_audio(enhanced_handler, mock_info, realtime_tts):
+    """Test a completed Realtime response with no audio aborts instead of streaming chunks without audio-start."""
+    mock_info.tts[0].supports_synthesize_streaming = True
+    realtime_tts([_FakeRealtimeServerEvent("response.done", response=Mock(status="completed"))])
+
+    await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+    result = await enhanced_handler.handle_event(SynthesizeChunk(text="First sentence. Second one.").event())
+
+    assert result is False
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["synthesize-stopped"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_tts_times_out_when_server_stalls(enhanced_handler, realtime_tts, monkeypatch):
+    """Test a Realtime server that stops sending events fails the synthesis instead of hanging."""
+    monkeypatch.setattr("wyoming_openai.handler.REALTIME_TTS_EVENT_TIMEOUT", 0.01)
+    _, manager = realtime_tts(_realtime_tts_events()[:1])
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": "Hello world", "voice": {"name": "alloy"}})
+    )
+
+    assert result is False
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-chunk", "audio-stop"]
+    assert manager.exited is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_tts_closes_websocket_when_client_write_fails(enhanced_handler, realtime_tts):
+    """Test the websocket is closed before the handler returns when the Wyoming client goes away mid-stream."""
+    _, manager = realtime_tts(_realtime_tts_events())
+    enhanced_handler.write_event = AsyncMock(side_effect=[None, ConnectionResetError("client gone"), None])
+
+    result = await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": "Hello world", "voice": {"name": "alloy"}})
+    )
+
+    assert result is False
+    assert manager.exited is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_tts_fidelity_joins_transcript_parts(enhanced_handler, realtime_tts, caplog):
+    """Test a response spoken in several transcript parts is compared as a whole."""
+    encoded = base64.b64encode(REALTIME_TTS_PCM).decode()
+    realtime_tts(
+        [
+            _FakeRealtimeServerEvent("response.output_audio.delta", delta=encoded),
+            _FakeRealtimeServerEvent("response.output_audio_transcript.delta", delta="Hello "),
+            _FakeRealtimeServerEvent("response.output_audio_transcript.done", transcript="Hello world."),
+            _FakeRealtimeServerEvent("response.output_audio_transcript.done", transcript="How are you?"),
+            _FakeRealtimeServerEvent("response.done", response=Mock(status="completed")),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        result = await enhanced_handler.handle_event(
+            Event(type="synthesize", data={"text": "Hello world. How are you?", "voice": {"name": "alloy"}})
+        )
+
+    assert result is True
+    assert "differs from the request" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_buffered_realtime_tts_is_forwarded_as_raw_pcm(enhanced_handler, mock_info, realtime_tts):
+    """Test buffered Realtime audio is marked as headerless PCM and sent without WAV sniffing."""
+    realtime_tts(_realtime_tts_events())
+
+    result = await enhanced_handler._get_tts_audio_stream("Hello world", mock_info.tts[0].voices[0])
+    assert result.raw_pcm is True
+
+    with patch.object(enhanced_handler, "_parse_wav_header") as parse_wav_header:
+        await enhanced_handler._stream_audio_to_wyoming(result.audio, True, 0, raw_pcm=result.raw_pcm)
+
+    parse_wav_header.assert_not_called()
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert [event.type for event in events] == ["audio-start", "audio-chunk"]
+    assert events[0].data["rate"] == 24000
+
+
+@pytest.mark.asyncio
+async def test_realtime_transcription_session_applies_stt_extra_body(enhanced_handler, mock_info, mock_clients):
+    """Test STT extra_body hints reach Realtime transcription sessions without HTTP-only fields."""
+    stt_client, _ = mock_clients
+    stt_client.backend = OpenAIBackend.OPENAI
+    mock_info.asr[0].models[0].name = "gpt-live-transcribe"
+    enhanced_handler._stt_realtime_models = {"gpt-live-transcribe"}
+    enhanced_handler._stt_extra_body = {
+        "language": "de",
+        "keywords": ["Wyoming"],
+        "stream": True,
+        "response_format": "json",
+    }
+
+    assert await enhanced_handler.handle_event(
+        Event(type="transcribe", data={"language": "en", "name": "gpt-live-transcribe"})
+    )
+
+    session = enhanced_handler._get_realtime_transcription_session()
+
+    assert session["audio"]["input"]["transcription"] == {
+        "model": "gpt-live-transcribe",
+        "languages": ["de"],
+        "prompt": "Test prompt",
+        "keywords": ["Wyoming"],
+    }

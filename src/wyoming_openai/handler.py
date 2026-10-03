@@ -36,15 +36,17 @@ from yasbd import BoundaryDetector, get_supported_langs
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
 from .const import (
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
+    REALTIME_AUDIO_RATE,
     REALTIME_TTS_AUDIO_FORMAT,
+    REALTIME_TTS_EVENT_TIMEOUT,
     REALTIME_TTS_INSTRUCTIONS,
-    REALTIME_TTS_MAX_SPEED,
-    REALTIME_TTS_MIN_SPEED,
 )
 from .utilities import (
     NamedBytesIO,
     SsmlTextTransformer,
+    clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
+    get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
@@ -61,17 +63,6 @@ def _truncate_for_log(text: str, max_length: int = 100) -> str:
     return text[:max_length] + "..."
 
 
-_WARNED_ONCE: set[str] = set()
-
-
-def _warn_once(key: str, message: str, *args: object) -> None:
-    """Log a warning the first time a key is seen (handlers are per-connection, so this is process-wide)."""
-    if key in _WARNED_ONCE:
-        return
-    _WARNED_ONCE.add(key)
-    _LOGGER.warning(message, *args)
-
-
 def _normalize_for_comparison(text: str) -> str:
     """Reduce text to lowercase alphanumerics for comparing requested and spoken text."""
     return "".join(char for char in text.lower() if char.isalnum())
@@ -80,7 +71,6 @@ def _normalize_for_comparison(text: str) -> str:
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
-REALTIME_AUDIO_RATE = 24000  # Hz (OpenAI Realtime audio/pcm requirement)
 REALTIME_AUDIO_WIDTH = 2  # 16-bit audio
 REALTIME_AUDIO_CHANNELS = 1  # Mono audio
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
@@ -95,6 +85,7 @@ class TtsStreamResult:
 
     streamed: bool
     audio: bytes | None = None
+    raw_pcm: bool = False  # Buffered audio is headerless PCM rather than a WAV file
 
 
 class TtsStreamError(Exception):
@@ -129,6 +120,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_instructions: str | None = None,
         tts_extra_body: dict[str, object] | None = None,
         tts_realtime_models: list[str] | set[str] | None = None,
+        tts_realtime_extra_body: dict[str, object] | None = None,
         tts_streaming_min_words: int | None = None,
         tts_streaming_max_chars: int | None = None,
         **kwargs,
@@ -149,6 +141,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_instructions (str | None): Optional instructions for TTS.
             tts_extra_body (dict[str, object] | None): Optional JSON body fields merged into TTS requests.
             tts_realtime_models (list[str] | set[str] | None): TTS models that synthesize over OpenAI Realtime.
+            tts_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime TTS sessions.
             tts_streaming_min_words (int | None): Minimum words per chunk for streaming TTS.
             tts_streaming_max_chars (int | None): Maximum characters per chunk for streaming TTS.
             Note: The caller owns the STT/TTS clients and is responsible for closing them.
@@ -175,10 +168,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._tts_instructions = tts_instructions
         self._tts_extra_body = dict(tts_extra_body) if tts_extra_body else None
         self._tts_realtime_models = set(tts_realtime_models or [])
+        self._tts_realtime_extra_body = dict(tts_realtime_extra_body) if tts_realtime_extra_body else None
         if self._has_tts_voices():
             validate_tts_extra_body(self._tts_extra_body)
             if self._tts_realtime_models:
-                validate_realtime_tts_extra_body(self._tts_extra_body)
+                validate_realtime_tts_extra_body(self._tts_realtime_extra_body)
         self._tts_streaming_min_words = tts_streaming_min_words
         self._tts_streaming_max_chars = tts_streaming_max_chars
 
@@ -482,14 +476,19 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not self._current_asr_model:
             raise RealtimeTranscriptionError("No ASR model set for realtime transcription")
 
+        language, extra_body = self._apply_plural_stt_languages(
+            self._current_asr_model.name, self._current_language, self._stt_extra_body
+        )
+        # These only describe the /v1/audio/transcriptions response
+        for field_name in ("stream", "response_format"):
+            extra_body.pop(field_name, None)
+
         transcription: dict[str, object] = {"model": self._current_asr_model.name}
-        if self._current_language is not None:
-            if self._uses_plural_stt_languages(self._current_asr_model.name):
-                transcription["languages"] = [self._current_language]
-            else:
-                transcription["language"] = self._current_language
+        if language is not None:
+            transcription["language"] = language
         if self._stt_prompt is not None:
             transcription["prompt"] = self._stt_prompt
+        transcription.update(extra_body)
 
         return {
             "type": "transcription",
@@ -711,15 +710,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                 body_name="STT",
             )
 
-            language = self._current_language
-            if self._uses_plural_stt_languages(self._current_asr_model.name):
-                # These models take `languages` (not yet typed by the SDK) and reject it alongside `language`,
-                # so a singular extra_body override is translated as well
-                extra_body = dict(extra_body or {})
-                language = extra_body.pop("language", language)
-                if language is not None:
-                    extra_body.setdefault("languages", [language])
-                    language = None
+            language, extra_body = self._apply_plural_stt_languages(
+                self._current_asr_model.name, self._current_language, extra_body
+            )
 
             transcription_kwargs = {
                 "file": self._wav_buffer,
@@ -855,6 +848,20 @@ class OpenAIEventHandler(AsyncEventHandler):
         if self._stt_client is None or self._stt_client.backend != OpenAIBackend.OPENAI:
             return False
         return model_name.startswith(OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES)
+
+    def _apply_plural_stt_languages(
+        self, model_name: str, language: str | None, extra_body: dict[str, object] | None
+    ) -> tuple[str | None, dict[str, object]]:
+        """Return the singular language to send and a copy of extra_body carrying `languages` where required."""
+        extra_body = dict(extra_body or {})
+        if self._uses_plural_stt_languages(model_name):
+            # These models take `languages` (not yet typed by the SDK) and reject it alongside `language`,
+            # so a singular extra_body override is translated as well
+            override = extra_body.pop("language", language)
+            if override is not None:
+                extra_body.setdefault("languages", [override])
+            return None, extra_body
+        return language, extra_body
 
     def _is_tts_voice_realtime(self, voice: TtsVoiceModel) -> bool:
         """Check if a TTS voice should be synthesized over OpenAI Realtime."""
@@ -1063,6 +1070,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         audio_data,
                         is_first_chunk=(not self._audio_started),
                         start_timestamp=self._current_timestamp,
+                        raw_pcm=result.raw_pcm,
                     )
 
                     if chunk_timestamp is None:
@@ -1523,6 +1531,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         audio_data,
                         is_first_chunk=(i == 0),
                         start_timestamp=total_timestamp,
+                        raw_pcm=result.raw_pcm,
                     )
 
                     if chunk_timestamp is None:
@@ -1596,7 +1605,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 raise TtsStreamError("OpenAI returned empty audio response", chunk_preview, voice.name)
 
             _LOGGER.debug("Completed buffered synthesis for chunk: %s", chunk_preview)
-            return TtsStreamResult(streamed=False, audio=audio_data)
+            return TtsStreamResult(streamed=False, audio=audio_data, raw_pcm=self._is_tts_voice_realtime(voice))
 
         except TtsStreamError:
             raise
@@ -1609,8 +1618,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         assert self._tts_client is not None
 
         if self._is_tts_voice_realtime(voice):
-            async for chunk in self._iter_realtime_tts_audio(text, voice):
-                yield chunk
+            # Closed explicitly so the websocket does not outlive a consumer that stops early
+            async with contextlib.aclosing(self._iter_realtime_tts_audio(text, voice)) as realtime_stream:
+                async for chunk in realtime_stream:
+                    yield chunk
             return
 
         request_kwargs = {
@@ -1630,21 +1641,16 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _get_realtime_tts_session(self, voice: TtsVoiceModel) -> dict[str, object]:
         """Build a Realtime session update payload that speaks text as PCM audio."""
-        # extra_body is written for /v1/audio/speech, so its audio settings are mapped onto
-        # their Realtime session fields instead of being merged at the top level
-        extra_body = dict(self._tts_extra_body or {})
-        extra_body.pop("response_format", None)
-        style = extra_body.pop("instructions", self._tts_instructions)
-        requested_speed = extra_body.pop("speed", self._tts_speed)
+        extra_body = dict(self._tts_realtime_extra_body or {})
         audio_override = extra_body.pop("audio", None)
         audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
         output_override = audio_override.pop("output", None)
         output_override = dict(output_override) if isinstance(output_override, dict) else {}
-        requested_speed = output_override.pop("speed", requested_speed)
+        output_override.pop("speed", None)
 
         instructions = REALTIME_TTS_INSTRUCTIONS
-        if style:
-            instructions = f"{instructions}\n\nDelivery style: {style}"
+        if self._tts_instructions:
+            instructions = f"{instructions}\n\nDelivery style: {self._tts_instructions}"
 
         audio_output: dict[str, object] = {
             "voice": self._get_backend_voice_name(voice),
@@ -1652,18 +1658,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Wyoming is told 24 kHz PCM16, so the output encoding is not overridable
             "format": dict(REALTIME_TTS_AUDIO_FORMAT),
         }
-        if isinstance(requested_speed, int | float) and not isinstance(requested_speed, bool):
-            speed = min(max(requested_speed, REALTIME_TTS_MIN_SPEED), REALTIME_TTS_MAX_SPEED)
-            if speed != requested_speed:
-                _warn_once(
-                    "realtime_tts_speed",
-                    "Realtime TTS speed must be between %s and %s; using %s instead of %s",
-                    REALTIME_TTS_MIN_SPEED,
-                    REALTIME_TTS_MAX_SPEED,
-                    speed,
-                    requested_speed,
-                )
-            audio_output["speed"] = speed
+        speed = get_realtime_tts_speed(self._tts_speed, self._tts_realtime_extra_body)
+        if speed is not None:
+            # An out-of-range speed is reported once at startup
+            audio_output["speed"] = clamp_realtime_tts_speed(speed)
 
         return {
             "type": "realtime",
@@ -1691,21 +1689,37 @@ class OpenAIEventHandler(AsyncEventHandler):
                 }
             )
 
-            spoken_text = ""
-            async for event in connection:
+            received_audio = False
+            spoken_parts: list[str] = []  # Transcripts of finished content parts
+            spoken_pending = ""  # Transcript deltas of the part still being spoken
+            events = aiter(connection)
+            while True:
+                try:
+                    event = await asyncio.wait_for(anext(events), REALTIME_TTS_EVENT_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as err:
+                    raise RealtimeSynthesisError(
+                        f"No Realtime event received for {REALTIME_TTS_EVENT_TIMEOUT:g} seconds during synthesis"
+                    ) from err
+
                 event_type = getattr(event, "type", "")
                 if event_type == "response.output_audio.delta":
                     if delta := getattr(event, "delta", ""):
+                        received_audio = True
                         yield base64.b64decode(delta)
                 elif event_type == "response.output_audio_transcript.delta":
-                    spoken_text += getattr(event, "delta", "") or ""
+                    spoken_pending += getattr(event, "delta", "") or ""
                 elif event_type == "response.output_audio_transcript.done":
-                    spoken_text = getattr(event, "transcript", "") or spoken_text
+                    spoken_parts.append(getattr(event, "transcript", "") or spoken_pending)
+                    spoken_pending = ""
                 elif event_type == "response.done":
                     status = getattr(getattr(event, "response", None), "status", None)
                     if status not in (None, "completed"):
                         raise RealtimeSynthesisError(f"Realtime response ended with status {status}")
-                    self._check_realtime_tts_fidelity(text, spoken_text)
+                    if not received_audio:
+                        raise RealtimeSynthesisError("Realtime response completed without any audio")
+                    self._check_realtime_tts_fidelity(text, " ".join([*spoken_parts, spoken_pending]))
                     return
                 elif event_type == "error":
                     raise RealtimeSynthesisError(self._get_realtime_event_error_message(event))
@@ -1716,7 +1730,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _check_realtime_tts_fidelity(self, text: str, spoken_text: str) -> None:
         """Warn when a Realtime model spoke something other than the requested text."""
-        if spoken_text and _normalize_for_comparison(spoken_text) != _normalize_for_comparison(text):
+        if spoken_text.strip() and _normalize_for_comparison(spoken_text) != _normalize_for_comparison(text):
             _LOGGER.warning(
                 "Realtime TTS spoke text that differs from the request. Requested: %s | Spoken: %s",
                 _truncate_for_log(text),
@@ -1724,7 +1738,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
 
     async def _stream_audio_to_wyoming(
-        self, audio_data: bytes, is_first_chunk: bool, start_timestamp: float
+        self, audio_data: bytes, is_first_chunk: bool, start_timestamp: float, raw_pcm: bool = False
     ) -> float | None:
         """
         Stream audio data to Wyoming with proper timestamp calculation.
@@ -1733,18 +1747,19 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_data (bytes): Complete audio data to stream.
             is_first_chunk (bool): Whether this is the first chunk (sends AudioStart).
             start_timestamp (float): Starting timestamp for this chunk.
+            raw_pcm (bool): Whether the audio is known to be headerless 24 kHz PCM (Realtime transport).
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
         """
         try:
-            audio_rate = TTS_AUDIO_RATE
+            audio_rate = REALTIME_AUDIO_RATE if raw_pcm else TTS_AUDIO_RATE
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
             timestamp = start_timestamp
 
             # Try to parse WAV header
-            wav_params = self._parse_wav_header(audio_data)
+            wav_params = None if raw_pcm else self._parse_wav_header(audio_data)
             if wav_params:
                 audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
                 available_audio = audio_data[data_offset:]
@@ -1769,7 +1784,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     data_offset,
                     pcm_size,
                 )
-            else:
+            elif not raw_pcm:
                 _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
 
             # Send audio start if requested
@@ -1839,11 +1854,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         audio_start_requested = send_audio_start
         timestamp = start_timestamp
         try:
-            audio_rate = TTS_AUDIO_RATE
+            # Realtime audio is always headerless PCM at the Realtime rate
+            is_realtime = self._is_tts_voice_realtime(voice)
+            audio_rate = REALTIME_AUDIO_RATE if is_realtime else TTS_AUDIO_RATE
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
-            # Realtime audio is always headerless PCM
-            awaiting_wav_header = self._get_tts_response_format() == "wav" and not self._is_tts_voice_realtime(voice)
+            awaiting_wav_header = self._get_tts_response_format() == "wav" and not is_realtime
+            wrote_audio = False
             pending_header = b""
             remaining_wav_data: int | None = None
 
@@ -1918,6 +1935,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                                 audio_width=audio_width,
                                 audio_channels=audio_channels,
                             )
+                            wrote_audio = True
 
             if remaining_wav_data:
                 _LOGGER.warning(
@@ -1933,6 +1951,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     await self.write_event(
                         AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
                     )
+                    send_audio_start = False
 
                 await self.write_event(
                     AudioChunk(
@@ -1950,6 +1969,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                     audio_width=audio_width,
                     audio_channels=audio_channels,
                 )
+                wrote_audio = True
+
+            if not wrote_audio:
+                # Reporting success here would let callers close or continue an audio stream that never started
+                raise TtsStreamError("TTS backend returned no audio", _truncate_for_log(text, 50), voice.name)
 
             return timestamp
 

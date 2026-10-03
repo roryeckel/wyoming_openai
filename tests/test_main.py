@@ -448,3 +448,91 @@ async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
 
     assert listed["args"][0] == ["gpt-realtime-2.1-mini"]
     assert listed["kwargs"]["realtime_model_names"] == ["gpt-realtime-2.1-mini"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "expected_voices", "expect_backend_warning"),
+    [
+        (main_module.OpenAIBackend.OPENAI, ["alloy"], False),
+        (main_module.OpenAIBackend.SPEACHES, ["alloy", "fable"], True),
+    ],
+)
+async def test_main_realtime_tts_voice_filter_and_warnings(
+    monkeypatch, caplog, backend, expected_voices, expect_backend_warning
+):
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        client = _FakeClient()
+        client.backend = backend
+        return client
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in (
+        "STT_MODELS",
+        "STT_STREAMING_MODELS",
+        "STT_REALTIME_MODELS",
+        "TTS_MODELS",
+        "TTS_STREAMING_MODELS",
+        "TTS_VOICES",
+        "TTS_BACKEND",
+        "TTS_EXTRA_BODY",
+        "TTS_REALTIME_EXTRA_BODY",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--tts-realtime-models",
+            "gpt-realtime-2.1-mini",
+            "--tts-voices",
+            "alloy",
+            "fable",
+            "--tts-speed",
+            "3.0",
+            "--tts-extra-body",
+            '{"lang_code":"en"}',
+            "--tts-realtime-extra-body",
+            '{"reasoning":{"effort":"low"}}',
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        await main()
+
+    handler = server.handlers[0]
+    assert [voice.name for voice in handler._wyoming_info.tts[0].voices] == expected_voices
+    assert handler._tts_extra_body == {"lang_code": "en"}
+    assert handler._tts_realtime_extra_body == {"reasoning": {"effort": "low"}}
+    assert "Realtime TTS speed must be between" in caplog.text
+    assert ("must implement /v1/realtime" in caplog.text) is expect_backend_warning
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_incompatible_realtime_extra_body(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--tts-realtime-models",
+            "gpt-realtime-2.1-mini",
+            "--tts-realtime-extra-body",
+            '{"audio":{"output":{"format":{"type":"audio/pcmu"}}}}',
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "audio.output.format" in capsys.readouterr().err

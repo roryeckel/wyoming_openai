@@ -95,7 +95,7 @@ The server accepts both command-line arguments and environment variables. Key co
 - Model lists for STT and TTS
 - Voice configurations
 - Backend-specific settings (temperature, speed, etc.)
-- STT/TTS extra request body fields (`--stt-extra-body` / `--tts-extra-body`)
+- STT/TTS extra request body fields (`--stt-extra-body` / `--tts-extra-body` / `--tts-realtime-extra-body`)
 - Realtime transports for OpenAI models (`--stt-realtime-models` / `--tts-realtime-models`)
 
 ## Testing Strategy

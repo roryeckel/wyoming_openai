@@ -12,6 +12,7 @@ from .const import (
     ATTRIBUTION_NAME_PROGRAM_STREAMING,
     ATTRIBUTION_URL,
     DEFAULT_OPENAI_BASE_URL,
+    OPENAI_REALTIME_TTS_VOICES,
     __version__,
 )
 
@@ -221,7 +222,12 @@ def create_asr_programs(
 
 
 def create_tts_voices(
-    tts_models: list[str], tts_streaming_models: list[str], tts_voices: list[str], tts_url: str, languages: list[str]
+    tts_models: list[str],
+    tts_streaming_models: list[str],
+    tts_voices: list[str],
+    tts_url: str,
+    languages: list[str],
+    openai_realtime_models: list[str] | None = None,
 ) -> list[TtsVoiceModel]:
     """
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
@@ -233,12 +239,26 @@ def create_tts_voices(
         tts_voices (list[str]): A list of voice identifiers.
         tts_url (str): The URL for the TTS service attribution.
         languages (list[str]): A list of supported languages.
+        openai_realtime_models (list[str] | None): Models that synthesize over OpenAI's Realtime API,
+            which only get the configured voices the Realtime API offers.
 
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
     """
     ordered_models = _get_ordered_unique_models(tts_models, tts_streaming_models)
-    model_voice_pairs = [(model_name, voice_name) for model_name in ordered_models for voice_name in tts_voices]
+    realtime_models = set(openai_realtime_models or [])
+    realtime_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_REALTIME_TTS_VOICES]
+    if realtime_models and len(realtime_voices) < len(tts_voices):
+        _LOGGER.warning(
+            "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
+            [voice_name for voice_name in tts_voices if voice_name not in OPENAI_REALTIME_TTS_VOICES],
+        )
+
+    model_voice_pairs = [
+        (model_name, voice_name)
+        for model_name in ordered_models
+        for voice_name in (realtime_voices if model_name in realtime_models else tts_voices)
+    ]
     return _create_tts_voice_models(model_voice_pairs, tts_url, languages)
 
 
@@ -450,7 +470,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         Voices for models that synthesize over the Realtime API, hard-coded.
         https://platform.openai.com/docs/guides/realtime-conversations
         """
-        return ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+        return list(OPENAI_REALTIME_TTS_VOICES)
 
     # Kokoro-FastAPI
 

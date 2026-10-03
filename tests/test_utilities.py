@@ -7,9 +7,11 @@ import pytest
 from wyoming_openai.utilities import (
     NamedBytesIO,
     SsmlTextTransformer,
+    clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
+    get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
@@ -295,7 +297,7 @@ def test_get_extra_body_boolean_field_returns_default_or_override():
     "extra_body",
     [
         None,
-        {"speed": 1.2, "response_format": "pcm", "reasoning": {"effort": "low"}},
+        {"reasoning": {"effort": "low"}},
         {"audio": {"output": {"format": {"type": "audio/pcm"}, "speed": 1}}},
         {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}}},
     ],
@@ -312,7 +314,7 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         ({"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}}, r"audio\.output\.format"),
         ({"audio": {"output": {"format": "pcm16"}}}, r"audio\.output\.format"),
         ({"audio": "pcm"}, "audio must be an object"),
-        ({"speed": "fast"}, "speed must be a number"),
+        ({"audio": {"output": {"speed": "fast"}}}, "speed must be a number"),
         ({"audio": {"output": {"speed": True}}}, "speed must be a number"),
     ],
 )
@@ -320,3 +322,14 @@ def test_validate_realtime_tts_extra_body_rejects_incompatible_overrides(extra_b
     """Realtime TTS rejects overrides that would change the audio Wyoming is told to expect."""
     with pytest.raises(ValueError, match=message):
         validate_realtime_tts_extra_body(extra_body)
+
+
+def test_realtime_tts_speed_prefers_audio_output_override_and_clamps():
+    """The Realtime speed comes from audio.output.speed, then the TTS speed, and is kept in range."""
+    assert get_realtime_tts_speed(None, None) is None
+    assert get_realtime_tts_speed(1.2, None) == 1.2
+    assert get_realtime_tts_speed(1.2, {"audio": {"output": {"speed": 0.5}}}) == 0.5
+    assert get_realtime_tts_speed(1.2, {"audio": {"output": {"voice": "cedar"}}}) == 1.2
+    assert clamp_realtime_tts_speed(3.0) == 1.5
+    assert clamp_realtime_tts_speed(0.1) == 0.25
+    assert clamp_realtime_tts_speed(1.0) == 1.0

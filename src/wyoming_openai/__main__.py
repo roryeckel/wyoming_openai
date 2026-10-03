@@ -17,11 +17,13 @@ from .compatibility import (
     create_tts_voices,
     tts_voice_to_string,
 )
-from .const import DEFAULT_OPENAI_BASE_URL, __version__
+from .const import DEFAULT_OPENAI_BASE_URL, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED, __version__
 from .handler import OpenAIEventHandler
 from .utilities import (
+    clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
+    get_realtime_tts_speed,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
@@ -50,6 +52,7 @@ async def main():
     backend_parser = create_enum_parser(OpenAIBackend)
     stt_extra_body_parser = create_json_object_parser("STT extra body")
     tts_extra_body_parser = create_json_object_parser("TTS extra body")
+    tts_realtime_extra_body_parser = create_json_object_parser("TTS Realtime extra body")
 
     stt_backend_env = os.getenv("STT_BACKEND")
     stt_backend_default = None
@@ -80,6 +83,14 @@ async def main():
     if tts_extra_body_env:
         try:
             tts_extra_body_default = tts_extra_body_parser(tts_extra_body_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+
+    tts_realtime_extra_body_env = os.getenv("TTS_REALTIME_EXTRA_BODY")
+    tts_realtime_extra_body_default = None
+    if tts_realtime_extra_body_env:
+        try:
+            tts_realtime_extra_body_default = tts_realtime_extra_body_parser(tts_realtime_extra_body_env)
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
@@ -228,6 +239,16 @@ async def main():
         ),
     )
     parser.add_argument(
+        "--tts-realtime-extra-body",
+        type=tts_realtime_extra_body_parser,
+        default=tts_realtime_extra_body_default,
+        help=(
+            "Optional JSON object merged into the Realtime session of --tts-realtime-models "
+            "(--tts-extra-body only applies to /v1/audio/speech). "
+            "'audio.output.format' must remain 24 kHz 'audio/pcm'"
+        ),
+    )
+    parser.add_argument(
         "--tts-streaming-min-words",
         type=int,
         default=int(_v) if (_v := os.getenv("TTS_STREAMING_MIN_WORDS")) else None,
@@ -254,7 +275,7 @@ async def main():
         if tts_requested and args.tts_voices:
             validate_tts_extra_body(args.tts_extra_body)
         if args.tts_realtime_models:
-            validate_realtime_tts_extra_body(args.tts_extra_body)
+            validate_realtime_tts_extra_body(args.tts_realtime_extra_body)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -296,6 +317,28 @@ async def main():
         if tts_client is not None:
             tts_client = await exit_stack.enter_async_context(tts_client)
 
+        openai_realtime_tts_models: list[str] = []
+        if args.tts_realtime_models and tts_client is not None:
+            if tts_client.backend == OpenAIBackend.OPENAI:
+                openai_realtime_tts_models = args.tts_realtime_models
+            else:
+                _logger.warning(
+                    "TTS Realtime models are written for the official OpenAI Realtime API; "
+                    "the %s backend must implement /v1/realtime the same way for %s to work",
+                    tts_client.backend,
+                    args.tts_realtime_models,
+                )
+
+            realtime_speed = get_realtime_tts_speed(args.tts_speed, args.tts_realtime_extra_body)
+            if realtime_speed is not None and clamp_realtime_tts_speed(realtime_speed) != realtime_speed:
+                _logger.warning(
+                    "Realtime TTS speed must be between %s and %s; using %s instead of %s",
+                    REALTIME_TTS_MIN_SPEED,
+                    REALTIME_TTS_MAX_SPEED,
+                    clamp_realtime_tts_speed(realtime_speed),
+                    realtime_speed,
+                )
+
         asr_programs = (
             create_asr_programs(
                 args.stt_models,
@@ -313,7 +356,12 @@ async def main():
         elif args.tts_voices:
             # If TTS_VOICES is set, use that
             tts_voices = create_tts_voices(
-                tts_models, args.tts_streaming_models, args.tts_voices, args.tts_openai_url, args.languages
+                tts_models,
+                args.tts_streaming_models,
+                args.tts_voices,
+                args.tts_openai_url,
+                args.languages,
+                openai_realtime_models=openai_realtime_tts_models,
             )
         else:
             # Otherwise, list supported voices via backend (with streaming fallback)
@@ -417,6 +465,7 @@ async def main():
                 stt_realtime_models=args.stt_realtime_models,
                 tts_extra_body=args.tts_extra_body,
                 tts_realtime_models=args.tts_realtime_models,
+                tts_realtime_extra_body=args.tts_realtime_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
             )
