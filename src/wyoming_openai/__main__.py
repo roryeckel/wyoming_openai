@@ -151,13 +151,13 @@ async def main():
         "--stt-streaming-models",
         nargs="+",
         default=os.getenv("STT_STREAMING_MODELS", "").split(),
-        help="Space-separated list of STT model names that support streaming (e.g. gpt-4o-transcribe)",
+        help="Space-separated list of STT model names that support streaming (e.g. gpt-transcribe)",
     )
     parser.add_argument(
         "--stt-realtime-models",
         nargs="+",
         default=os.getenv("STT_REALTIME_MODELS", "").split(),
-        help="Space-separated list of STT model names that use Realtime transcription (e.g. gpt-realtime-whisper)",
+        help="Space-separated list of STT model names that use Realtime transcription (e.g. gpt-live-transcribe)",
     )
 
     # TTS configuration
@@ -215,7 +215,16 @@ async def main():
         "--tts-streaming-models",
         nargs="+",
         default=os.getenv("TTS_STREAMING_MODELS", "").split(),
-        help="Space-separated list of TTS model names that support streaming synthesis (e.g. tts-1)",
+        help="Space-separated list of TTS model names that support streaming synthesis (e.g. gpt-4o-mini-tts)",
+    )
+    parser.add_argument(
+        "--tts-realtime-models",
+        nargs="+",
+        default=os.getenv("TTS_REALTIME_MODELS", "").split(),
+        help=(
+            "Space-separated list of TTS model names that synthesize over the Realtime API "
+            "instead of /v1/audio/speech (e.g. gpt-realtime-2.1-mini)"
+        ),
     )
     parser.add_argument(
         "--tts-streaming-min-words",
@@ -233,7 +242,9 @@ async def main():
     args = parser.parse_args()
 
     stt_requested = bool(args.stt_models or args.stt_streaming_models or args.stt_realtime_models)
-    tts_requested = bool(args.tts_models or args.tts_streaming_models)
+    # Realtime models only select a transport, so they are regular TTS models too
+    tts_models = list(dict.fromkeys([*args.tts_models, *args.tts_realtime_models]))
+    tts_requested = bool(tts_models or args.tts_streaming_models)
     tts_validation_deferred = tts_requested and not args.tts_voices
 
     try:
@@ -299,13 +310,16 @@ async def main():
         elif args.tts_voices:
             # If TTS_VOICES is set, use that
             tts_voices = create_tts_voices(
-                args.tts_models, args.tts_streaming_models, args.tts_voices, args.tts_openai_url, args.languages
+                tts_models, args.tts_streaming_models, args.tts_voices, args.tts_openai_url, args.languages
             )
         else:
             # Otherwise, list supported voices via backend (with streaming fallback)
             assert tts_client is not None
             tts_voices = await tts_client.list_supported_voices(
-                args.tts_models, args.tts_streaming_models, args.languages
+                tts_models,
+                args.tts_streaming_models,
+                args.languages,
+                realtime_model_names=args.tts_realtime_models,
             )
 
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
@@ -399,6 +413,7 @@ async def main():
                 stt_extra_body=args.stt_extra_body,
                 stt_realtime_models=args.stt_realtime_models,
                 tts_extra_body=args.tts_extra_body,
+                tts_realtime_models=args.tts_realtime_models,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
             )

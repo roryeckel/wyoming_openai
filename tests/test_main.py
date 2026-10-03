@@ -406,3 +406,45 @@ async def test_main_configures_realtime_stt_models(monkeypatch):
     assert handler._stt_client is not None
     assert handler._tts_client is None
     assert handler._stt_realtime_models == {"gpt-realtime-whisper"}
+
+
+@pytest.mark.asyncio
+async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
+    server = _CapturingServer()
+    listed = {}
+
+    class _VoiceListingClient(_FakeClient):
+        async def list_supported_voices(self, *args, **kwargs):
+            listed["args"] = args
+            listed["kwargs"] = kwargs
+            return []
+
+    async def fake_factory(*args, **kwargs):
+        return _VoiceListingClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(
+        main_module.AsyncServer,
+        "from_uri",
+        staticmethod(lambda uri: server),
+    )
+    for env_var in ("STT_MODELS", "STT_STREAMING_MODELS", "STT_REALTIME_MODELS", "TTS_MODELS", "TTS_VOICES"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--tts-realtime-models",
+            "gpt-realtime-2.1-mini",
+        ],
+    )
+
+    await main()
+
+    assert listed["args"][0] == ["gpt-realtime-2.1-mini"]
+    assert listed["kwargs"]["realtime_model_names"] == ["gpt-realtime-2.1-mini"]

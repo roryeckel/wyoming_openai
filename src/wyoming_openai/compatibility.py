@@ -445,6 +445,13 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         return ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"]
 
+    async def list_openai_realtime_voices(self) -> list[str]:
+        """
+        Voices for models that synthesize over the Realtime API, hard-coded.
+        https://platform.openai.com/docs/guides/realtime-conversations
+        """
+        return ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+
     # Kokoro-FastAPI
 
     async def _is_kokoro_fastapi(self) -> bool:
@@ -566,18 +573,26 @@ class CustomAsyncOpenAI(AsyncOpenAI):
     # Unified API
 
     async def list_supported_voices(
-        self, model_names: list[str], streaming_model_names: list[str], languages: list[str]
+        self,
+        model_names: list[str],
+        streaming_model_names: list[str],
+        languages: list[str],
+        realtime_model_names: list[str] | None = None,
     ) -> list[TtsVoiceModel]:
         """
         Fetches the available voices via unofficial specs with streaming model fallback (consistent with ASR behavior).
         Uses streaming models if regular models not specified.
+        Models in realtime_model_names get the Realtime API voice set on the official OpenAI backend.
         Note: this is not the list of CONFIGURED voices.
         """
         ordered_models = _get_ordered_unique_models(model_names, streaming_model_names)
+        realtime_models = set(realtime_model_names or [])
 
         model_voice_pairs: list[tuple[str, str]] = []
         for model_name in ordered_models:
-            if self.backend == OpenAIBackend.OPENAI:
+            if self.backend == OpenAIBackend.OPENAI and model_name in realtime_models:
+                tts_voices = await self.list_openai_realtime_voices()
+            elif self.backend == OpenAIBackend.OPENAI:
                 tts_voices = await self.list_openai_voices()
             elif self.backend == OpenAIBackend.SPEACHES:
                 tts_voices = await self._list_speaches_voices(model_name)

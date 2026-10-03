@@ -296,6 +296,24 @@ class TestCustomAsyncOpenAI:
         assert {v.name for v in alloy_voices} == {"alloy (tts-1)", "alloy (tts-1-hd)"}
 
     @pytest.mark.asyncio
+    async def test_list_supported_voices_openai_realtime_models(self):
+        """Test Realtime TTS models get the Realtime voice set on the OpenAI backend."""
+        custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.OPENAI)
+
+        voices = await custom_client.list_supported_voices(
+            ["gpt-4o-mini-tts", "gpt-realtime-2.1-mini"],
+            [],
+            ["en"],
+            realtime_model_names=["gpt-realtime-2.1-mini"],
+        )
+
+        realtime_voices = {v.backend_voice_name for v in voices if v.model_name == "gpt-realtime-2.1-mini"}
+        speech_voices = {v.backend_voice_name for v in voices if v.model_name == "gpt-4o-mini-tts"}
+        assert {"marin", "cedar"} <= realtime_voices
+        assert not {"fable", "onyx", "nova"} & realtime_voices
+        assert {"fable", "onyx", "nova"} <= speech_voices
+
+    @pytest.mark.asyncio
     async def test_list_supported_voices_speaches(self):
         """Test listing supported voices for Speaches backend."""
         custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.SPEACHES)
