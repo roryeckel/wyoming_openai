@@ -252,7 +252,9 @@ def apply_tts_voice_labels(tts_voices: list[TtsVoiceModel], voice_labels: Mappin
 
     A label is looked up by the public voice name first (for example "alloy (tts-1)") and then by the raw backend
     voice name (for example "alloy"). One label can therefore cover a voice offered by several models while a
-    more specific label can still tell them apart. Labels that match no voice are logged and ignored.
+    more specific label can still tell them apart. A label found by the backend voice name keeps the suffix that
+    tells the public names apart (for example "Allie (tts-1)"), so the voices stay distinguishable. Labels that
+    match no voice are logged and ignored.
 
     Args:
         tts_voices (list[TtsVoiceModel]): Voices to update in place.
@@ -261,14 +263,23 @@ def apply_tts_voice_labels(tts_voices: list[TtsVoiceModel], voice_labels: Mappin
     known_names: set[str] = set()
     for voice in tts_voices:
         known_names.update((voice.name, voice.backend_voice_name))
-        for key in (voice.name, voice.backend_voice_name):
-            if key in voice_labels:
-                voice.description = voice_labels[key]
-                break
+        if voice.name in voice_labels:
+            voice.description = voice_labels[voice.name]
+        elif voice.backend_voice_name in voice_labels:
+            suffix = (
+                voice.name.removeprefix(voice.backend_voice_name)
+                if voice.name.startswith(voice.backend_voice_name)
+                else ""
+            )
+            voice.description = voice_labels[voice.backend_voice_name] + suffix
 
     for key in voice_labels:
         if key not in known_names:
-            _LOGGER.warning("Ignoring TTS voice label for unknown voice '%s'", key)
+            _LOGGER.warning(
+                "Ignoring TTS voice label for unknown voice '%s'. Available voices: %s",
+                key,
+                sorted(voice.name for voice in tts_voices),
+            )
 
 
 def create_tts_programs(

@@ -218,7 +218,19 @@ async def _advertised_tts_voices(monkeypatch, client, *cli_args):
         "from_uri",
         staticmethod(lambda uri: server),
     )
-    for env_var in ("STT_MODELS", "STT_STREAMING_MODELS", "STT_REALTIME_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES"):
+    for env_var in (
+        "STT_MODELS",
+        "STT_STREAMING_MODELS",
+        "STT_REALTIME_MODELS",
+        "STT_BACKEND",
+        "STT_EXTRA_BODY",
+        "TTS_MODELS",
+        "TTS_STREAMING_MODELS",
+        "TTS_VOICES",
+        "TTS_BACKEND",
+        "TTS_EXTRA_BODY",
+        "TTS_CONCURRENT_REQUESTS",
+    ):
         monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-models", "tts-1", *cli_args])
 

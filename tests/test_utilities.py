@@ -267,7 +267,7 @@ def test_create_json_object_parser_rejects_non_object():
 
 def test_parse_voice_labels_returns_trimmed_labels_by_voice_name():
     """Test that voice labels are parsed from a JSON object and surrounding whitespace is dropped."""
-    assert parse_voice_labels('{"af_heart": " Heart ", "af_bella": "Bella (warm)"}') == {
+    assert parse_voice_labels('{" af_heart ": " Heart ", "af_bella": "Bella (warm)"}') == {
         "af_heart": "Heart",
         "af_bella": "Bella (warm)",
     }
@@ -281,6 +281,7 @@ def test_parse_voice_labels_returns_trimmed_labels_by_voice_name():
         ('{"af_heart": 3}', "label for 'af_heart' must be a non-empty string"),
         ('{"af_heart": null}', "label for 'af_heart' must be a non-empty string"),
         ('{"af_heart": "  "}', "label for 'af_heart' must be a non-empty string"),
+        ('{"  ": "Heart"}', "voice names must be non-empty strings"),
     ],
 )
 def test_parse_voice_labels_rejects_invalid_values(value, message):

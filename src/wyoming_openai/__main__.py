@@ -329,8 +329,11 @@ async def main():
                 args.tts_models, args.tts_streaming_models, args.languages
             )
 
-        if args.tts_voice_labels and tts_voices:
-            apply_tts_voice_labels(tts_voices, args.tts_voice_labels)
+        if args.tts_voice_labels:
+            if tts_requested:
+                apply_tts_voice_labels(tts_voices, args.tts_voice_labels)
+            else:
+                _logger.warning("TTS voice labels are set but TTS is not configured; ignoring them")
 
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 

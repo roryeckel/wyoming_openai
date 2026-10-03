@@ -614,9 +614,9 @@ class TestApplyTtsVoiceLabels:
         apply_tts_voice_labels(voices, {"shared": "Shared voice"})
 
         assert {voice.name: voice.description for voice in voices} == {
-            "shared (model-a)": "Shared voice",
+            "shared (model-a)": "Shared voice (model-a)",
             "echo (model-a)": "echo (model-a)",
-            "shared (model-b)": "Shared voice",
+            "shared (model-b)": "Shared voice (model-b)",
             "echo (model-b)": "echo (model-b)",
         }
 
@@ -625,7 +625,7 @@ class TestApplyTtsVoiceLabels:
 
         apply_tts_voice_labels(voices, {"shared": "Shared voice", "shared (model-b)": "Shared voice (B)"})
 
-        assert [voice.description for voice in voices] == ["Shared voice", "Shared voice (B)"]
+        assert [voice.description for voice in voices] == ["Shared voice (model-a)", "Shared voice (B)"]
 
     def test_unknown_label_is_logged_and_ignored(self, caplog):
         voices = self._single_model_voices()
@@ -635,3 +635,10 @@ class TestApplyTtsVoiceLabels:
 
         assert [voice.description for voice in voices] == ["alloy", "Echo"]
         assert "unknown voice 'alloyy'" in caplog.text
+        assert "Available voices: ['alloy', 'echo']" in caplog.text
+
+    def test_labels_without_any_voices_are_logged_and_ignored(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.compatibility"):
+            apply_tts_voice_labels([], {"alloy": "Allie"})
+
+        assert "unknown voice 'alloy'" in caplog.text
