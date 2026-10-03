@@ -334,7 +334,7 @@ class TestCustomAsyncOpenAI:
             voices = create_tts_voices(
                 ["gpt-4o-mini-tts", "gpt-realtime-2.1-mini"],
                 [],
-                ["alloy", "fable", "marin"],
+                ["alloy", "fable", "marin", "brand-new-voice"],
                 "https://api.openai.com/v1",
                 ["en"],
                 openai_realtime_models=["gpt-realtime-2.1-mini"],
@@ -342,8 +342,9 @@ class TestCustomAsyncOpenAI:
 
         realtime_voices = [v.backend_voice_name for v in voices if v.model_name == "gpt-realtime-2.1-mini"]
         speech_voices = [v.backend_voice_name for v in voices if v.model_name == "gpt-4o-mini-tts"]
-        assert realtime_voices == ["alloy", "marin"]
-        assert speech_voices == ["alloy", "fable", "marin"]
+        # Only voices known to be speech-only are skipped, so a voice this project has not heard of passes through
+        assert realtime_voices == ["alloy", "marin", "brand-new-voice"]
+        assert speech_voices == ["alloy", "fable", "marin", "brand-new-voice"]
         assert "fable" in caplog.text
 
     def test_create_tts_voices_rejects_realtime_models_left_without_voices(self):

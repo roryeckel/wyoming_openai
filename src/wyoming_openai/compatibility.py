@@ -13,6 +13,7 @@ from .const import (
     ATTRIBUTION_URL,
     DEFAULT_OPENAI_BASE_URL,
     OPENAI_REALTIME_TTS_VOICES,
+    OPENAI_SPEECH_ONLY_TTS_VOICES,
     __version__,
 )
 
@@ -240,16 +241,17 @@ def create_tts_voices(
         tts_url (str): The URL for the TTS service attribution.
         languages (list[str]): A list of supported languages.
         openai_realtime_models (list[str] | None): Models that synthesize over OpenAI's Realtime API,
-            which only get the configured voices the Realtime API offers.
+            which do not get the configured voices only the speech API offers.
 
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
     """
     ordered_models = _get_ordered_unique_models(tts_models, tts_streaming_models)
     realtime_models = set(openai_realtime_models or [])
-    realtime_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_REALTIME_TTS_VOICES]
+    # Only voices known to be missing are skipped, so a voice OpenAI adds later needs no code change
+    realtime_voices = [voice_name for voice_name in tts_voices if voice_name not in OPENAI_SPEECH_ONLY_TTS_VOICES]
     if realtime_models and len(realtime_voices) < len(tts_voices):
-        skipped_voices = [voice_name for voice_name in tts_voices if voice_name not in OPENAI_REALTIME_TTS_VOICES]
+        skipped_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_SPEECH_ONLY_TTS_VOICES]
         if not realtime_voices:
             # Advertising nothing would silently drop these models
             raise ValueError(

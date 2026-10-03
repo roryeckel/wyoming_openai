@@ -5,6 +5,7 @@ import math
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
+from typing import TypeGuard
 
 from .const import REALTIME_TTS_AUDIO_FORMAT, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED
 
@@ -498,9 +499,7 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         )
 
     speed = output.get("speed")
-    if speed is not None and (
-        isinstance(speed, bool) or not isinstance(speed, int | float) or not math.isfinite(speed)
-    ):
+    if speed is not None and not _is_finite_number(speed):
         raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a finite number; got {speed!r}")
 
     if "format" not in output:
@@ -526,11 +525,19 @@ def get_realtime_tts_audio_output(extra_body: dict[str, object] | None) -> dict[
 
 def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
     """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
-    speed = get_realtime_tts_audio_output(extra_body).get("speed", tts_speed)
-    if isinstance(speed, bool) or not isinstance(speed, int | float) or not math.isfinite(speed):
+    speed = get_realtime_tts_audio_output(extra_body).get("speed")
+    if speed is None:
+        # A null override is the same as no override
+        speed = tts_speed
+    if not _is_finite_number(speed):
         # A speed that is not a finite number cannot be clamped or serialized, so the default is used
         return None
     return speed
+
+
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    """Check for a finite int or float; booleans are not numbers here."""
+    return not isinstance(value, bool) and isinstance(value, int | float) and math.isfinite(value)
 
 
 def clamp_realtime_tts_speed(speed: float) -> float:

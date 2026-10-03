@@ -368,3 +368,9 @@ def test_get_realtime_tts_audio_output_returns_a_copy_or_empty():
     assert get_realtime_tts_audio_output(None) == {}
     assert get_realtime_tts_audio_output({"audio": "pcm"}) == {}
     assert get_realtime_tts_audio_output({"audio": {"output": None}}) == {}
+
+
+def test_realtime_tts_speed_null_override_falls_back_to_tts_speed():
+    """Test a null audio.output.speed is treated as no override instead of dropping TTS_SPEED."""
+    assert get_realtime_tts_speed(1.3, {"audio": {"output": {"speed": None}}}) == 1.3
+    assert get_realtime_tts_speed(None, {"audio": {"output": {"speed": None}}}) is None

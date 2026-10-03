@@ -247,8 +247,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             raise ValueError(f"tts_concurrent_requests must be at least 1, got {tts_concurrent_requests}")
         self._tts_semaphore = asyncio.Semaphore(tts_concurrent_requests)
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
-        self._synthesis_tasks: set[asyncio.Task[TtsStreamResult]] = set()  # Sentence tasks still running
-        self._background_tasks: set[asyncio.Task[None]] = set()  # Cleanup that must not delay audio
+        self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence tasks still running
+        self._background_tasks: set[asyncio.Task[Any]] = set()  # Cleanup that must not delay audio
         self._warned_voice_fallbacks: set[str] = set()  # Requested names already warned about on this connection
 
     async def handle_event(self, event: Event) -> bool:
@@ -630,10 +630,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_connection_manager = None
         self._realtime_connection = None
 
+        # As with Realtime TTS, the closing handshake must not hold up the Wyoming client
         if connection_manager is not None:
-            await connection_manager.__aexit__(None, None, None)
+            self._run_in_background(connection_manager.__aexit__(None, None, None), name="openai_realtime_stt_close")
         elif connection is not None:
-            await connection.close()
+            self._run_in_background(connection.close(), name="openai_realtime_stt_close")
 
     def _convert_audio_to_realtime_pcm(
         self, audio: bytes, *, sample_rate: int, audio_width: int, audio_channels: int
@@ -905,6 +906,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Return the `language` and `languages` fields to send, and a copy of extra_body that does not conflict."""
         extra_body = dict(extra_body or {})
         if not self._uses_plural_stt_languages(model_name):
+            is_openai = self._stt_client is not None and self._stt_client.backend == OpenAIBackend.OPENAI
+            if is_openai and extra_body.pop("languages", None) is not None:
+                # A body shared with the models above would otherwise send both fields, which OpenAI rejects
+                _LOGGER.debug("Ignoring extra_body `languages` for %s, which takes `language`", model_name)
             return language, None, extra_body
 
         # These models reject `language` alongside `languages`, so a singular extra_body override is translated
@@ -1177,18 +1182,25 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         return timestamp
 
-    def _create_synthesis_task(self, coro: Any, *, name: str) -> asyncio.Task[TtsStreamResult]:
-        """Start a sentence synthesis task that is cancelled if the session aborts or the client disconnects."""
+    def _track_task(
+        self, coro: Any, *, name: str, tasks: set[asyncio.Task[Any]], log_failure: bool
+    ) -> asyncio.Task[Any]:
+        """Start a task that stays in `tasks` until it finishes; its exception is retrieved either way."""
+
+        def on_done(task: asyncio.Task[Any]) -> None:
+            tasks.discard(task)
+            if not task.cancelled() and (err := task.exception()) is not None and log_failure:
+                _LOGGER.debug("Background task %s failed: %s", task.get_name(), err)
+
         task = asyncio.create_task(coro, name=name)
-        self._synthesis_tasks.add(task)
-        task.add_done_callback(self._on_synthesis_task_done)
+        tasks.add(task)
+        task.add_done_callback(on_done)
         return task
 
-    def _on_synthesis_task_done(self, task: asyncio.Task[TtsStreamResult]) -> None:
-        """Forget a finished sentence task, retrieving its exception in case nothing awaits it."""
-        self._synthesis_tasks.discard(task)
-        if not task.cancelled():
-            task.exception()
+    def _create_synthesis_task(self, coro: Any, *, name: str) -> asyncio.Task[TtsStreamResult]:
+        """Start a sentence synthesis task that is cancelled if the session aborts or the client disconnects."""
+        # Its failure is reported by whoever awaits it
+        return self._track_task(coro, name=name, tasks=self._synthesis_tasks, log_failure=False)
 
     async def _cancel_synthesis_tasks(self) -> None:
         """Cancel sentence tasks that are still running so they stop holding backend connections."""
@@ -1200,15 +1212,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _run_in_background(self, coro: Any, *, name: str) -> None:
         """Run cleanup that should not delay the audio stream; awaited when the client disconnects."""
-        task = asyncio.create_task(coro, name=name)
-        self._background_tasks.add(task)
-        task.add_done_callback(self._on_background_task_done)
-
-    def _on_background_task_done(self, task: asyncio.Task[None]) -> None:
-        """Forget a finished background task and log its failure."""
-        self._background_tasks.discard(task)
-        if not task.cancelled() and (err := task.exception()) is not None:
-            _LOGGER.debug("Background task %s failed: %s", task.get_name(), err)
+        self._track_task(coro, name=name, tasks=self._background_tasks, log_failure=True)
 
     async def _drain_background_tasks(self) -> None:
         """Wait for pending background cleanup."""
@@ -1260,6 +1264,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                 return voice
         return None
 
+    def _get_default_voice(self) -> TtsVoiceModel | None:
+        """Get the voice for a request that names none: the first one, preferring the speech API over Realtime."""
+        voices = list(self._iter_tts_voices())
+        return self._prefer_speech_api_voices(voices)[0] if voices else None
+
     def _get_voices_by_backend_name(self, backend_voice_name: str) -> list[TtsVoiceModel]:
         """Get TTS voices by the raw backend voice identifier."""
         return [
@@ -1292,7 +1301,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         return voice
 
     def _prefer_speech_api_voices(self, voices: list[TtsVoiceModel]) -> list[TtsVoiceModel]:
-        """Narrow voices a legacy name could mean to the speech API ones, so it never moves onto Realtime unasked."""
+        """Narrow voices a request did not pin down to the speech API ones, so it never moves onto Realtime unasked."""
         return [voice for voice in voices if not self._is_tts_voice_realtime(voice)] or voices
 
     def _get_voice_fallback_log_level(self, requested_voice: str) -> int:
@@ -1323,7 +1332,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             TtsVoiceModel | None: The validated voice, or None if validation failed.
         """
-        voice = self._get_voice(requested_voice)
+        voice = self._get_voice(requested_voice) if requested_voice else self._get_default_voice()
         if voice:
             if not self._validate_tts_language(requested_language, voice):
                 return None
@@ -1824,6 +1833,9 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _iter_realtime_tts_audio(self, text: str, voice: TtsVoiceModel) -> AsyncGenerator[bytes, None]:
         """Yield PCM audio for a text chunk from a single out-of-band Realtime response."""
         assert self._tts_client is not None
+        if not _has_speakable_content(text):
+            # Callers skip such text; a conversational model must never be handed it
+            raise RealtimeSynthesisError("Text has nothing to read aloud")
         connection_manager = self._tts_client.realtime.connect(model=voice.model_name)
         connection = await self._enter_realtime_connection(connection_manager)
         try:
@@ -1839,6 +1851,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
 
             received_audio = False
+            pending_audio = b""  # Trailing part of a sample that a delta split
             spoken_parts: list[str] = []  # Transcripts of finished content parts
             spoken_pending = ""  # Transcript deltas of the part still being spoken
             events = aiter(connection)
@@ -1856,7 +1869,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                 if event_type == "response.output_audio.delta":
                     if delta := getattr(event, "delta", ""):
                         received_audio = True
-                        yield base64.b64decode(delta)
+                        # Wyoming chunks must hold whole samples, and deltas are not guaranteed to
+                        audio = pending_audio + base64.b64decode(delta)
+                        aligned_size = len(audio) - len(audio) % REALTIME_AUDIO_WIDTH
+                        pending_audio = audio[aligned_size:]
+                        if aligned_size:
+                            yield audio[:aligned_size]
                 elif event_type == "response.output_audio_transcript.delta":
                     spoken_pending += getattr(event, "delta", "") or ""
                 elif event_type == "response.output_audio_transcript.done":
@@ -1904,7 +1922,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         audio_data: bytes,
         is_first_chunk: bool,
         start_timestamp: float,
-        audio_format: TtsAudioFormat | None = None,
+        audio_format: TtsAudioFormat,
     ) -> float | None:
         """
         Stream audio data to Wyoming with proper timestamp calculation.
@@ -1913,37 +1931,30 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_data (bytes): Complete audio data to stream.
             is_first_chunk (bool): Whether this is the first chunk (sends AudioStart).
             start_timestamp (float): Starting timestamp for this chunk.
-            audio_format (TtsAudioFormat | None): How the audio is framed, from `_get_tts_audio_format`.
-                Without it the audio is treated as a WAV file, falling back to PCM at the default rate.
+            audio_format (TtsAudioFormat): How the audio is framed, from `_get_tts_audio_format`.
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
         """
         try:
-            raw_pcm = audio_format is not None and audio_format.headerless
-            audio_rate = audio_format.rate if audio_format is not None else TTS_AUDIO_RATE
+            audio_rate = audio_format.rate
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
             timestamp = start_timestamp
 
             # Try to parse WAV header
-            wav_params = None if raw_pcm else self._parse_wav_header(audio_data)
+            wav_params = None if audio_format.headerless else self._parse_wav_header(audio_data)
             if wav_params:
                 audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
-                available_audio = audio_data[data_offset:]
-                if not data_size:
-                    # A zero size is also what servers write when streaming audio of unknown length
-                    audio_data = available_audio
-                    pcm_size = "unknown (unbounded or zero size)"
-                else:
-                    if len(available_audio) < data_size:
-                        _LOGGER.warning(
-                            "TTS WAV response ended after %d of %d declared PCM bytes",
-                            len(available_audio),
-                            data_size,
-                        )
-                    audio_data = available_audio[:data_size]
-                    pcm_size = f"{data_size} bytes"
+                audio_data, missing_wav_data, pcm_size = self._split_wav_audio(data_size, audio_data[data_offset:])
+                if missing_wav_data and not audio_data:
+                    # As on the direct path, a WAV that declares samples and delivers none is truncated
+                    _LOGGER.error("TTS WAV response declared %d PCM bytes and delivered none", data_size)
+                    return None
+                if missing_wav_data:
+                    _LOGGER.warning(
+                        "TTS WAV response ended after %d of %d declared PCM bytes", len(audio_data), data_size
+                    )
                 _LOGGER.debug(
                     "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
                     "header offset: %d, PCM size: %s",
@@ -1953,7 +1964,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     data_offset,
                     pcm_size,
                 )
-            elif not raw_pcm:
+            elif not audio_format.headerless:
                 _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
 
             # Send audio start if requested
@@ -2053,15 +2064,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                             wav_params = self._parse_wav_header(pending_header)
                             if wav_params:
                                 audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
-                                available_audio = pending_header[data_offset:]
-                                if not data_size:
-                                    # A zero size is also what servers write when streaming audio of unknown length
-                                    audio_data = available_audio
-                                    pcm_size = "unknown (unbounded or zero size)"
-                                else:
-                                    audio_data = available_audio[:data_size]
-                                    remaining_wav_data = data_size - len(audio_data)
-                                    pcm_size = f"{data_size} bytes"
+                                audio_data, remaining_wav_data, pcm_size = self._split_wav_audio(
+                                    data_size, pending_header[data_offset:]
+                                )
                                 pending_header = b""
                                 awaiting_wav_header = False
                                 declared_empty_wav = not data_size
@@ -2170,6 +2175,18 @@ class OpenAIEventHandler(AsyncEventHandler):
         if opened_stream:
             with contextlib.suppress(Exception):
                 await self.write_event(AudioStop(timestamp=int(timestamp)).event())
+
+    def _split_wav_audio(self, data_size: int | None, available_audio: bytes) -> tuple[bytes, int | None, str]:
+        """
+        Split the bytes after a WAV header into the PCM to play.
+        Returns (audio, declared bytes not received yet, size description for logging); the missing count
+        is None when the header does not bound the data.
+        """
+        if not data_size:
+            # A zero size is also what servers write when streaming audio of unknown length
+            return available_audio, None, "unknown (unbounded or zero size)"
+        audio_data = available_audio[:data_size]
+        return audio_data, data_size - len(audio_data), f"{data_size} bytes"
 
     def _advance_audio_timestamp(
         self,
