@@ -52,6 +52,7 @@ async def main():
     backend_parser = create_enum_parser(OpenAIBackend)
     stt_extra_body_parser = create_json_object_parser("STT extra body")
     tts_extra_body_parser = create_json_object_parser("TTS extra body")
+    stt_realtime_extra_body_parser = create_json_object_parser("STT Realtime extra body")
     tts_realtime_extra_body_parser = create_json_object_parser("TTS Realtime extra body")
 
     stt_backend_env = os.getenv("STT_BACKEND")
@@ -75,6 +76,14 @@ async def main():
     if stt_extra_body_env:
         try:
             stt_extra_body_default = stt_extra_body_parser(stt_extra_body_env)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+
+    stt_realtime_extra_body_env = os.getenv("STT_REALTIME_EXTRA_BODY")
+    stt_realtime_extra_body_default = None
+    if stt_realtime_extra_body_env:
+        try:
+            stt_realtime_extra_body_default = stt_realtime_extra_body_parser(stt_realtime_extra_body_env)
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
@@ -170,6 +179,15 @@ async def main():
         nargs="+",
         default=os.getenv("STT_REALTIME_MODELS", "").split(),
         help="Space-separated list of STT model names that use Realtime transcription (e.g. gpt-live-transcribe)",
+    )
+    parser.add_argument(
+        "--stt-realtime-extra-body",
+        type=stt_realtime_extra_body_parser,
+        default=stt_realtime_extra_body_default,
+        help=(
+            "Optional JSON object merged into the transcription settings of --stt-realtime-models sessions "
+            "(--stt-extra-body only applies to /v1/audio/transcriptions)"
+        ),
     )
 
     # TTS configuration
@@ -319,12 +337,13 @@ async def main():
 
         openai_realtime_tts_models: list[str] = []
         if args.tts_realtime_models and tts_client is not None:
-            if tts_client.backend == OpenAIBackend.OPENAI:
+            if tts_client.is_official_openai:
                 openai_realtime_tts_models = args.tts_realtime_models
             else:
                 _logger.warning(
                     "TTS Realtime models are written for the official OpenAI Realtime API; "
-                    "the %s backend must implement /v1/realtime the same way for %s to work",
+                    "%s (%s backend) must implement /v1/realtime the same way for %s to work",
+                    args.tts_openai_url,
                     tts_client.backend,
                     args.tts_realtime_models,
                 )
@@ -355,14 +374,17 @@ async def main():
             tts_voices = []
         elif args.tts_voices:
             # If TTS_VOICES is set, use that
-            tts_voices = create_tts_voices(
-                tts_models,
-                args.tts_streaming_models,
-                args.tts_voices,
-                args.tts_openai_url,
-                args.languages,
-                openai_realtime_models=openai_realtime_tts_models,
-            )
+            try:
+                tts_voices = create_tts_voices(
+                    tts_models,
+                    args.tts_streaming_models,
+                    args.tts_voices,
+                    args.tts_openai_url,
+                    args.languages,
+                    openai_realtime_models=openai_realtime_tts_models,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
         else:
             # Otherwise, list supported voices via backend (with streaming fallback)
             assert tts_client is not None
@@ -463,6 +485,7 @@ async def main():
                 stt_prompt=args.stt_prompt,
                 stt_extra_body=args.stt_extra_body,
                 stt_realtime_models=args.stt_realtime_models,
+                stt_realtime_extra_body=args.stt_realtime_extra_body,
                 tts_extra_body=args.tts_extra_body,
                 tts_realtime_models=args.tts_realtime_models,
                 tts_realtime_extra_body=args.tts_realtime_extra_body,

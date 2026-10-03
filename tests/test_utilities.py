@@ -11,6 +11,7 @@ from wyoming_openai.utilities import (
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
+    get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_tts_extra_body,
@@ -333,3 +334,17 @@ def test_realtime_tts_speed_prefers_audio_output_override_and_clamps():
     assert clamp_realtime_tts_speed(3.0) == 1.5
     assert clamp_realtime_tts_speed(0.1) == 0.25
     assert clamp_realtime_tts_speed(1.0) == 1.0
+
+
+def test_get_realtime_tts_audio_output_returns_a_copy_or_empty():
+    """The audio.output object is copied, and anything else reads as unset."""
+    configured_output = {"voice": "cedar"}
+    extra_body: dict[str, object] = {"audio": {"output": configured_output}}
+
+    output = get_realtime_tts_audio_output(extra_body)
+    output["voice"] = "marin"
+
+    assert configured_output == {"voice": "cedar"}
+    assert get_realtime_tts_audio_output(None) == {}
+    assert get_realtime_tts_audio_output({"audio": "pcm"}) == {}
+    assert get_realtime_tts_audio_output({"audio": {"output": None}}) == {}

@@ -202,7 +202,8 @@ async def test_main_allows_invalid_unused_tts_extra_body_when_voice_discovery_re
 
 class _FakeClient:
     def __init__(self):
-        self.backend = None
+        self.backend: main_module.OpenAIBackend | None = None
+        self.is_official_openai = False
 
     async def __aenter__(self):
         return self
@@ -452,20 +453,23 @@ async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("backend", "expected_voices", "expect_backend_warning"),
+    ("backend", "official", "expected_voices", "expect_backend_warning"),
     [
-        (main_module.OpenAIBackend.OPENAI, ["alloy"], False),
-        (main_module.OpenAIBackend.SPEACHES, ["alloy", "fable"], True),
+        (main_module.OpenAIBackend.OPENAI, True, ["alloy"], False),
+        # Unrecognized compatible servers are autodetected as OPENAI without being the official API
+        (main_module.OpenAIBackend.OPENAI, False, ["alloy", "fable"], True),
+        (main_module.OpenAIBackend.SPEACHES, False, ["alloy", "fable"], True),
     ],
 )
 async def test_main_realtime_tts_voice_filter_and_warnings(
-    monkeypatch, caplog, backend, expected_voices, expect_backend_warning
+    monkeypatch, caplog, backend, official, expected_voices, expect_backend_warning
 ):
     server = _CapturingServer()
 
     async def fake_factory(*args, **kwargs):
         client = _FakeClient()
         client.backend = backend
+        client.is_official_openai = official
         return client
 
     monkeypatch.setattr(
@@ -536,3 +540,86 @@ async def test_main_rejects_incompatible_realtime_extra_body(monkeypatch, capsys
 
     assert exc_info.value.code == 2
     assert "audio.output.format" in capsys.readouterr().err
+
+
+_MAIN_ENV_VARS = (
+    "STT_MODELS",
+    "STT_STREAMING_MODELS",
+    "STT_REALTIME_MODELS",
+    "STT_EXTRA_BODY",
+    "STT_REALTIME_EXTRA_BODY",
+    "TTS_MODELS",
+    "TTS_STREAMING_MODELS",
+    "TTS_REALTIME_MODELS",
+    "TTS_VOICES",
+    "TTS_BACKEND",
+    "TTS_EXTRA_BODY",
+    "TTS_REALTIME_EXTRA_BODY",
+)
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_realtime_tts_model_left_without_voices(monkeypatch, capsys):
+    async def fake_factory(*args, **kwargs):
+        client = _FakeClient()
+        client.backend = main_module.OpenAIBackend.OPENAI
+        client.is_official_openai = True
+        return client
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in _MAIN_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["wyoming_openai", "--tts-realtime-models", "gpt-realtime-2.1-mini", "--tts-voices", "onyx", "nova"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "onyx" in error
+    assert "marin" in error
+
+
+@pytest.mark.asyncio
+async def test_main_passes_stt_realtime_extra_body(monkeypatch):
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in _MAIN_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setenv("STT_REALTIME_EXTRA_BODY", '{"keywords":["Wyoming"]}')
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--stt-realtime-models",
+            "gpt-live-transcribe",
+            "--stt-extra-body",
+            '{"temperature":0.2}',
+        ],
+    )
+
+    await main()
+
+    handler = server.handlers[0]
+    assert handler._stt_extra_body == {"temperature": 0.2}
+    assert handler._stt_realtime_extra_body == {"keywords": ["Wyoming"]}

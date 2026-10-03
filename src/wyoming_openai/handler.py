@@ -3,6 +3,7 @@ import base64
 import contextlib
 import io
 import logging
+import re
 import struct
 import wave
 from collections.abc import AsyncGenerator
@@ -46,6 +47,7 @@ from .utilities import (
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
+    get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_tts_extra_body,
@@ -67,6 +69,9 @@ def _normalize_for_comparison(text: str) -> str:
     """Reduce text to lowercase alphanumerics for comparing requested and spoken text."""
     return "".join(char for char in text.lower() if char.isalnum())
 
+
+# A voice advertised next to other models, e.g. "alloy (gpt-4o-mini-tts)"
+_SUFFIXED_VOICE_NAME = re.compile(r"(?P<voice>.+) \((?P<model>[^()]+)\)")
 
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
@@ -116,6 +121,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         stt_prompt: str | None = None,
         stt_extra_body: dict[str, object] | None = None,
         stt_realtime_models: list[str] | set[str] | None = None,
+        stt_realtime_extra_body: dict[str, object] | None = None,
         tts_speed: float | None = None,
         tts_instructions: str | None = None,
         tts_extra_body: dict[str, object] | None = None,
@@ -137,6 +143,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             stt_prompt (str | None): An optional prompt for STT.
             stt_extra_body (dict[str, object] | None): Optional JSON body fields merged into STT requests.
             stt_realtime_models (list[str] | set[str] | None): STT models that use OpenAI Realtime transcription.
+            stt_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime
+                transcription settings.
             tts_speed (float | None): The speed for TTS, or None for default.
             tts_instructions (str | None): Optional instructions for TTS.
             tts_extra_body (dict[str, object] | None): Optional JSON body fields merged into TTS requests.
@@ -159,6 +167,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_temperature = stt_temperature
         self._stt_prompt = stt_prompt
         self._stt_extra_body = dict(stt_extra_body) if stt_extra_body else None
+        self._stt_realtime_extra_body = dict(stt_realtime_extra_body) if stt_realtime_extra_body else None
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
         if self._has_asr_models():
             validate_stt_extra_body(self._stt_extra_body)
@@ -212,6 +221,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._tts_semaphore = asyncio.Semaphore(TTS_CONCURRENT_REQUESTS)
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
+        self._synthesis_tasks: set[asyncio.Task[TtsStreamResult]] = set()  # Sentence tasks still running
+        self._background_tasks: set[asyncio.Task[None]] = set()  # Cleanup that must not delay audio
 
     async def handle_event(self, event: Event) -> bool:
         """
@@ -270,11 +281,15 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def disconnect(self) -> None:
         """Clean up handler-owned realtime resources when the Wyoming client disconnects."""
+        await self._cancel_synthesis_tasks()
         await self._cleanup_realtime_transcription()
+        await self._drain_background_tasks()
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
+        await self._cancel_synthesis_tasks()
         await self._cleanup_realtime_transcription()
+        await self._drain_background_tasks()
         await super().stop()
 
     async def _handle_select_program(self, select_program: SelectProgram) -> bool:
@@ -476,16 +491,16 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not self._current_asr_model:
             raise RealtimeTranscriptionError("No ASR model set for realtime transcription")
 
-        language, extra_body = self._apply_plural_stt_languages(
-            self._current_asr_model.name, self._current_language, self._stt_extra_body
+        # STT_EXTRA_BODY targets /v1/audio/transcriptions, so sessions only take the Realtime extra body
+        language, languages, extra_body = self._apply_plural_stt_languages(
+            self._current_asr_model.name, self._current_language, self._stt_realtime_extra_body
         )
-        # These only describe the /v1/audio/transcriptions response
-        for field_name in ("stream", "response_format"):
-            extra_body.pop(field_name, None)
 
         transcription: dict[str, object] = {"model": self._current_asr_model.name}
         if language is not None:
             transcription["language"] = language
+        if languages is not None:
+            transcription["languages"] = languages
         if self._stt_prompt is not None:
             transcription["prompt"] = self._stt_prompt
         transcription.update(extra_body)
@@ -556,7 +571,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if error:
             return str(error)
 
-        return f"Realtime transcription failed with event type {getattr(event, 'type', 'unknown')}"
+        return f"Realtime request failed with event type {getattr(event, 'type', 'unknown')}"
 
     def _set_realtime_transcription_exception(self, err: Exception) -> None:
         """Fail the pending realtime transcription, if any."""
@@ -710,7 +725,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 body_name="STT",
             )
 
-            language, extra_body = self._apply_plural_stt_languages(
+            language, languages, extra_body = self._apply_plural_stt_languages(
                 self._current_asr_model.name, self._current_language, extra_body
             )
 
@@ -718,6 +733,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 "file": self._wav_buffer,
                 "model": self._current_asr_model.name,
                 "language": language if language is not None else omit,
+                "languages": languages if languages is not None else omit,
                 "temperature": self._stt_temperature if self._stt_temperature is not None else omit,
                 "prompt": self._stt_prompt if self._stt_prompt is not None else omit,
                 "response_format": "json",
@@ -845,27 +861,34 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _uses_plural_stt_languages(self, model_name: str) -> bool:
         """Check if an ASR model takes a `languages` list instead of the singular `language` field."""
+        # Not limited to the official domain: proxies in front of OpenAI need `languages` for these models too
         if self._stt_client is None or self._stt_client.backend != OpenAIBackend.OPENAI:
             return False
         return model_name.startswith(OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES)
 
     def _apply_plural_stt_languages(
         self, model_name: str, language: str | None, extra_body: dict[str, object] | None
-    ) -> tuple[str | None, dict[str, object]]:
-        """Return the singular language to send and a copy of extra_body carrying `languages` where required."""
+    ) -> tuple[str | None, list[str] | None, dict[str, object]]:
+        """Return the `language` and `languages` fields to send, and a copy of extra_body that does not conflict."""
         extra_body = dict(extra_body or {})
-        if self._uses_plural_stt_languages(model_name):
-            # These models take `languages` (not yet typed by the SDK) and reject it alongside `language`,
-            # so a singular extra_body override is translated as well
-            override = extra_body.pop("language", language)
-            if override is not None:
-                extra_body.setdefault("languages", [override])
-            return None, extra_body
-        return language, extra_body
+        if not self._uses_plural_stt_languages(model_name):
+            return language, None, extra_body
+
+        # These models reject `language` alongside `languages`, so a singular extra_body override is translated
+        override = extra_body.pop("language", language)
+        if override is None or "languages" in extra_body:
+            # An extra_body `languages` list replaces the request language when the body is merged
+            return None, None, extra_body
+        return None, [str(override)], extra_body
 
     def _is_tts_voice_realtime(self, voice: TtsVoiceModel) -> bool:
         """Check if a TTS voice should be synthesized over OpenAI Realtime."""
         return voice.model_name in self._tts_realtime_models
+
+    def _is_tts_text_speakable(self, text: str, voice: TtsVoiceModel) -> bool:
+        """Check if a voice's model can be given this text; Realtime models need something to read aloud."""
+        # A conversational model handed only punctuation or emoji may improvise a reply instead of staying silent
+        return not self._is_tts_voice_realtime(voice) or bool(_normalize_for_comparison(text))
 
     def _is_tts_voice_streaming(self, voice_name: str) -> bool:
         """Check if a TTS voice supports streaming synthesis.
@@ -1002,7 +1025,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             use_streaming = self._is_tts_voice_streaming(voice.name)
 
             if use_streaming:
-                valid_sentences = [s for s in sentences if s.strip()]
+                valid_sentences = [s for s in sentences if s.strip() and self._is_tts_text_speakable(s, voice)]
                 if not valid_sentences:
                     _LOGGER.debug("No non-empty sentences available for incremental synthesis.")
                     return True
@@ -1014,7 +1037,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 synthesis_tasks = [
                     (
                         f"sentence_{i}",
-                        asyncio.create_task(
+                        self._create_synthesis_task(
                             self._get_tts_audio_stream(sentence, voice, task_id=f"sentence_{i}"),
                             name=f"incremental_sentence_{i}",
                         ),
@@ -1114,8 +1137,48 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         return timestamp
 
+    def _create_synthesis_task(self, coro: Any, *, name: str) -> asyncio.Task[TtsStreamResult]:
+        """Start a sentence synthesis task that is cancelled if the session aborts or the client disconnects."""
+        task = asyncio.create_task(coro, name=name)
+        self._synthesis_tasks.add(task)
+        task.add_done_callback(self._on_synthesis_task_done)
+        return task
+
+    def _on_synthesis_task_done(self, task: asyncio.Task[TtsStreamResult]) -> None:
+        """Forget a finished sentence task, retrieving its exception in case nothing awaits it."""
+        self._synthesis_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def _cancel_synthesis_tasks(self) -> None:
+        """Cancel sentence tasks that are still running so they stop holding backend connections."""
+        tasks = [task for task in self._synthesis_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _run_in_background(self, coro: Any, *, name: str) -> None:
+        """Run cleanup that should not delay the audio stream; awaited when the client disconnects."""
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+
+    def _on_background_task_done(self, task: asyncio.Task[None]) -> None:
+        """Forget a finished background task and log its failure."""
+        self._background_tasks.discard(task)
+        if not task.cancelled() and (err := task.exception()) is not None:
+            _LOGGER.debug("Background task %s failed: %s", task.get_name(), err)
+
+    async def _drain_background_tasks(self) -> None:
+        """Wait for pending background cleanup."""
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+
     async def _abort_synthesis(self) -> bool:
         """Abort the current synthesis session, emitting stop events and resetting state."""
+        await self._cancel_synthesis_tasks()
+
         if self._audio_started:
             await self.write_event(AudioStop(timestamp=int(self._current_timestamp)).event())
 
@@ -1165,6 +1228,26 @@ class OpenAIEventHandler(AsyncEventHandler):
             if getattr(voice, "backend_voice_name", voice.name) == backend_voice_name
         ]
 
+    def _get_voice_by_suffixed_name(self, requested_voice: str) -> TtsVoiceModel | None:
+        """Resolve a "voice (model)" name that stopped being advertised when the set of TTS models changed."""
+        match = _SUFFIXED_VOICE_NAME.fullmatch(requested_voice)
+        if not match:
+            return None
+
+        matches = self._get_voices_by_backend_name(match["voice"])
+        if not matches:
+            return None
+
+        voice = next((voice for voice in matches if voice.model_name == match["model"]), matches[0])
+        _LOGGER.warning(
+            "Voice %s is no longer advertised under that name. Falling back to %s for backward compatibility. "
+            "Update the client to use one of: %s",
+            requested_voice,
+            voice.name,
+            [voice.name for voice in matches],
+        )
+        return voice
+
     def _get_backend_voice_name(self, voice: TtsVoice) -> str:
         """Get the raw backend voice identifier for synthesis requests."""
         return getattr(voice, "backend_voice_name", voice.name)
@@ -1198,8 +1281,13 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         backend_matches = self._get_voices_by_backend_name(requested_voice)
         if not backend_matches:
-            self._log_unsupported_voice(requested_voice)
-            return None
+            voice = self._get_voice_by_suffixed_name(requested_voice)
+            if not voice:
+                self._log_unsupported_voice(requested_voice)
+                return None
+            if not self._validate_tts_language(requested_language, voice):
+                return None
+            return voice
 
         if len(backend_matches) == 1:
             voice = backend_matches[0]
@@ -1466,6 +1554,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                 chunks = self._chunk_text_for_streaming(
                     full_text, self._tts_streaming_min_words, self._tts_streaming_max_chars, requested_language
                 )
+                chunks = [chunk for chunk in chunks if self._is_tts_text_speakable(chunk, voice)]
+                if not chunks:
+                    _LOGGER.warning("No speakable text to synthesize")
+                    await self.write_event(SynthesizeStopped().event())
+                    return True
                 _LOGGER.debug("Text chunked into %d parts for streaming synthesis", len(chunks))
 
                 # Create ALL tasks with IDs - API calls start concurrently
@@ -1474,7 +1567,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 synthesis_tasks = [
                     (
                         f"fallback_chunk_{i}",
-                        asyncio.create_task(
+                        self._create_synthesis_task(
                             self._get_tts_audio_stream(chunk, voice, task_id=f"fallback_chunk_{i}"), name=f"chunk_{i}"
                         ),
                     )
@@ -1644,8 +1737,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         extra_body = dict(self._tts_realtime_extra_body or {})
         audio_override = extra_body.pop("audio", None)
         audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
-        output_override = audio_override.pop("output", None)
-        output_override = dict(output_override) if isinstance(output_override, dict) else {}
+        audio_override.pop("output", None)
+        output_override = get_realtime_tts_audio_output(self._tts_realtime_extra_body)
         output_override.pop("speed", None)
 
         instructions = REALTIME_TTS_INSTRUCTIONS
@@ -1677,6 +1770,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         assert self._tts_client is not None
         connection_manager = self._tts_client.realtime.connect(model=voice.model_name)
         connection = await self._enter_realtime_connection(connection_manager)
+        completed = False
         try:
             await connection.session.update(session=self._get_realtime_tts_session(voice))
             await connection.response.create(
@@ -1714,19 +1808,38 @@ class OpenAIEventHandler(AsyncEventHandler):
                     spoken_parts.append(getattr(event, "transcript", "") or spoken_pending)
                     spoken_pending = ""
                 elif event_type == "response.done":
-                    status = getattr(getattr(event, "response", None), "status", None)
+                    response = getattr(event, "response", None)
+                    status = getattr(response, "status", None)
                     if status not in (None, "completed"):
-                        raise RealtimeSynthesisError(f"Realtime response ended with status {status}")
+                        raise RealtimeSynthesisError(
+                            f"Realtime response ended with status {status}"
+                            f"{self._describe_realtime_status_details(response)}"
+                        )
                     if not received_audio:
                         raise RealtimeSynthesisError("Realtime response completed without any audio")
                     self._check_realtime_tts_fidelity(text, " ".join([*spoken_parts, spoken_pending]))
+                    completed = True
                     return
                 elif event_type == "error":
                     raise RealtimeSynthesisError(self._get_realtime_event_error_message(event))
 
             raise RealtimeSynthesisError("Realtime connection closed before synthesis completed")
         finally:
-            await connection_manager.__aexit__(None, None, None)
+            if completed:
+                # All audio was delivered, so the closing handshake must not hold up the end of the stream
+                self._run_in_background(
+                    connection_manager.__aexit__(None, None, None), name="openai_realtime_tts_close"
+                )
+            else:
+                await connection_manager.__aexit__(None, None, None)
+
+    def _describe_realtime_status_details(self, response: Any) -> str:
+        """Format why a Realtime response did not complete, for error messages."""
+        details = getattr(response, "status_details", None)
+        error = getattr(details, "error", None)
+        candidates = (getattr(details, "reason", None), getattr(error, "code", None), getattr(error, "type", None))
+        parts = [value for value in candidates if isinstance(value, str) and value]
+        return f" ({', '.join(parts)})" if parts else ""
 
     def _check_realtime_tts_fidelity(self, text: str, spoken_text: str) -> None:
         """Warn when a Realtime model spoke something other than the requested text."""
@@ -1861,12 +1974,22 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_channels = DEFAULT_AUDIO_CHANNELS
             awaiting_wav_header = self._get_tts_response_format() == "wav" and not is_realtime
             wrote_audio = False
+            declared_empty_wav = False
             pending_header = b""
             remaining_wav_data: int | None = None
 
             if self._tts_client is None:
                 _LOGGER.error("No TTS client configured for synthesis")
                 return None
+
+            if not self._is_tts_text_speakable(text, voice):
+                _LOGGER.debug("Skipping text with nothing to speak: %s", _truncate_for_log(text, 50))
+                if send_audio_start:
+                    await self.write_event(
+                        AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
+                    )
+                    send_audio_start = False
+                return timestamp
 
             async with self._tts_semaphore:
                 async with contextlib.aclosing(self._iter_tts_audio(text, voice)) as audio_stream:
@@ -1886,6 +2009,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                                     pcm_size = f"{data_size} bytes"
                                 pending_header = b""
                                 awaiting_wav_header = False
+                                declared_empty_wav = data_size == 0
                                 _LOGGER.debug(
                                     "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
                                     "header offset: %d, PCM size: %s",
@@ -1971,19 +2095,26 @@ class OpenAIEventHandler(AsyncEventHandler):
                 )
                 wrote_audio = True
 
-            if not wrote_audio:
-                # Reporting success here would let callers close or continue an audio stream that never started
-                raise TtsStreamError("TTS backend returned no audio", _truncate_for_log(text, 50), voice.name)
+            if not wrote_audio and not declared_empty_wav:
+                # Reporting success here would let callers close or continue an audio stream that never started.
+                # A WAV declaring zero samples is not a failure: the backend had nothing to say. One that
+                # declares samples and delivers none is truncated
+                _LOGGER.error("TTS backend returned no audio for: %s", _truncate_for_log(text, 50))
+                await self._stop_failed_tts_stream(audio_start_requested and not send_audio_start, timestamp)
+                return None
 
             return timestamp
 
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
-            if audio_start_requested and not send_audio_start:
-                # This call opened the audio stream, and callers only close streams that completed
-                with contextlib.suppress(Exception):
-                    await self.write_event(AudioStop(timestamp=int(timestamp)).event())
+            await self._stop_failed_tts_stream(audio_start_requested and not send_audio_start, timestamp)
             return None
+
+    async def _stop_failed_tts_stream(self, opened_stream: bool, timestamp: float) -> None:
+        """Close an audio stream a failed synthesis call opened; callers only close streams that completed."""
+        if opened_stream:
+            with contextlib.suppress(Exception):
+                await self.write_event(AudioStop(timestamp=int(timestamp)).event())
 
     def _advance_audio_timestamp(
         self,

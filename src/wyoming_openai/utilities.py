@@ -447,10 +447,10 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         return
 
     audio = extra_body.get("audio", {})
-    output = audio.get("output", {}) if isinstance(audio, dict) else None
-    if not isinstance(output, dict):
+    if not isinstance(audio, dict) or not isinstance(audio.get("output", {}), dict):
         raise ValueError("TTS Realtime extra_body audio must be an object whose output, if set, is an object")
 
+    output = get_realtime_tts_audio_output(extra_body)
     speed = output.get("speed")
     if speed is not None and (isinstance(speed, bool) or not isinstance(speed, int | float)):
         raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a number; got {speed!r}")
@@ -469,11 +469,16 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
     )
 
 
-def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
-    """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
+def get_realtime_tts_audio_output(extra_body: dict[str, object] | None) -> dict[str, object]:
+    """Return a copy of the audio.output object of a Realtime TTS extra_body, or an empty dict when unset."""
     audio = (extra_body or {}).get("audio")
     output = audio.get("output") if isinstance(audio, dict) else None
-    speed = output.get("speed", tts_speed) if isinstance(output, dict) else tts_speed
+    return dict(output) if isinstance(output, dict) else {}
+
+
+def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
+    """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
+    speed = get_realtime_tts_audio_output(extra_body).get("speed", tts_speed)
     if isinstance(speed, bool) or not isinstance(speed, int | float):
         return None
     return speed

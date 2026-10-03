@@ -249,9 +249,16 @@ def create_tts_voices(
     realtime_models = set(openai_realtime_models or [])
     realtime_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_REALTIME_TTS_VOICES]
     if realtime_models and len(realtime_voices) < len(tts_voices):
+        skipped_voices = [voice_name for voice_name in tts_voices if voice_name not in OPENAI_REALTIME_TTS_VOICES]
+        if not realtime_voices:
+            # Advertising nothing would silently drop these models
+            raise ValueError(
+                f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
+                f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}"
+            )
         _LOGGER.warning(
             "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
-            [voice_name for voice_name in tts_voices if voice_name not in OPENAI_REALTIME_TTS_VOICES],
+            skipped_voices,
         )
 
     model_voice_pairs = [
@@ -639,6 +646,11 @@ class CustomAsyncOpenAI(AsyncOpenAI):
             return urlparse(str(base_url)).hostname == cls._OPENAI_HOSTNAME
         except Exception:
             return False
+
+    @property
+    def is_official_openai(self) -> bool:
+        """True for the official OpenAI API; the OPENAI backend alone also covers unrecognized compatible servers."""
+        return self.backend == OpenAIBackend.OPENAI and self._is_openai_domain(str(self.base_url))
 
     @classmethod
     def create_autodetected_factory(cls):

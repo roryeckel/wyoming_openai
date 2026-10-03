@@ -331,6 +331,32 @@ class TestCustomAsyncOpenAI:
         assert speech_voices == ["alloy", "fable", "marin"]
         assert "fable" in caplog.text
 
+    def test_create_tts_voices_rejects_realtime_models_left_without_voices(self):
+        """Test a Realtime model is not silently dropped when none of the configured voices fit it."""
+        with pytest.raises(ValueError, match="onyx"):
+            create_tts_voices(
+                ["gpt-realtime-2.1-mini"],
+                [],
+                ["onyx", "nova"],
+                "https://api.openai.com/v1",
+                ["en"],
+                openai_realtime_models=["gpt-realtime-2.1-mini"],
+            )
+
+    @pytest.mark.parametrize(
+        ("base_url", "backend", "expected"),
+        [
+            ("https://api.openai.com/v1", OpenAIBackend.OPENAI, True),
+            ("http://localhost:8000/v1", OpenAIBackend.OPENAI, False),
+            ("https://api.openai.com/v1", OpenAIBackend.SPEACHES, False),
+        ],
+    )
+    def test_is_official_openai(self, base_url, backend, expected):
+        """Test the OPENAI backend only counts as the official API on OpenAI's own domain."""
+        custom_client = CustomAsyncOpenAI(api_key="test-key", base_url=base_url, backend=backend)
+
+        assert custom_client.is_official_openai is expected
+
     @pytest.mark.asyncio
     async def test_list_supported_voices_speaches(self):
         """Test listing supported voices for Speaches backend."""
