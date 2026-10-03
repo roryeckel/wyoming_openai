@@ -513,3 +513,93 @@ async def test_main_configures_realtime_stt_models(monkeypatch):
     assert handler._stt_client is not None
     assert handler._tts_client is None
     assert handler._stt_realtime_models == {"gpt-realtime-whisper"}
+
+
+async def _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args):
+    """Run main() against fake backends and return the keyword arguments the handler factory was configured with."""
+    created = []
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(
+        main_module.AsyncServer,
+        "from_uri",
+        staticmethod(lambda uri: _CapturingServer()),
+    )
+    monkeypatch.setattr(main_module, "OpenAIEventHandler", lambda *args, **kwargs: created.append(kwargs))
+    for env_var in ("TTS_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1", *cli_args])
+
+    await main()
+
+    assert len(created) == 1
+    return created[0]
+
+
+@pytest.mark.asyncio
+async def test_main_defaults_tts_concurrent_requests_to_three(monkeypatch):
+    monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert handler_kwargs["tts_concurrent_requests"] == 3
+
+
+@pytest.mark.asyncio
+async def test_main_treats_empty_tts_concurrent_requests_env_as_unset(monkeypatch):
+    monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", "")
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert handler_kwargs["tts_concurrent_requests"] == 3
+
+
+@pytest.mark.asyncio
+async def test_main_reads_tts_concurrent_requests_from_env(monkeypatch):
+    monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", "2")
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert handler_kwargs["tts_concurrent_requests"] == 2
+
+
+@pytest.mark.asyncio
+async def test_main_cli_tts_concurrent_requests_overrides_env(monkeypatch):
+    monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", "2")
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--tts-concurrent-requests", "4")
+
+    assert handler_kwargs["tts_concurrent_requests"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "-1", "two", "1.5"])
+async def test_main_rejects_invalid_tts_concurrent_requests_cli(monkeypatch, capsys, value):
+    monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-concurrent-requests", value])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "--tts-concurrent-requests: expected a whole number of at least 1" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "two"])
+async def test_main_rejects_invalid_tts_concurrent_requests_env(monkeypatch, capsys, value):
+    monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", value)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "--tts-concurrent-requests: expected a whole number of at least 1" in capsys.readouterr().err
