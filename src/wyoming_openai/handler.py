@@ -712,10 +712,14 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
 
             language = self._current_language
-            if language is not None and self._uses_plural_stt_languages(self._current_asr_model.name):
-                # These models take `languages` (not yet typed by the SDK) and reject it alongside `language`
-                extra_body = {"languages": [language], **(extra_body or {})}
-                language = None
+            if self._uses_plural_stt_languages(self._current_asr_model.name):
+                # These models take `languages` (not yet typed by the SDK) and reject it alongside `language`,
+                # so a singular extra_body override is translated as well
+                extra_body = dict(extra_body or {})
+                language = extra_body.pop("language", language)
+                if language is not None:
+                    extra_body.setdefault("languages", [language])
+                    language = None
 
             transcription_kwargs = {
                 "file": self._wav_buffer,
@@ -1832,11 +1836,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             float | None: Final timestamp after streaming, or None on error.
         """
+        audio_start_requested = send_audio_start
+        timestamp = start_timestamp
         try:
             audio_rate = TTS_AUDIO_RATE
             audio_width = DEFAULT_AUDIO_WIDTH
             audio_channels = DEFAULT_AUDIO_CHANNELS
-            timestamp = start_timestamp
             # Realtime audio is always headerless PCM
             awaiting_wav_header = self._get_tts_response_format() == "wav" and not self._is_tts_voice_realtime(voice)
             pending_header = b""
@@ -1950,6 +1955,10 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
+            if audio_start_requested and not send_audio_start:
+                # This call opened the audio stream, and callers only close streams that completed
+                with contextlib.suppress(Exception):
+                    await self.write_event(AudioStop(timestamp=int(timestamp)).event())
             return None
 
     def _advance_audio_timestamp(

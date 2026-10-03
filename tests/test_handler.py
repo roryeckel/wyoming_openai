@@ -2954,8 +2954,44 @@ async def test_realtime_tts_failure_closes_connection(enhanced_handler, realtime
 
     assert result is False
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-    assert "audio-stop" not in event_types
+    # Audio that was already started is terminated; a failure before any audio emits nothing
+    assert event_types in ([], ["audio-start", "audio-chunk", "audio-stop"])
+    assert event_types.count("audio-start") == event_types.count("audio-stop")
     assert manager.exited is True
+
+
+@pytest.mark.asyncio
+async def test_incremental_realtime_tts_failure_stops_audio_once(enhanced_handler, realtime_tts):
+    """Test a Realtime response failing after audio closes the stream exactly once when streaming."""
+    realtime_tts(_realtime_tts_events(status="failed"))
+    voice = SynthesizeVoice(name="alloy")
+
+    await enhanced_handler.handle_event(SynthesizeStart(voice=voice).event())
+    result = await enhanced_handler.handle_event(SynthesizeChunk(text="First sentence. Second one.").event())
+
+    assert result is False
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-chunk", "audio-stop", "synthesize-stopped"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stt_extra_body", "expected_languages"),
+    [({"language": "de"}, ["de"]), ({"language": "de", "languages": ["fr"]}, ["fr"])],
+)
+async def test_transcribe_translates_singular_language_extra_body_for_plural_models(
+    enhanced_handler, mock_info, mock_clients, stt_extra_body, expected_languages
+):
+    """Test a singular `language` extra_body override never reaches gpt-transcribe next to `languages`."""
+    stt_client, _ = mock_clients
+    stt_client.backend = OpenAIBackend.OPENAI
+    mock_info.asr[0].models[0].name = "gpt-transcribe"
+    enhanced_handler._stt_extra_body = stt_extra_body
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "gpt-transcribe")
+
+    assert call_args["language"] is omit
+    assert call_args["extra_body"] == {"languages": expected_languages}
 
 
 @pytest.mark.asyncio
