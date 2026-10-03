@@ -469,6 +469,12 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         raise ValueError("TTS Realtime extra_body audio must be an object whose output, if set, is an object")
 
     output = get_realtime_tts_audio_output(extra_body)
+    if "voice" in output:
+        raise ValueError(
+            "TTS Realtime extra_body audio.output.voice is not supported; "
+            "the voice is chosen per request by the Wyoming client"
+        )
+
     speed = output.get("speed")
     if speed is not None and (isinstance(speed, bool) or not isinstance(speed, int | float)):
         raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a number; got {speed!r}")

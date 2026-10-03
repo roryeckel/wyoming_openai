@@ -47,7 +47,6 @@ from .utilities import (
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
-    get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_tts_extra_body,
@@ -1560,6 +1559,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 )
                 chunks = [chunk for chunk in chunks if self._is_tts_text_speakable(chunk, voice)]
                 if not chunks:
+                    # As with empty text above, a streaming synthesis ends on synthesize-stopped without audio events
                     _LOGGER.warning("No speakable text to synthesize")
                     await self.write_event(SynthesizeStopped().event())
                     return True
@@ -1741,8 +1741,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         extra_body = dict(self._tts_realtime_extra_body or {})
         audio_override = extra_body.pop("audio", None)
         audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
-        audio_override.pop("output", None)
-        output_override = get_realtime_tts_audio_output(self._tts_realtime_extra_body)
+        output_override = audio_override.pop("output", None)
+        output_override = dict(output_override) if isinstance(output_override, dict) else {}
         output_override.pop("speed", None)
 
         instructions = REALTIME_TTS_INSTRUCTIONS
@@ -1750,9 +1750,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             instructions = f"{instructions}\n\nDelivery style: {self._tts_instructions}"
 
         audio_output: dict[str, object] = {
-            "voice": self._get_backend_voice_name(voice),
             **output_override,
-            # Wyoming is told 24 kHz PCM16, so the output encoding is not overridable
+            # The Wyoming client picks the voice, and is told 24 kHz PCM16, so neither is overridable
+            "voice": self._get_backend_voice_name(voice),
             "format": dict(REALTIME_TTS_AUDIO_FORMAT),
         }
         speed = get_realtime_tts_speed(self._tts_speed, self._tts_realtime_extra_body)
@@ -1774,7 +1774,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         assert self._tts_client is not None
         connection_manager = self._tts_client.realtime.connect(model=voice.model_name)
         connection = await self._enter_realtime_connection(connection_manager)
-        completed = False
         try:
             await connection.session.update(session=self._get_realtime_tts_session(voice))
             await connection.response.create(
@@ -1822,20 +1821,14 @@ class OpenAIEventHandler(AsyncEventHandler):
                     if not received_audio:
                         raise RealtimeSynthesisError("Realtime response completed without any audio")
                     self._check_realtime_tts_fidelity(text, " ".join([*spoken_parts, spoken_pending]))
-                    completed = True
                     return
                 elif event_type == "error":
                     raise RealtimeSynthesisError(self._get_realtime_event_error_message(event))
 
             raise RealtimeSynthesisError("Realtime connection closed before synthesis completed")
         finally:
-            if completed:
-                # All audio was delivered, so the closing handshake must not hold up the end of the stream
-                self._run_in_background(
-                    connection_manager.__aexit__(None, None, None), name="openai_realtime_tts_close"
-                )
-            else:
-                await connection_manager.__aexit__(None, None, None)
+            # The closing handshake must not hold up the end of the audio stream or an abort
+            self._run_in_background(connection_manager.__aexit__(None, None, None), name="openai_realtime_tts_close")
 
     def _describe_realtime_status_details(self, response: Any) -> str:
         """Format why a Realtime response did not complete, for error messages."""

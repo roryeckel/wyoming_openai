@@ -317,6 +317,7 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         ({"audio": "pcm"}, "audio must be an object"),
         ({"audio": {"output": {"speed": "fast"}}}, "speed must be a number"),
         ({"audio": {"output": {"speed": True}}}, "speed must be a number"),
+        ({"audio": {"output": {"voice": "cedar"}}}, r"audio\.output\.voice"),
     ],
 )
 def test_validate_realtime_tts_extra_body_rejects_incompatible_overrides(extra_body, message):

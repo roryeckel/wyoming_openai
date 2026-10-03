@@ -72,37 +72,20 @@ async def main():
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
-    stt_extra_body_env = os.getenv("STT_EXTRA_BODY")
-    stt_extra_body_default = None
-    if stt_extra_body_env:
+    def json_env_default(env_name: str, json_parser):
+        """Parse a JSON object from an environment variable, or None when it is unset."""
+        value = os.getenv(env_name)
+        if not value:
+            return None
         try:
-            stt_extra_body_default = stt_extra_body_parser(stt_extra_body_env)
+            return json_parser(value)
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
-    stt_realtime_extra_body_env = os.getenv("STT_REALTIME_EXTRA_BODY")
-    stt_realtime_extra_body_default = None
-    if stt_realtime_extra_body_env:
-        try:
-            stt_realtime_extra_body_default = stt_realtime_extra_body_parser(stt_realtime_extra_body_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
-
-    tts_extra_body_env = os.getenv("TTS_EXTRA_BODY")
-    tts_extra_body_default = None
-    if tts_extra_body_env:
-        try:
-            tts_extra_body_default = tts_extra_body_parser(tts_extra_body_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
-
-    tts_realtime_extra_body_env = os.getenv("TTS_REALTIME_EXTRA_BODY")
-    tts_realtime_extra_body_default = None
-    if tts_realtime_extra_body_env:
-        try:
-            tts_realtime_extra_body_default = tts_realtime_extra_body_parser(tts_realtime_extra_body_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
+    stt_extra_body_default = json_env_default("STT_EXTRA_BODY", stt_extra_body_parser)
+    stt_realtime_extra_body_default = json_env_default("STT_REALTIME_EXTRA_BODY", stt_realtime_extra_body_parser)
+    tts_extra_body_default = json_env_default("TTS_EXTRA_BODY", tts_extra_body_parser)
+    tts_realtime_extra_body_default = json_env_default("TTS_REALTIME_EXTRA_BODY", tts_realtime_extra_body_parser)
 
     # General configuration
     parser.add_argument(

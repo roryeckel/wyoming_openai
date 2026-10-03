@@ -313,6 +313,21 @@ class TestCustomAsyncOpenAI:
         assert not {"fable", "onyx", "nova"} & realtime_voices
         assert {"fable", "onyx", "nova"} <= speech_voices
 
+    @pytest.mark.asyncio
+    async def test_list_supported_voices_realtime_models_on_other_servers(self):
+        """Test Realtime TTS models keep the regular voice list on servers other than the official API."""
+        custom_client = CustomAsyncOpenAI(
+            api_key="test-key", base_url="http://localhost:8000/v1", backend=OpenAIBackend.OPENAI
+        )
+
+        voices = await custom_client.list_supported_voices(
+            ["gpt-realtime-2.1-mini"], [], ["en"], realtime_model_names=["gpt-realtime-2.1-mini"]
+        )
+
+        voice_names = {v.backend_voice_name for v in voices}
+        assert {"fable", "onyx", "nova"} <= voice_names
+        assert not {"marin", "cedar"} & voice_names
+
     def test_create_tts_voices_limits_realtime_models_to_realtime_voices(self, caplog):
         """Test configured voices the Realtime API does not offer are not advertised for Realtime models."""
         with caplog.at_level("WARNING", logger="wyoming_openai.compatibility"):

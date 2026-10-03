@@ -10,7 +10,6 @@ services:
       WYOMING_LOG_LEVEL: INFO
       WYOMING_LANGUAGES: en
       STT_OPENAI_URL: https://api.openai.com/v1
-      STT_MODELS: "gpt-transcribe"
       STT_STREAMING_MODELS: "gpt-transcribe"
       STT_REALTIME_MODELS: "gpt-live-transcribe gpt-realtime-whisper"
       STT_BACKEND: "OPENAI"

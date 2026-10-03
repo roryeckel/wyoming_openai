@@ -2964,6 +2964,7 @@ async def test_realtime_tts_failure_closes_connection(enhanced_handler, realtime
     assert result is False
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
     assert event_types == expected_event_types
+    await enhanced_handler._drain_background_tasks()
     assert manager.exited is True
 
 
@@ -3050,8 +3051,9 @@ def test_realtime_tts_session_merges_audio_overrides_without_changing_format(enh
 
     session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
 
+    # The voice the Wyoming client selected is kept as well
     assert session["audio"] == {
-        "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "cedar", "speed": 0.5}
+        "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "alloy", "speed": 0.5}
     }
 
 
@@ -3099,12 +3101,13 @@ async def test_realtime_tts_times_out_when_server_stalls(enhanced_handler, realt
     assert result is False
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
     assert event_types == ["audio-start", "audio-chunk", "audio-stop"]
+    await enhanced_handler._drain_background_tasks()
     assert manager.exited is True
 
 
 @pytest.mark.asyncio
 async def test_realtime_tts_closes_websocket_when_client_write_fails(enhanced_handler, realtime_tts):
-    """Test the websocket is closed before the handler returns when the Wyoming client goes away mid-stream."""
+    """Test the websocket is closed by the time the handler disconnects when the Wyoming client goes away."""
     _, manager = realtime_tts(_realtime_tts_events())
     enhanced_handler.write_event = AsyncMock(side_effect=[None, ConnectionResetError("client gone"), None])
 
@@ -3113,6 +3116,8 @@ async def test_realtime_tts_closes_websocket_when_client_write_fails(enhanced_ha
     )
 
     assert result is False
+    # A failed synthesis closes in the background too, so an abort never waits on the closing handshake
+    await enhanced_handler.disconnect()
     assert manager.exited is True
 
 
