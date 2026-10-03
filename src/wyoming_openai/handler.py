@@ -49,6 +49,7 @@ from .utilities import (
     get_extra_body_boolean_field,
     get_realtime_tts_speed,
     strip_ssml,
+    validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
@@ -172,6 +173,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
         if self._has_asr_models():
             validate_stt_extra_body(self._stt_extra_body)
+            validate_realtime_stt_extra_body(self._stt_realtime_extra_body)
 
         self._tts_client = tts_client
         self._tts_speed = tts_speed
@@ -879,10 +881,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # These models reject `language` alongside `languages`, so a singular extra_body override is translated
         override = extra_body.pop("language", language)
-        if override is None or "languages" in extra_body:
-            # An extra_body `languages` list replaces the request language when the body is merged
+        if not isinstance(override, str) or not override or "languages" in extra_body:
+            # An extra_body `languages` list replaces the request language when the body is merged,
+            # and without a usable language the model detects it
             return None, None, extra_body
-        return None, [str(override)], extra_body
+        return None, [override], extra_body
 
     def _is_tts_voice_realtime(self, voice: TtsVoiceModel) -> bool:
         """Check if a TTS voice should be synthesized over OpenAI Realtime."""
@@ -1241,7 +1244,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not matches:
             return None
 
-        voice = next((voice for voice in matches if voice.model_name == match["model"]), matches[0])
+        # A model that is gone falls back to the speech API where possible rather than onto a Realtime model
+        candidates = [
+            [voice for voice in matches if voice.model_name == match["model"]],
+            [voice for voice in matches if not self._is_tts_voice_realtime(voice)],
+            matches,
+        ]
+        voice = next(group for group in candidates if group)[0]
         _LOGGER.warning(
             "Voice %s is no longer advertised under that name. Falling back to %s for backward compatibility. "
             "Update the client to use one of: %s",
@@ -1761,10 +1770,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_output["speed"] = clamp_realtime_tts_speed(speed)
 
         return {
+            **extra_body,
             "type": "realtime",
             "output_modalities": ["audio"],
             "tool_choice": "none",
-            **extra_body,
             "instructions": instructions,
             "audio": {**audio_override, "output": audio_output},
         }
@@ -1873,9 +1882,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             if wav_params:
                 audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
                 available_audio = audio_data[data_offset:]
-                if data_size is None:
+                if not data_size:
+                    # A zero size is also what servers write when streaming audio of unknown length
                     audio_data = available_audio
-                    pcm_size = "unknown (0xFFFFFFFF sentinel)"
+                    pcm_size = "unknown (unbounded or zero size)"
                 else:
                     if len(available_audio) < data_size:
                         _LOGGER.warning(
@@ -1997,9 +2007,10 @@ class OpenAIEventHandler(AsyncEventHandler):
                             if wav_params:
                                 audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
                                 available_audio = pending_header[data_offset:]
-                                if data_size is None:
+                                if not data_size:
+                                    # A zero size is also what servers write when streaming audio of unknown length
                                     audio_data = available_audio
-                                    pcm_size = "unknown (0xFFFFFFFF sentinel)"
+                                    pcm_size = "unknown (unbounded or zero size)"
                                 else:
                                     audio_data = available_audio[:data_size]
                                     remaining_wav_data = data_size - len(audio_data)

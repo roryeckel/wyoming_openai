@@ -16,6 +16,7 @@ from wyoming.tts import SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
 from wyoming_openai.compatibility import (
     OpenAIBackend,
+    TtsVoiceModel,
     create_asr_programs,
     create_info,
     create_tts_programs,
@@ -2985,7 +2986,13 @@ async def test_incremental_realtime_tts_failure_stops_audio_once(enhanced_handle
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stt_extra_body", "expected_languages"),
-    [({"language": "de"}, ["de"]), ({"language": "de", "languages": ["fr"]}, ["fr"])],
+    [
+        ({"language": "de"}, ["de"]),
+        ({"language": "de", "languages": ["fr"]}, ["fr"]),
+        # Without a usable language the field is left out and the model detects it
+        ({"language": ""}, omit),
+        ({"language": ["de", "fr"]}, omit),
+    ],
 )
 async def test_transcribe_translates_singular_language_extra_body_for_plural_models(
     enhanced_handler, mock_info, mock_clients, stt_extra_body, expected_languages
@@ -3122,6 +3129,33 @@ async def test_realtime_tts_closes_websocket_when_client_write_fails(enhanced_ha
 
 
 @pytest.mark.asyncio
+async def test_realtime_tts_abort_does_not_wait_for_websocket_close(enhanced_handler, realtime_tts):
+    """Test a failed synthesis reports back while the websocket closing handshake is still pending."""
+    _, manager = realtime_tts([_FakeRealtimeServerEvent("error", error={"message": "invalid voice"})])
+    release_close = asyncio.Event()
+    close_connection = manager.connection.close
+
+    async def slow_close():
+        await release_close.wait()
+        await close_connection()
+
+    manager.connection.close = slow_close
+
+    result = await asyncio.wait_for(
+        enhanced_handler.handle_event(
+            Event(type="synthesize", data={"text": "Hello world", "voice": {"name": "alloy"}})
+        ),
+        timeout=1,
+    )
+
+    assert result is False
+    assert manager.connection.closed is False
+    release_close.set()
+    await enhanced_handler.disconnect()
+    assert manager.connection.closed is True
+
+
+@pytest.mark.asyncio
 async def test_realtime_tts_fidelity_joins_transcript_parts(enhanced_handler, realtime_tts, caplog):
     """Test a response spoken in several transcript parts is compared as a whole."""
     encoded = base64.b64encode(REALTIME_TTS_PCM).decode()
@@ -3233,6 +3267,24 @@ async def test_http_tts_header_only_wav_is_an_empty_success(enhanced_handler, mo
 
 
 @pytest.mark.asyncio
+async def test_http_tts_zero_size_wav_header_followed_by_audio_is_played(enhanced_handler, mock_info, mock_clients):
+    """Test audio after a header that declares no samples is played, as servers streaming unknown lengths send it."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    pcm = b"\x00\x01" * 240
+
+    _mock_speech_response(tts_client, [_header_only_wav(), pcm])
+    assert await enhanced_handler._stream_tts_audio(voice, "Hello", send_audio_start=True) == 10
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert [event.type for event in events] == ["audio-start", "audio-chunk"]
+    assert events[1].payload == pcm
+
+    enhanced_handler.write_event.reset_mock()
+    assert await enhanced_handler._stream_audio_to_wyoming(_header_only_wav() + pcm, False, 0) == 10
+    assert enhanced_handler.write_event.call_args.args[0].payload == pcm
+
+
+@pytest.mark.asyncio
 async def test_http_tts_empty_body_fails_without_starting_audio(enhanced_handler, mock_info, mock_clients):
     """Test a speech response without any bytes fails on the standalone, direct and buffered paths."""
     _, tts_client = mock_clients
@@ -3304,6 +3356,25 @@ def test_suffixed_voice_name_resolves_after_models_change(enhanced_handler, mock
     assert voice is mock_info.tts[0].voices[0]
     assert "no longer advertised" in caplog.text
     assert enhanced_handler._validate_tts_voice_and_language("unknown (gpt-4o-mini-tts)", None) is None
+
+
+def test_suffixed_voice_name_of_a_removed_model_prefers_the_speech_api(enhanced_handler, mock_info):
+    """Test a "voice (model)" name whose model is gone does not move the client onto a Realtime model."""
+    speech_voice = mock_info.tts[0].voices[0]
+    realtime_voice = TtsVoiceModel(
+        name="alloy (gpt-realtime-2.1-mini)",
+        model_name=REALTIME_TTS_MODEL,
+        backend_voice_name=speech_voice.backend_voice_name,
+        description="alloy",
+        attribution=speech_voice.attribution,
+        installed=True,
+        languages=speech_voice.languages,
+        version=None,
+    )
+    mock_info.tts[0].voices.insert(0, realtime_voice)
+    enhanced_handler._tts_realtime_models = {REALTIME_TTS_MODEL}
+
+    assert enhanced_handler._validate_tts_voice_and_language("alloy (tts-1-hd)", None) is speech_voice
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from wyoming_openai.utilities import (
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
+    validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
@@ -318,12 +319,23 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         ({"audio": {"output": {"speed": "fast"}}}, "speed must be a number"),
         ({"audio": {"output": {"speed": True}}}, "speed must be a number"),
         ({"audio": {"output": {"voice": "cedar"}}}, r"audio\.output\.voice"),
+        ({"output_modalities": ["text"]}, "'output_modalities'"),
+        ({"type": "transcription", "tools": []}, "'tools', 'type'"),
+        ({"tool_choice": "required"}, "'tool_choice'"),
     ],
 )
 def test_validate_realtime_tts_extra_body_rejects_incompatible_overrides(extra_body, message):
     """Realtime TTS rejects overrides that would change the audio Wyoming is told to expect."""
     with pytest.raises(ValueError, match=message):
         validate_realtime_tts_extra_body(extra_body)
+
+
+def test_validate_realtime_stt_extra_body_rejects_model_override():
+    """Realtime STT keeps the model the Wyoming client selected."""
+    validate_realtime_stt_extra_body(None)
+    validate_realtime_stt_extra_body({"keywords": ["Wyoming"], "languages": ["en"]})
+    with pytest.raises(ValueError, match="'model'"):
+        validate_realtime_stt_extra_body({"model": "gpt-live-transcribe"})
 
 
 def test_realtime_tts_speed_prefers_audio_output_override_and_clamps():

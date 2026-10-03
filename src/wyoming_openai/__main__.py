@@ -25,6 +25,7 @@ from .utilities import (
     create_json_object_parser,
     get_realtime_tts_speed,
     parse_positive_int,
+    validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
@@ -283,6 +284,7 @@ async def main():
     try:
         if stt_requested:
             validate_stt_extra_body(args.stt_extra_body)
+            validate_realtime_stt_extra_body(args.stt_realtime_extra_body)
         if tts_requested and args.tts_voices:
             validate_tts_extra_body(args.tts_extra_body)
         if args.tts_realtime_models:
