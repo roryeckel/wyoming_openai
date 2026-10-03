@@ -346,6 +346,24 @@ def create_json_object_parser(option_name: str) -> Callable[[str], dict[str, obj
     return parse_json_object
 
 
+def parse_positive_int(value: str) -> int:
+    """
+    Parse an argparse value that must be a whole number of at least 1.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is not an integer or is smaller than 1.
+    """
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of at least 1, got '{value}'") from None
+
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"expected a whole number of at least 1, got {number}")
+
+    return number
+
+
 def validate_extra_body_response_format(
     extra_body: dict[str, object] | None, *, allowed_formats: set[str], body_name: str
 ) -> None:
