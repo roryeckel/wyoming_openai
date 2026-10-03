@@ -10,7 +10,7 @@ Note: This project is not affiliated with OpenAI or the Wyoming project.
 
 ## Overview
 
-This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries with [yasbd](https://github.com/speedyk-005/yasbd-lib) for responsive audio delivery. When streaming is enabled, Wyoming OpenAI prefetches up to three OpenAI synthesis requests in parallel while playing the audio sequentially, keeping latency low without breaking event order.
+This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server that connects to OpenAI-compatible endpoints of your choice. Like a proxy, it enables Wyoming clients such as the [Home Assistant Wyoming Integration](https://www.home-assistant.io/integrations/wyoming/) to use the transcription (Automatic Speech Recognition - ASR) and text-to-speech synthesis (TTS) capabilities of various OpenAI-compatible projects. By acting as a bridge between the Wyoming protocol and OpenAI, you can consolidate the resource usage on your server and extend the capabilities of Home Assistant. The proxy now provides incremental TTS streaming compatibility by intelligently chunking text at sentence boundaries with [yasbd](https://github.com/speedyk-005/yasbd-lib) for responsive audio delivery. When streaming is enabled, Wyoming OpenAI prefetches several OpenAI synthesis requests in parallel while playing the audio sequentially, keeping latency low without breaking event order.
 
 ## Featured Models
 
@@ -182,11 +182,12 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0; capped at 1.5 for `TTS_REALTIME_MODELS`). |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
 | `--tts-extra-body`                      | `TTS_EXTRA_BODY`                           | None                                          | JSON object merged into the TTS request body via `extra_body` for backend-specific fields. Audio settings such as `response_format`, `speed`, and `instructions` may override top-level values, but `stream` and `stream_format` are rejected. |
-| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `gpt-4o-mini-tts`) with up to three concurrent synthesis requests. |
+| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `gpt-4o-mini-tts`) with up to three concurrent synthesis requests by default (see `TTS_CONCURRENT_REQUESTS`). |
 | `--tts-realtime-models`                 | `TTS_REALTIME_MODELS`                      | None                                          | Space-separated list of TTS models that synthesize over OpenAI's `/v1/realtime` API instead of `/v1/audio/speech` (e.g. `gpt-realtime-2.1-mini`). These are added to the TTS models and can also be listed in `TTS_STREAMING_MODELS`. Experimental; see [OpenAI Model Deprecations](#openai-model-deprecations). |
 | `--tts-realtime-extra-body`             | `TTS_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the Realtime session of `TTS_REALTIME_MODELS`, for example `{"reasoning": {"effort": "low"}}`. `TTS_EXTRA_BODY` is not applied to Realtime models. `audio.output.format` must remain 24 kHz `audio/pcm`. |
 | `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
 | `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
+| `--tts-concurrent-requests`             | `TTS_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of simultaneous TTS requests per Wyoming connection while streaming TTS synthesizes several sentences at once. Lower it for a backend that cannot serve parallel requests, raise it for one that can. Must be a whole number of at least 1. |
 
 `STT_STREAMING_MODELS` and `STT_REALTIME_MODELS` select different STT transports. `STT_STREAMING_MODELS` still uses `/v1/audio/transcriptions` with response streaming after Wyoming `AudioStop`. `STT_REALTIME_MODELS` opens a `/v1/realtime` transcription session, sends 24 kHz mono PCM16 audio chunks as Wyoming audio arrives, commits on Wyoming `AudioStop`, and emits `TranscriptChunk` deltas plus a final `Transcript`.
 
@@ -517,11 +518,11 @@ sequenceDiagram
     WY->>HA: AudioStop event
   else Streaming TTS (SynthesizeStart/Chunk/Stop)
     HA->>WY: SynthesizeStart event (voice config)
-    Note over WY: Initialize incremental synthesis<br/>with yasbd-powered sentence boundary detection<br/>and up to three concurrent OpenAI TTS requests
+    Note over WY: Initialize incremental synthesis<br/>with yasbd-powered sentence boundary detection<br/>and up to three concurrent OpenAI TTS requests by default
     WY->>HA: AudioStart event
     loop Sending text chunks
       HA->>WY: SynthesizeChunk events
-      Note over WY: Accumulate text and detect<br/>complete sentences using yasbd sentence chunking<br/>while prefetching audio in parallel (max 3 concurrent requests)
+      Note over WY: Accumulate text and detect<br/>complete sentences using yasbd sentence chunking<br/>while prefetching audio in parallel (max 3 concurrent requests by default)
       alt Complete sentences detected
         loop For each complete sentence
           WY->>OAPI: Speech synthesis request
