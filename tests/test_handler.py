@@ -2914,7 +2914,7 @@ async def realtime_tts(enhanced_handler, mock_info, mock_clients):
         tts_client.realtime.connect = Mock(side_effect=open_connection)
         return managers
 
-    setattr(connect, "each", connect_each)
+    connect.each = connect_each  # type: ignore[attr-defined]
 
     yield connect
 
