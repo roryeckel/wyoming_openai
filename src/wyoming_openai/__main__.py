@@ -210,7 +210,10 @@ async def main():
         "--tts-speed",
         type=float,
         default=float(_v) if (_v := os.getenv("TTS_SPEED")) else None,
-        help="Speed of the TTS output (0.25 to 4.0, default is None for OpenAI default)",
+        help=(
+            "Speed of the TTS output (0.25 to 4.0, capped at 1.5 for Realtime models; "
+            "default is None for OpenAI default)"
+        ),
     )
     parser.add_argument(
         "--tts-instructions", default=os.getenv("TTS_INSTRUCTIONS", None), help="Optional instructions for TTS requests"

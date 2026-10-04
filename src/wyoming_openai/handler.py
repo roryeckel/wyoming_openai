@@ -1099,30 +1099,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         segmenter = BoundaryDetector(lang=sd_language)
         # preserve_whitespace=False strips leading/trailing whitespace from each sentence
 
-        chunks = []
-        current_chunk = ""
-
-        for sentence in segmenter.segment(text):
-            # Check if adding this sentence would exceed max_chars
-            potential_chunk = current_chunk + " " + sentence if current_chunk else sentence
-
-            if (
-                max_chars
-                and len(potential_chunk) > max_chars
-                and current_chunk
-                and (not min_words or self._meets_min_criteria(current_chunk, min_words))
-            ):
-                # Current chunk is ready, start new chunk with this sentence. One below the minimum
-                # keeps growing past max_chars instead: text is never dropped
-                chunks.append(current_chunk.strip())
-                current_chunk = sentence
-            elif not max_chars and not min_words:
-                # No limits set - each sentence becomes its own chunk for natural streaming
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence
-            else:
-                current_chunk = potential_chunk
+        merged, current_chunk = self._merge_sentences(list(segmenter.segment(text)), min_words, max_chars)
+        chunks = [chunk.strip() for chunk in merged]
 
         # A remainder below the minimum joins the chunk before it rather than being dropped
         if current_chunk:
@@ -1132,6 +1110,31 @@ class OpenAIEventHandler(AsyncEventHandler):
                 chunks.append(current_chunk.strip())
 
         return chunks if chunks else [text]  # Fallback to original text if no valid chunks
+
+    def _merge_sentences(
+        self, sentences: list[str], min_words: int | None, max_chars: int | None, joiner: str = " "
+    ) -> tuple[list[str], str]:
+        """
+        Merge sentences into chunks within the configured limits.
+
+        Returns the finished chunks and the chunk still open after the last sentence. Without limits every
+        sentence is its own chunk. A chunk below `min_words` keeps growing, past `max_chars` if need be, so
+        text is never dropped; one that meets the minimum is closed once the next sentence would exceed
+        `max_chars`, or right away when no maximum is set.
+        """
+        chunks: list[str] = []
+        current_chunk = ""
+
+        for sentence in sentences:
+            potential_chunk = current_chunk + joiner + sentence if current_chunk else sentence
+            meets_min = not min_words or self._meets_min_criteria(current_chunk, min_words)
+            if current_chunk and meets_min and (not max_chars or len(potential_chunk) > max_chars):
+                chunks.append(current_chunk)
+                current_chunk = sentence
+            else:
+                current_chunk = potential_chunk
+
+        return chunks, current_chunk
 
     def _meets_min_criteria(self, text: str, min_words: int) -> bool:
         """Check if text chunk meets minimum word requirement."""
@@ -1255,7 +1258,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                 start_timestamp=self._current_timestamp,
                 audio_format=self._get_tts_audio_format(voice),
                 text=sentences[i],
-                allow_empty=True,
             )
 
             if chunk_timestamp is None:
@@ -1292,8 +1294,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             text=text,
             send_audio_start=(not self._audio_started),
             start_timestamp=self._current_timestamp,
-            open_empty_stream=False,
-            allow_empty=True,
+            sentence=True,
         )
 
         if timestamp is not None:
@@ -1559,17 +1560,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     self._current_timestamp = 0
                     self._skipped_speakable_sentence = False
 
-            # Use shared streaming logic
-            final_timestamp = await self._create_synthesis_task(
-                self._stream_tts_audio(voice, text, send_audio_start=True), name="unsplit_synthesis"
-            )
-
-            if final_timestamp is not None:
-                # Send audio stop after streaming completes
-                await self._write_tts_audio_stop(final_timestamp)
-                _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(text))
-                return True
-            return False
+            return await self._synthesize_non_streaming(text, voice)
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
@@ -1648,11 +1639,22 @@ class OpenAIEventHandler(AsyncEventHandler):
         sentences: list[str] = list(segmenter.segment(self._text_accumulator, preserve_whitespace=True))
 
         # Process complete sentences (all but the last one)
+        ready_sentences: list[str] = []
         if len(sentences) > 1:
-            # Keep only the last sentence in the accumulator
-            self._text_accumulator = sentences.pop()
-            ready_sentences = sentences
+            unfinished_sentence = sentences.pop()
+            # The same limits as the synthesize-stop fallback. The whitespace is already in the sentences
+            ready_sentences, open_chunk = self._merge_sentences(
+                sentences, self._tts_streaming_min_words, self._tts_streaming_max_chars, joiner=""
+            )
+            min_words = self._tts_streaming_min_words
+            if open_chunk and (not min_words or self._meets_min_criteria(open_chunk, min_words)):
+                # Spoken now rather than held for later text to fill it up to the maximum
+                ready_sentences.append(open_chunk)
+                open_chunk = ""
+            # A chunk below the minimum waits for more text; synthesize-stop speaks whatever is left
+            self._text_accumulator = open_chunk + unfinished_sentence
 
+        if ready_sentences:
             _LOGGER.info(
                 "Detected %d ready sentences for immediate synthesis: %s",
                 len(ready_sentences),
@@ -1976,10 +1978,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         start_timestamp: float,
         audio_format: TtsAudioFormat,
         text: str = "",
-        allow_empty: bool = False,
     ) -> float | None:
         """
-        Stream a buffered TTS response to Wyoming with proper timestamp calculation.
+        Stream the buffered TTS response of a sentence to Wyoming with proper timestamp calculation.
 
         Args:
             audio_data (bytes): Complete audio data to stream.
@@ -1988,7 +1989,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             start_timestamp (float): Starting timestamp for this chunk.
             audio_format (TtsAudioFormat): How the audio is framed, from `_get_tts_audio_format`.
             text (str): The text that was synthesized.
-            allow_empty (bool): Whether a sentence without audio may be skipped.
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
@@ -2004,14 +2004,13 @@ class OpenAIEventHandler(AsyncEventHandler):
             text=text,
             send_audio_start=is_first_chunk,
             start_timestamp=start_timestamp,
-            open_empty_stream=False,
             streamed=False,
-            allow_empty=allow_empty,
+            sentence=True,
         )
 
     async def _synthesize_non_streaming(self, text: str, voice: TtsVoiceModel) -> bool:
         """
-        Synthesize text using the existing non-streaming approach.
+        Synthesize text as one unsplit request.
 
         Args:
             text (str): Text to synthesize.
@@ -2027,7 +2026,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if final_timestamp is not None:
             # Send audio stop after streaming completes
             await self._write_tts_audio_stop(final_timestamp)
-            _LOGGER.info("Successfully synthesized non-streaming: %s", _truncate_for_log(text))
+            _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(text))
             return True
         return False
 
@@ -2087,8 +2086,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         text: str,
         send_audio_start: bool = True,
         start_timestamp: float = 0,
-        open_empty_stream: bool = True,
-        allow_empty: bool = False,
+        sentence: bool = False,
     ) -> float | None:
         """
         Stream TTS audio for the given text and voice.
@@ -2098,8 +2096,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             text (str): Text to synthesize.
             send_audio_start (bool): Whether to send AudioStart event.
             start_timestamp (float): Starting timestamp for audio chunks.
-            open_empty_stream (bool): Whether text with nothing to say still sends the requested AudioStart.
-            allow_empty (bool): Whether a sentence without audio may be skipped.
+            sentence (bool): Whether the text is one sentence of a synthesis rather than a whole request.
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
@@ -2115,9 +2112,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 text=text,
                 send_audio_start=send_audio_start,
                 start_timestamp=start_timestamp,
-                open_empty_stream=open_empty_stream,
                 streamed=True,
-                allow_empty=allow_empty,
+                sentence=sentence,
             )
 
     async def _play_tts_audio(
@@ -2128,9 +2124,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         text: str,
         send_audio_start: bool,
         start_timestamp: float,
-        open_empty_stream: bool,
         streamed: bool,
-        allow_empty: bool,
+        sentence: bool,
     ) -> float | None:
         """
         Send the audio of one TTS response to Wyoming, as it arrives or from a buffered response.
@@ -2141,9 +2136,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             text (str): The text that was synthesized.
             send_audio_start (bool): Whether the stream is still unopened, so AudioStart is sent first.
             start_timestamp (float): Starting timestamp for audio chunks.
-            open_empty_stream (bool): Whether a response without audio still sends the requested AudioStart.
             streamed (bool): Whether the bytes arrive from the backend right now, not from a buffered response.
-            allow_empty (bool): Whether a sentence without audio may be skipped.
+            sentence (bool): Whether this is one sentence of a synthesis rather than a whole request. A sentence
+                without audio is skipped and leaves the stream unopened for the next one; a whole request
+                still opens the stream when there is nothing to say and fails without audio for speakable text.
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
@@ -2180,7 +2176,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         )
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
-                    if audio_data or (open_empty_stream and not framer.awaiting_header):
+                    if audio_data or (not sentence and not framer.awaiting_header):
                         await write_audio(audio_data)
 
             if held_audio := framer.finish():
@@ -2196,7 +2192,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 return timestamp
 
             speakable = _has_speakable_content(text)
-            if framer.missing_bytes or (speakable and not allow_empty):
+            if framer.missing_bytes or (speakable and not sentence):
                 _LOGGER.error("TTS backend returned no audio for: %s", _truncate_for_log(text, 50))
                 await self._stop_failed_tts_stream(opened_stream, timestamp)
                 return None
@@ -2206,7 +2202,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._skipped_speakable_sentence = True
             else:
                 _LOGGER.debug("No audio for text with nothing to speak: %s", _truncate_for_log(text, 50))
-            if open_empty_stream:
+            if not sentence:
                 await write_audio(b"")
             return timestamp
 

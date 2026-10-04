@@ -17,7 +17,7 @@ These are the core surfaces this project intentionally targets.
 | OpenAI-compatible `/v1/audio/transcriptions` | Supported | Includes standard transcription handling and response-streaming support for configured models. |
 | OpenAI-compatible `/v1/audio/speech` | Supported | Includes provider-side audio byte streaming when the backend actually returns incremental bytes. |
 | OpenAI Realtime transcription via `/v1/realtime` | Supported | Used for configured realtime STT models. |
-| OpenAI Realtime speech synthesis via `/v1/realtime` | Experimental | Used for configured realtime TTS models; one out-of-band response per synthesis request. |
+| OpenAI Realtime speech synthesis via `/v1/realtime` | Experimental | Used for configured realtime TTS models; one session with one out-of-band response per synthesis request, or per sentence chunk for streaming models. |
 | Wyoming `synthesize-start/chunk/stop` input flow | Supported | Wyoming-side incremental text input is supported, while still targeting OpenAI-compatible TTS upstream. |
 | Wyoming transcription and synthesis event handling | Supported | Core project behavior. |
 
