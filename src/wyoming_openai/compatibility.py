@@ -450,6 +450,14 @@ class OpenAIBackend(Enum):
     LOCALAI = 3
 
 
+def uses_openai_realtime_voices(backend: OpenAIBackend | None) -> bool:
+    """
+    Check if Realtime TTS models on a backend get OpenAI's Realtime voice set instead of the speech API one.
+    As with STT `languages`, a proxy in front of OpenAI is classed as OPENAI and treated as OpenAI.
+    """
+    return backend == OpenAIBackend.OPENAI
+
+
 class CustomAsyncOpenAI(AsyncOpenAI):
     """
     Custom implementation of OpenAI's AsyncOpenAI class to handle API key authentication being optional.
@@ -637,7 +645,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
         model_voice_pairs: list[tuple[str, str]] = []
         for model_name in ordered_models:
-            if self.backend == OpenAIBackend.OPENAI and model_name in realtime_models:
+            if uses_openai_realtime_voices(self.backend) and model_name in realtime_models:
                 tts_voices = await self.list_openai_realtime_voices()
             elif self.backend == OpenAIBackend.OPENAI:
                 tts_voices = await self.list_openai_voices()

@@ -16,6 +16,7 @@ from .compatibility import (
     create_tts_programs,
     create_tts_voices,
     tts_voice_to_string,
+    uses_openai_realtime_voices,
 )
 from .const import DEFAULT_OPENAI_BASE_URL, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED, __version__
 from .handler import TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
@@ -337,8 +338,7 @@ async def main():
 
         openai_realtime_tts_models: list[str] = []
         if args.tts_realtime_models and tts_client is not None:
-            # As with STT `languages`, a proxy in front of OpenAI is treated as OpenAI
-            if tts_client.backend == OpenAIBackend.OPENAI:
+            if uses_openai_realtime_voices(tts_client.backend):
                 openai_realtime_tts_models = args.tts_realtime_models
             if not tts_client.is_official_openai:
                 _logger.warning(

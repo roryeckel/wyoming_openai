@@ -15,6 +15,7 @@ from wyoming_openai.compatibility import (
     format_tts_voice_name,
     parse_tts_voice_name,
     tts_voice_to_string,
+    uses_openai_realtime_voices,
 )
 from wyoming_openai.const import (
     ATTRIBUTION_NAME_PROGRAM,
@@ -329,6 +330,12 @@ class TestCustomAsyncOpenAI:
         voice_names = {v.backend_voice_name for v in voices}
         assert not {"fable", "onyx", "nova"} & voice_names
         assert {"marin", "cedar"} <= voice_names
+
+    def test_only_the_openai_backend_uses_openai_realtime_voices(self):
+        """Test the rule configured and listed voices share: Realtime models get OpenAI's voices on OPENAI only."""
+        assert uses_openai_realtime_voices(OpenAIBackend.OPENAI)
+        for backend in (OpenAIBackend.SPEACHES, OpenAIBackend.KOKORO_FASTAPI, OpenAIBackend.LOCALAI, None):
+            assert not uses_openai_realtime_voices(backend)
 
     def test_speech_only_voices_are_derived_from_the_voice_lists(self):
         """Test the voices skipped for Realtime models are the speech voices the Realtime API lacks."""

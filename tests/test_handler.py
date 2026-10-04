@@ -2062,7 +2062,7 @@ async def test_select_program_picks_tts_program_by_name(multi_program_handler):
     assert result is True
     assert multi_program_handler._selected_tts_program is not None
     assert multi_program_handler._selected_tts_program.name == "openai-streaming"
-    assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"
+    assert multi_program_handler._get_default_voice().name == "alloy (gpt-4o-mini-tts)"
 
 
 @pytest.mark.asyncio
@@ -2192,7 +2192,7 @@ async def test_no_select_program_defaults_to_first_program(multi_program_handler
 
     assert result is True
     assert multi_program_handler._current_asr_model.name == "gpt-4o-transcribe"
-    assert multi_program_handler._get_voice(None).name == "alloy (gpt-4o-mini-tts)"
+    assert multi_program_handler._get_default_voice().name == "alloy (gpt-4o-mini-tts)"
 
 
 @pytest.mark.asyncio
@@ -3710,11 +3710,23 @@ async def test_streaming_realtime_tts_with_nothing_to_speak_sends_no_audio_event
     assert event_types == ["synthesize-stopped"]
 
 
+def _header_only_wav_at_16khz():
+    """Build a WAV without samples whose header names another rate than the audio that follows it."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(b"")
+    return wav_buffer.getvalue()
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("silent_chunks", [[], [_header_only_wav_at_16khz()]])
 async def test_incremental_tts_skipped_first_sentence_does_not_fix_the_audio_format(
-    enhanced_handler, mock_info, mock_clients
+    enhanced_handler, mock_info, mock_clients, silent_chunks
 ):
-    """Test audio-start carries the format of the first sentence with audio, not the fallback one."""
+    """Test audio-start carries the format of the first sentence with audio, not the fallback or an empty WAV's."""
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
     enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
@@ -3726,7 +3738,7 @@ async def test_incremental_tts_skipped_first_sentence_does_not_fix_the_audio_for
         wav_file.writeframes(b"\x00\x01" * 10)
 
     def create(**kwargs):
-        chunks = [wav_buffer.getvalue()] if any(char.isalnum() for char in kwargs["input"]) else []
+        chunks = [wav_buffer.getvalue()] if any(char.isalnum() for char in kwargs["input"]) else silent_chunks
 
         async def iter_bytes(chunk_size=None):
             for chunk in chunks:
@@ -3821,10 +3833,12 @@ async def test_http_tts_zero_size_wav_does_not_play_trailing_riff_chunks(enhance
         assert await enhanced_handler._stream_tts_audio(voice, "...", send_audio_start=True) == 0
         assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
 
+    # A buffered sentence without samples leaves the stream for the next sentence to open
     enhanced_handler.write_event.reset_mock()
     wav = _header_only_wav() + trailer
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
-    assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
+    enhanced_handler.write_event.assert_not_called()
+    assert enhanced_handler._audio_started is False
 
 
 def test_suffixed_voice_name_with_duplicate_counter_resolves(enhanced_handler, mock_info):
@@ -3955,7 +3969,7 @@ async def test_zero_size_wav_does_not_play_any_whole_riff_chunk(enhanced_handler
     """Test metadata after an empty data chunk is recognised by its shape, not by a list of chunk ids."""
     wav = _header_only_wav() + trailer
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
-    assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
+    enhanced_handler.write_event.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -4020,3 +4034,110 @@ async def test_incremental_realtime_tts_failed_sentence_aborts_the_others(enhanc
     assert not enhanced_handler._synthesis_tasks
     await enhanced_handler._drain_background_tasks()
     assert all(manager.exited for manager in managers if manager.entered)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tts_extra_body", "chunks"),
+    [
+        # A PCM backend with nothing to say sends no bytes; a WAV one a header without samples
+        ({"response_format": "pcm"}, []),
+        (None, [_header_only_wav()]),
+    ],
+)
+async def test_streaming_http_tts_with_nothing_to_speak_is_synthesized_once(
+    enhanced_handler, mock_info, mock_clients, tts_extra_body, chunks
+):
+    """Test sentences that produced no audio are not sent to the backend again by the synthesize-stop fallback."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._tts_extra_body = tts_extra_body
+    _mock_speech_response(tts_client, chunks)
+
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+    assert await enhanced_handler.handle_event(SynthesizeChunk(text="... !!!").event())
+    assert await enhanced_handler.handle_event(Event(type="synthesize-stop"))
+
+    assert tts_client.audio.speech.with_streaming_response.create.call_count == 1
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["synthesize-stopped"]
+    assert enhanced_handler._synthesized_incrementally is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_size", [8192, 60000])
+async def test_zero_size_wav_does_not_play_a_large_trailing_riff_chunk(
+    enhanced_handler, mock_info, mock_clients, payload_size
+):
+    """Test metadata far larger than a stream chunk is not played, whether it arrives whole or split up."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    wav = _header_only_wav() + _riff_chunk(b"JUNK", b"\x01" * payload_size)
+
+    assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
+    enhanced_handler.write_event.assert_not_called()
+
+    # The speech response is read in pieces of TTS_CHUNK_SIZE, so the chunk is never seen whole at once
+    _mock_speech_response(tts_client, [wav[offset : offset + 2048] for offset in range(0, len(wav), 2048)])
+    assert await enhanced_handler._stream_tts_audio(voice, "...", send_audio_start=True) == 0
+    assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("send_audio_start", "expected_event_types"),
+    [
+        (True, ["audio-start", "audio-chunk", "audio-stop"]),
+        # A stream this call did not open is left to whoever opened it
+        (False, ["audio-chunk"]),
+    ],
+)
+async def test_cancelled_tts_stream_closes_the_audio_it_opened(
+    enhanced_handler, mock_info, mock_clients, send_audio_start, expected_event_types
+):
+    """Test a sentence cancelled after its audio started still ends the stream for a client that is connected."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    first_chunk_written = asyncio.Event()
+
+    async def iter_bytes(chunk_size=None):
+        yield b"\x00\x01" * 240
+        first_chunk_written.set()
+        await asyncio.Event().wait()
+
+    response = Mock()
+    response.iter_bytes = iter_bytes
+    stream_response = AsyncMock()
+    stream_response.__aenter__ = AsyncMock(return_value=response)
+    stream_response.__aexit__ = AsyncMock(return_value=None)
+    tts_client.audio.speech.with_streaming_response.create = Mock(return_value=stream_response)
+
+    task = asyncio.create_task(enhanced_handler._stream_tts_audio(voice, "Hello", send_audio_start=send_audio_start))
+    await first_chunk_written.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == expected_event_types
+
+
+@pytest.mark.asyncio
+async def test_headerless_wav_response_is_reported_by_the_path_that_saw_it(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test raw PCM answering a WAV request warns when it is streamed, and not for every buffered sentence."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    pcm = b"\x00\x01" * 40000  # More than is buffered while waiting for a header
+
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        assert await enhanced_handler._stream_audio_to_wyoming(pcm, True, 0, WAV_AUDIO_FORMAT)
+    assert "Could not parse WAV header" not in caplog.text
+    assert enhanced_handler.write_event.call_args.args[0].payload == pcm
+
+    _mock_speech_response(tts_client, [pcm])
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        assert await enhanced_handler._stream_tts_audio(voice, "Hello", send_audio_start=True)
+    assert caplog.text.count(f"Could not parse WAV header after buffering {len(pcm)} bytes") == 1
