@@ -6,7 +6,7 @@ import logging
 import struct
 import unicodedata
 import wave
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -341,7 +341,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             raise ValueError(f"tts_concurrent_requests must be at least 1, got {tts_concurrent_requests}")
         self._tts_semaphore = asyncio.Semaphore(tts_concurrent_requests)
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
-        self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence tasks still running
+        self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence and unsplit synthesis tasks still running
         self._background_tasks: set[asyncio.Task[Any]] = set()  # Cleanup that must not delay audio
 
     async def handle_event(self, event: Event) -> bool:
@@ -1316,13 +1316,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         task.add_done_callback(on_done)
         return task
 
-    def _create_synthesis_task(self, coro: Any, *, name: str) -> asyncio.Task[TtsStreamResult]:
-        """Start a sentence synthesis task that is cancelled if the session aborts or the client disconnects."""
+    def _create_synthesis_task[T](self, coro: Coroutine[Any, Any, T], *, name: str) -> asyncio.Task[T]:
+        """Start a synthesis task that is cancelled if the session aborts or the client disconnects."""
         # Its failure is reported by whoever awaits it
         return self._track_task(coro, name=name, tasks=self._synthesis_tasks, log_failure=False)
 
     async def _cancel_synthesis_tasks(self) -> None:
-        """Cancel sentence tasks that are still running so they stop holding backend connections."""
+        """Cancel synthesis tasks that are still running so they stop holding backend connections."""
         tasks = [task for task in self._synthesis_tasks if not task.done()]
         for task in tasks:
             task.cancel()
@@ -1560,7 +1560,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                     self._skipped_speakable_sentence = False
 
             # Use shared streaming logic
-            final_timestamp = await self._stream_tts_audio(voice, text, send_audio_start=True)
+            final_timestamp = await self._create_synthesis_task(
+                self._stream_tts_audio(voice, text, send_audio_start=True), name="unsplit_synthesis"
+            )
 
             if final_timestamp is not None:
                 # Send audio stop after streaming completes
@@ -2018,7 +2020,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             bool: True on success, False on error.
         """
-        final_timestamp = await self._stream_tts_audio(voice, text, send_audio_start=True)
+        final_timestamp = await self._create_synthesis_task(
+            self._stream_tts_audio(voice, text, send_audio_start=True), name="unsplit_synthesis"
+        )
 
         if final_timestamp is not None:
             # Send audio stop after streaming completes

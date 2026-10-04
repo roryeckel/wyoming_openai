@@ -2,6 +2,7 @@ import asyncio
 import base64
 import builtins
 import io
+import json
 import logging
 import struct
 import wave
@@ -14,6 +15,7 @@ from openai import omit
 from wyoming.asr import Transcript, TranscriptChunk
 from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
+from wyoming.server import AsyncTcpServer
 from wyoming.tts import SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
 from wyoming_openai.compatibility import (
@@ -4257,6 +4259,136 @@ async def test_plain_realtime_tts_cancellation_closes_tasks_and_audio(enhanced_h
     assert not enhanced_handler._audio_started
     await enhanced_handler._drain_background_tasks()
     assert all(m.exited and m.connection.closed for m in managers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup", ["stop", "disconnect"])
+@pytest.mark.parametrize("incremental_input", [False, True])
+@pytest.mark.parametrize("with_audio", [False, True])
+async def test_unsplit_realtime_tts_shutdown_cancels_request(
+    enhanced_handler, mock_info, realtime_tts, cleanup, incremental_input, with_audio
+):
+    """Shutdown cancels unsplit synthesis and drains its websocket cleanup before returning."""
+    mock_info.tts[0].supports_synthesize_streaming = False
+    connection, manager = realtime_tts(_realtime_tts_events()[:1] if with_audio else [])
+    connection.close = AsyncMock(wraps=connection.close)
+    if incremental_input:
+        assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+        assert await enhanced_handler.handle_event(SynthesizeChunk(text="Hello world").event())
+        event = Event(type="synthesize-stop")
+    else:
+        event = Event(type="synthesize", data={"text": "Hello world"})
+
+    async def write_event(event):
+        assert not enhanced_handler.writer.close.called
+
+    enhanced_handler.write_event.side_effect = write_event
+    task = asyncio.create_task(enhanced_handler.handle_event(event))
+    try:
+        async with asyncio.timeout(1):
+            while not connection.response.created or (
+                with_audio and len(enhanced_handler.write_event.call_args_list) < 2
+            ):
+                await asyncio.sleep(0)
+            await getattr(enhanced_handler, cleanup)()
+
+        assert task.done()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert manager.exited and connection.closed
+        connection.close.assert_awaited_once()
+        assert not enhanced_handler._synthesis_tasks
+        assert not enhanced_handler._background_tasks
+        events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert [event.type for event in events] == (["audio-start", "audio-chunk", "audio-stop"] if with_audio else [])
+        if with_audio:
+            assert events[-1].data["timestamp"] == 10
+        assert not enhanced_handler._audio_started
+    finally:
+        # Failure-only cleanup; successful shutdown must have already cancelled the request.
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_server_stop_cancels_unsplit_realtime_tts(enhanced_handler, mock_info, realtime_tts):
+    """Exercise the real server/handler lifecycle without relying on event-loop shutdown for cancellation."""
+    mock_info.tts[0].supports_synthesize_streaming = False
+    connection, manager = realtime_tts([])
+    connection.close = AsyncMock(wraps=connection.close)
+    enhanced_handler.reader = asyncio.StreamReader()
+    server = AsyncTcpServer("127.0.0.1", 0)
+    await server._handler_callback(
+        lambda reader, writer: enhanced_handler, enhanced_handler.reader, enhanced_handler.writer
+    )
+    tasks = list(server._handlers)
+    enhanced_handler.reader.feed_data(
+        json.dumps({"type": "synthesize", "data": {"text": "Hello world"}}).encode() + b"\n"
+    )
+    try:
+        async with asyncio.timeout(1):
+            while not connection.response.created:
+                await asyncio.sleep(0)
+            await server.stop()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(task.cancelled() for task in tasks)
+        assert not server._handlers
+        assert manager.exited and connection.closed
+        connection.close.assert_awaited_once()
+        assert not enhanced_handler._synthesis_tasks
+        assert not enhanced_handler._background_tasks
+        enhanced_handler.write_event.assert_not_called()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incremental_input", [False, True])
+async def test_unsplit_http_tts_shutdown_cancels_request(enhanced_handler, mock_info, mock_clients, incremental_input):
+    """The shared unsplit path also cancels HTTP responses and closes their audio stream."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = False
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    stalled = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def respond(text):
+        try:
+            yield REALTIME_TTS_PCM
+            stalled.set()
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    _mock_speech_response(tts_client, respond)
+    if incremental_input:
+        assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+        assert await enhanced_handler.handle_event(SynthesizeChunk(text="Hello world").event())
+        event = Event(type="synthesize-stop")
+    else:
+        event = Event(type="synthesize", data={"text": "Hello world"})
+
+    task = asyncio.create_task(enhanced_handler.handle_event(event))
+    try:
+        async with asyncio.timeout(1):
+            await stalled.wait()
+            await enhanced_handler.stop()
+        assert task.done()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
+        assert not enhanced_handler._synthesis_tasks
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "audio-start", "audio-chunk", "audio-stop"
+        ]
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
