@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import Counter
 from enum import Enum
 from urllib.parse import urlparse
@@ -12,6 +13,8 @@ from .const import (
     ATTRIBUTION_NAME_PROGRAM_STREAMING,
     ATTRIBUTION_URL,
     DEFAULT_OPENAI_BASE_URL,
+    OPENAI_REALTIME_TTS_VOICES,
+    OPENAI_SPEECH_ONLY_TTS_VOICES,
     __version__,
 )
 
@@ -61,6 +64,21 @@ def _get_ordered_unique_models(models: list[str], streaming_models: list[str]) -
     return _get_ordered_unique_model_names(streaming_models, models)
 
 
+# A voice advertised next to other models, e.g. "alloy (gpt-4o-mini-tts)", optionally with a duplicate counter
+_SUFFIXED_TTS_VOICE_NAME = re.compile(r"(?P<voice>.+) \((?P<model>[^()]+)\)(?: \[\d+\])?")
+
+
+def format_tts_voice_name(voice_name: str, model_name: str) -> str:
+    """Build the public name of a voice that several models share."""
+    return f"{voice_name} ({model_name})"
+
+
+def parse_tts_voice_name(public_name: str) -> tuple[str, str] | None:
+    """Split a name built by `format_tts_voice_name` into (voice, model), or None for any other name."""
+    match = _SUFFIXED_TTS_VOICE_NAME.fullmatch(public_name)
+    return (match["voice"], match["model"]) if match else None
+
+
 def _create_tts_voice_models(
     model_voice_pairs: list[tuple[str, str]],
     tts_url: str,
@@ -72,7 +90,7 @@ def _create_tts_voice_models(
 
     raw_name_counts = Counter(raw_voice_name for _, raw_voice_name in model_voice_pairs)
     base_public_names = [
-        raw_voice_name if raw_name_counts[raw_voice_name] == 1 else f"{raw_voice_name} ({model_name})"
+        raw_voice_name if raw_name_counts[raw_voice_name] == 1 else format_tts_voice_name(raw_voice_name, model_name)
         for model_name, raw_voice_name in model_voice_pairs
     ]
     public_name_counts = Counter(base_public_names)
@@ -221,7 +239,12 @@ def create_asr_programs(
 
 
 def create_tts_voices(
-    tts_models: list[str], tts_streaming_models: list[str], tts_voices: list[str], tts_url: str, languages: list[str]
+    tts_models: list[str],
+    tts_streaming_models: list[str],
+    tts_voices: list[str],
+    tts_url: str,
+    languages: list[str],
+    openai_realtime_models: list[str] | None = None,
 ) -> list[TtsVoiceModel]:
     """
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
@@ -233,12 +256,34 @@ def create_tts_voices(
         tts_voices (list[str]): A list of voice identifiers.
         tts_url (str): The URL for the TTS service attribution.
         languages (list[str]): A list of supported languages.
+        openai_realtime_models (list[str] | None): Models that synthesize over OpenAI's Realtime API,
+            which do not get the configured voices only the speech API offers.
 
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
     """
     ordered_models = _get_ordered_unique_models(tts_models, tts_streaming_models)
-    model_voice_pairs = [(model_name, voice_name) for model_name in ordered_models for voice_name in tts_voices]
+    realtime_models = set(openai_realtime_models or [])
+    # Only voices known to be missing are skipped, so a voice OpenAI adds later needs no code change
+    realtime_voices = [voice_name for voice_name in tts_voices if voice_name not in OPENAI_SPEECH_ONLY_TTS_VOICES]
+    if realtime_models and len(realtime_voices) < len(tts_voices):
+        skipped_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_SPEECH_ONLY_TTS_VOICES]
+        if not realtime_voices:
+            # Advertising nothing would silently drop these models
+            raise ValueError(
+                f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
+                f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}"
+            )
+        _LOGGER.warning(
+            "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
+            skipped_voices,
+        )
+
+    model_voice_pairs = [
+        (model_name, voice_name)
+        for model_name in ordered_models
+        for voice_name in (realtime_voices if model_name in realtime_models else tts_voices)
+    ]
     return _create_tts_voice_models(model_voice_pairs, tts_url, languages)
 
 
@@ -445,6 +490,13 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         return ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"]
 
+    async def list_openai_realtime_voices(self) -> list[str]:
+        """
+        Voices for models that synthesize over the Realtime API, hard-coded.
+        https://platform.openai.com/docs/guides/realtime-conversations
+        """
+        return list(OPENAI_REALTIME_TTS_VOICES)
+
     # Kokoro-FastAPI
 
     async def _is_kokoro_fastapi(self) -> bool:
@@ -566,18 +618,26 @@ class CustomAsyncOpenAI(AsyncOpenAI):
     # Unified API
 
     async def list_supported_voices(
-        self, model_names: list[str], streaming_model_names: list[str], languages: list[str]
+        self,
+        model_names: list[str],
+        streaming_model_names: list[str],
+        languages: list[str],
+        realtime_model_names: list[str] | None = None,
     ) -> list[TtsVoiceModel]:
         """
         Fetches the available voices via unofficial specs with streaming model fallback (consistent with ASR behavior).
         Uses streaming models if regular models not specified.
+        Models in realtime_model_names get the Realtime API voice set on the official OpenAI API only.
         Note: this is not the list of CONFIGURED voices.
         """
         ordered_models = _get_ordered_unique_models(model_names, streaming_model_names)
+        realtime_models = set(realtime_model_names or [])
 
         model_voice_pairs: list[tuple[str, str]] = []
         for model_name in ordered_models:
-            if self.backend == OpenAIBackend.OPENAI:
+            if self.is_official_openai and model_name in realtime_models:
+                tts_voices = await self.list_openai_realtime_voices()
+            elif self.backend == OpenAIBackend.OPENAI:
                 tts_voices = await self.list_openai_voices()
             elif self.backend == OpenAIBackend.SPEACHES:
                 tts_voices = await self._list_speaches_voices(model_name)
@@ -601,9 +661,16 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         if not base_url:
             return False
         try:
-            return urlparse(str(base_url)).hostname == cls._OPENAI_HOSTNAME
+            hostname = urlparse(str(base_url)).hostname or ""
+            # Regional hosts such as eu.api.openai.com are the official API too
+            return hostname == cls._OPENAI_HOSTNAME or hostname.endswith(f".{cls._OPENAI_HOSTNAME}")
         except Exception:
             return False
+
+    @property
+    def is_official_openai(self) -> bool:
+        """True for the official OpenAI API; the OPENAI backend alone also covers unrecognized compatible servers."""
+        return self.backend == OpenAIBackend.OPENAI and self._is_openai_domain(str(self.base_url))
 
     @classmethod
     def create_autodetected_factory(cls):

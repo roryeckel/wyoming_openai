@@ -44,7 +44,7 @@ pyright
 pip install -e .
 
 # Run the server locally
-python -m wyoming_openai --uri tcp://0.0.0.0:10300 --stt-models whisper-1 --tts-models tts-1
+python -m wyoming_openai --uri tcp://0.0.0.0:10300 --stt-models gpt-transcribe --tts-models gpt-4o-mini-tts
 ```
 
 ### Docker Development
@@ -95,7 +95,8 @@ The server accepts both command-line arguments and environment variables. Key co
 - Model lists for STT and TTS
 - Voice configurations
 - Backend-specific settings (temperature, speed, etc.)
-- STT/TTS extra request body fields (`--stt-extra-body` / `--tts-extra-body`)
+- STT/TTS extra request body fields (`--stt-extra-body` / `--stt-realtime-extra-body` / `--tts-extra-body` / `--tts-realtime-extra-body`)
+- Realtime transports for OpenAI models (`--stt-realtime-models` / `--tts-realtime-models`)
 
 ## Testing Strategy
 

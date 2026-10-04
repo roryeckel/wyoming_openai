@@ -202,7 +202,8 @@ async def test_main_allows_invalid_unused_tts_extra_body_when_voice_discovery_re
 
 class _FakeClient:
     def __init__(self):
-        self.backend = None
+        self.backend: main_module.OpenAIBackend | None = None
+        self.is_official_openai = False
 
     async def __aenter__(self):
         return self
@@ -406,6 +407,222 @@ async def test_main_configures_realtime_stt_models(monkeypatch):
     assert handler._stt_client is not None
     assert handler._tts_client is None
     assert handler._stt_realtime_models == {"gpt-realtime-whisper"}
+
+
+@pytest.mark.asyncio
+async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
+    server = _CapturingServer()
+    listed = {}
+
+    class _VoiceListingClient(_FakeClient):
+        async def list_supported_voices(self, *args, **kwargs):
+            listed["args"] = args
+            listed["kwargs"] = kwargs
+            return []
+
+    async def fake_factory(*args, **kwargs):
+        return _VoiceListingClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(
+        main_module.AsyncServer,
+        "from_uri",
+        staticmethod(lambda uri: server),
+    )
+    for env_var in ("STT_MODELS", "STT_STREAMING_MODELS", "STT_REALTIME_MODELS", "TTS_MODELS", "TTS_VOICES"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--tts-realtime-models",
+            "gpt-realtime-2.1-mini",
+        ],
+    )
+
+    await main()
+
+    assert listed["args"][0] == ["gpt-realtime-2.1-mini"]
+    assert listed["kwargs"]["realtime_model_names"] == ["gpt-realtime-2.1-mini"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "official", "expected_voices", "expect_backend_warning"),
+    [
+        (main_module.OpenAIBackend.OPENAI, True, ["alloy"], False),
+        # Unrecognized compatible servers are autodetected as OPENAI without being the official API
+        (main_module.OpenAIBackend.OPENAI, False, ["alloy", "fable"], True),
+        (main_module.OpenAIBackend.SPEACHES, False, ["alloy", "fable"], True),
+    ],
+)
+async def test_main_realtime_tts_voice_filter_and_warnings(
+    monkeypatch, caplog, backend, official, expected_voices, expect_backend_warning
+):
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        client = _FakeClient()
+        client.backend = backend
+        client.is_official_openai = official
+        return client
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in (
+        "STT_MODELS",
+        "STT_STREAMING_MODELS",
+        "STT_REALTIME_MODELS",
+        "TTS_MODELS",
+        "TTS_STREAMING_MODELS",
+        "TTS_VOICES",
+        "TTS_BACKEND",
+        "TTS_EXTRA_BODY",
+        "TTS_REALTIME_EXTRA_BODY",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--tts-realtime-models",
+            "gpt-realtime-2.1-mini",
+            "--tts-voices",
+            "alloy",
+            "fable",
+            "--tts-speed",
+            "3.0",
+            "--tts-extra-body",
+            '{"lang_code":"en"}',
+            "--tts-realtime-extra-body",
+            '{"reasoning":{"effort":"low"}}',
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        await main()
+
+    handler = server.handlers[0]
+    assert [voice.name for voice in handler._wyoming_info.tts[0].voices] == expected_voices
+    assert handler._tts_extra_body == {"lang_code": "en"}
+    assert handler._tts_realtime_extra_body == {"reasoning": {"effort": "low"}}
+    assert "Realtime TTS speed must be between" in caplog.text
+    assert ("must implement /v1/realtime" in caplog.text) is expect_backend_warning
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_incompatible_realtime_extra_body(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--tts-realtime-models",
+            "gpt-realtime-2.1-mini",
+            "--tts-realtime-extra-body",
+            '{"audio":{"output":{"format":{"type":"audio/pcmu"}}}}',
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "audio.output.format" in capsys.readouterr().err
+
+
+_MAIN_ENV_VARS = (
+    "STT_MODELS",
+    "STT_STREAMING_MODELS",
+    "STT_REALTIME_MODELS",
+    "STT_EXTRA_BODY",
+    "STT_REALTIME_EXTRA_BODY",
+    "TTS_MODELS",
+    "TTS_STREAMING_MODELS",
+    "TTS_REALTIME_MODELS",
+    "TTS_VOICES",
+    "TTS_BACKEND",
+    "TTS_EXTRA_BODY",
+    "TTS_REALTIME_EXTRA_BODY",
+)
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_realtime_tts_model_left_without_voices(monkeypatch, capsys):
+    async def fake_factory(*args, **kwargs):
+        client = _FakeClient()
+        client.backend = main_module.OpenAIBackend.OPENAI
+        client.is_official_openai = True
+        return client
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in _MAIN_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["wyoming_openai", "--tts-realtime-models", "gpt-realtime-2.1-mini", "--tts-voices", "onyx", "nova"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "onyx" in error
+    assert "marin" in error
+
+
+@pytest.mark.asyncio
+async def test_main_passes_stt_realtime_extra_body(monkeypatch):
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in _MAIN_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setenv("STT_REALTIME_EXTRA_BODY", '{"keywords":["Wyoming"]}')
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--stt-realtime-models",
+            "gpt-live-transcribe",
+            "--stt-extra-body",
+            '{"temperature":0.2}',
+        ],
+    )
+
+    await main()
+
+    handler = server.handlers[0]
+    assert handler._stt_extra_body == {"temperature": 0.2}
+    assert handler._stt_realtime_extra_body == {"keywords": ["Wyoming"]}
 
 
 async def _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args):
