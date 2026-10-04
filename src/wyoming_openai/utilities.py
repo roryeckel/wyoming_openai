@@ -491,7 +491,7 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         ),
     )
 
-    # The pre-GA session shape; sent as is, the API would reject every synthesis request
+    # These pre-GA top-level voice and speed fields conflict with the supported audio.output settings.
     validate_extra_body_disallowed_fields(
         extra_body,
         field_names={"voice", "speed"},

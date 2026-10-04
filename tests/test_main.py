@@ -465,7 +465,7 @@ async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
     [
         (main_module.OpenAIBackend.OPENAI, True, ["alloy"], False),
         # A proxy in front of OpenAI is classed as OPENAI without being the official API
-        (main_module.OpenAIBackend.OPENAI, False, ["alloy"], True),
+        (main_module.OpenAIBackend.OPENAI, False, ["alloy", "fable"], True),
         (main_module.OpenAIBackend.SPEACHES, False, ["alloy", "fable"], True),
     ],
 )

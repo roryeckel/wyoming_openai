@@ -259,10 +259,9 @@ def create_tts_voices(
         tts_url (str): The URL for the TTS service attribution.
         languages (list[str]): A list of supported languages.
         openai_realtime_models (list[str] | None): Models that synthesize over OpenAI's Realtime API,
-            which do not get the configured voices only the speech API offers.
-        official_openai (bool): Whether the server is the official OpenAI API, where a Realtime model
-            left without voices is an error. Any other server may offer voices of its own under those
-            names, so there they are passed through instead.
+            whose configured voices are filtered only on the official OpenAI API.
+        official_openai (bool): Whether to exclude speech-only voices from Realtime models and error
+            if none remain. Other servers keep every configured voice, since they may offer their own.
 
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
@@ -273,26 +272,26 @@ def create_tts_voices(
     realtime_voices = [voice_name for voice_name in tts_voices if voice_name not in OPENAI_SPEECH_ONLY_TTS_VOICES]
     if realtime_models and len(realtime_voices) < len(tts_voices):
         skipped_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_SPEECH_ONLY_TTS_VOICES]
-        if realtime_voices:
+        if not official_openai:
             _LOGGER.warning(
-                "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
-                skipped_voices,
-            )
-        elif official_openai:
-            # Advertising nothing would silently drop these models
-            raise ValueError(
-                f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
-                f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}"
-            )
-        else:
-            _LOGGER.warning(
-                "None of the configured TTS voices %s are offered by the OpenAI Realtime API. "
+                "Configured TTS voices %s are not offered by the OpenAI Realtime API. "
                 "They are kept for %s because %s is not the official OpenAI API",
                 skipped_voices,
                 sorted(realtime_models),
                 tts_url,
             )
             realtime_voices = tts_voices
+        elif realtime_voices:
+            _LOGGER.warning(
+                "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
+                skipped_voices,
+            )
+        else:
+            # Advertising nothing would silently drop these models
+            raise ValueError(
+                f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
+                f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}"
+            )
 
     model_voice_pairs = [
         (model_name, voice_name)

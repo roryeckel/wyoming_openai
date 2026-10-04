@@ -379,21 +379,23 @@ class TestCustomAsyncOpenAI:
                 openai_realtime_models=["gpt-realtime-2.1-mini"],
             )
 
-    def test_create_tts_voices_keeps_speech_only_voices_off_the_official_api(self, caplog):
+    @pytest.mark.parametrize("configured", [["onyx", "nova"], ["alloy", "fable", "custom"]])
+    def test_create_tts_voices_keeps_speech_only_voices_off_the_official_api(self, caplog, configured):
         """Test another server classed as OPENAI is not blocked over voices it may offer under those names."""
         with caplog.at_level("WARNING", logger="wyoming_openai.compatibility"):
             voices = create_tts_voices(
                 ["gpt-realtime-2.1-mini"],
                 [],
-                ["onyx", "nova"],
+                configured,
                 "http://localhost:8000/v1",
                 ["en"],
                 openai_realtime_models=["gpt-realtime-2.1-mini"],
                 official_openai=False,
             )
 
-        assert [v.backend_voice_name for v in voices] == ["onyx", "nova"]
+        assert [v.backend_voice_name for v in voices] == configured
         assert "http://localhost:8000/v1 is not the official OpenAI API" in caplog.text
+        assert len(caplog.records) == 1
 
     @pytest.mark.parametrize(
         ("base_url", "backend", "expected"),
