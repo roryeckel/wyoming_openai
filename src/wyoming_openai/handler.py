@@ -3,11 +3,10 @@ import base64
 import contextlib
 import io
 import logging
-import re
 import struct
 import unicodedata
 import wave
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -35,7 +34,7 @@ from wyoming.tts import (
 )
 from yasbd import BoundaryDetector, get_supported_langs
 
-from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel
+from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel, parse_tts_voice_name
 from .const import (
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
     REALTIME_AUDIO_RATE,
@@ -48,7 +47,6 @@ from .utilities import (
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
-    get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_stt_extra_body,
@@ -84,9 +82,6 @@ def _has_speakable_content(text: str) -> bool:
     )
 
 
-# A voice advertised next to other models, e.g. "alloy (gpt-4o-mini-tts)"
-_SUFFIXED_VOICE_NAME = re.compile(r"(?P<voice>.+) \((?P<model>[^()]+)\)")
-
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
@@ -112,6 +107,122 @@ class TtsAudioFormat:
 
     headerless: bool  # Raw PCM16 mono rather than a WAV file
     rate: int  # Hz; for WAV only a fallback until the header is parsed
+
+
+# Chunk ids that can follow an empty WAV data chunk and are metadata, not audio
+_WAV_TRAILER_CHUNK_IDS = frozenset((b"LIST", b"fact", b"cue ", b"bext", b"id3 ", b"ID3 "))
+
+
+def _scan_riff_chunks(data: bytes) -> bool | None:
+    """
+    Check if bytes are nothing but whole RIFF metadata chunks.
+    Returns True when they are, False when they cannot be, and None when more bytes could still complete one.
+    """
+    offset = 0
+    while offset < len(data):
+        chunk_id = data[offset : offset + 4]
+        if not any(known_id.startswith(chunk_id) for known_id in _WAV_TRAILER_CHUNK_IDS):
+            return False
+        if len(data) - offset < 8:
+            return None
+        chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
+        if chunk_size > TTS_WAV_HEADER_MAX_BYTES:
+            # PCM that happens to start with a chunk id; real metadata is small
+            return False
+        end = offset + 8 + chunk_size
+        if end > len(data):
+            return None
+        # Odd-sized chunks are followed by a pad byte
+        offset = end + (chunk_size & 1 if end < len(data) else 0)
+    return True
+
+
+class _WavFramer:
+    """Turns the bytes of a TTS response into PCM, for the streamed and the buffered path alike."""
+
+    def __init__(
+        self,
+        audio_format: TtsAudioFormat,
+        parse_header: Callable[[bytes], tuple[int, int, int, int, int | None] | None],
+    ) -> None:
+        self.rate = audio_format.rate
+        self.width = DEFAULT_AUDIO_WIDTH
+        self.channels = DEFAULT_AUDIO_CHANNELS
+        self.awaiting_header = not audio_format.headerless
+        self.declared_size: int | None = None  # PCM bytes the header declares; None when unbounded or unparsed
+        self.declared_empty = False  # The header declares zero samples or an unknown length
+        self._parse_header = parse_header
+        self._pending = b""  # Bytes held until the header, or what follows an empty data chunk, is understood
+        self._remaining: int | None = None  # Declared PCM bytes not received yet; None when unbounded
+        self._check_trailer = False  # Still deciding if the bytes after a zero-size header are metadata
+
+    @property
+    def missing_bytes(self) -> int:
+        """Declared PCM bytes that have not arrived."""
+        return self._remaining or 0
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Take the next response bytes and return the PCM to play, which is empty while the header is incomplete."""
+        if not self.awaiting_header:
+            return self._bound(chunk)
+
+        self._pending += chunk
+        wav_params = self._parse_header(self._pending)
+        if wav_params:
+            self.rate, self.channels, self.width, data_offset, data_size = wav_params
+            available_audio = self._pending[data_offset:]
+            self._pending = b""
+            self.awaiting_header = False
+            self.declared_empty = not data_size
+            # A zero size is also what servers write when streaming audio of unknown length
+            self.declared_size = data_size or None
+            self._remaining = self.declared_size
+            self._check_trailer = data_size == 0
+            _LOGGER.debug(
+                "Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d, PCM size: %s",
+                self.rate,
+                self.channels,
+                self.width,
+                data_offset,
+                f"{data_size} bytes" if data_size else "unknown (unbounded or zero size)",
+            )
+            return self._bound(available_audio)
+
+        if len(self._pending) <= TTS_WAV_HEADER_MAX_BYTES:
+            return b""
+
+        _LOGGER.warning(
+            "Could not parse WAV header after buffering %d bytes, falling back to raw PCM", len(self._pending)
+        )
+        return self.finish()
+
+    def finish(self) -> bytes:
+        """
+        Return the bytes still held when the response ends, to be played as raw PCM: a response without a
+        WAV header, or bytes after an empty data chunk that did not turn out to be whole metadata chunks.
+        """
+        audio, self._pending = self._pending, b""
+        is_metadata = self._check_trailer and _scan_riff_chunks(audio) is True
+        self.awaiting_header = False
+        self._check_trailer = False
+        return b"" if is_metadata else audio
+
+    def _bound(self, audio: bytes) -> bytes:
+        """Keep only the PCM the header covers."""
+        if self._check_trailer:
+            # A zero size means either an empty file followed by metadata chunks or audio of unknown length.
+            # Bytes are only held while they are consistent with whole metadata chunks, so PCM that merely
+            # starts with a chunk id is released as soon as it stops looking like one
+            self._pending += audio
+            if _scan_riff_chunks(self._pending) is not False and len(self._pending) <= TTS_WAV_HEADER_MAX_BYTES:
+                return b""
+            self._check_trailer = False
+            audio, self._pending = self._pending, b""
+        if self._remaining is None:
+            return audio
+        audio = audio[: self._remaining]
+        self._remaining -= len(audio)
+        return audio
 
 
 class TtsStreamError(Exception):
@@ -906,8 +1017,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Return the `language` and `languages` fields to send, and a copy of extra_body that does not conflict."""
         extra_body = dict(extra_body or {})
         if not self._uses_plural_stt_languages(model_name):
-            is_openai = self._stt_client is not None and self._stt_client.backend == OpenAIBackend.OPENAI
-            if is_openai and extra_body.pop("languages", None) is not None:
+            # Only the official API is known to reject the field; other servers get what was configured
+            is_official = self._stt_client is not None and self._stt_client.is_official_openai is True
+            if is_official and extra_body.pop("languages", None) is not None:
                 # A body shared with the models above would otherwise send both fields, which OpenAI rejects
                 _LOGGER.debug("Ignoring extra_body `languages` for %s, which takes `language`", model_name)
             return language, None, extra_body
@@ -1279,16 +1391,17 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _get_voice_by_suffixed_name(self, requested_voice: str) -> TtsVoiceModel | None:
         """Resolve a "voice (model)" name that stopped being advertised when the set of TTS models changed."""
-        match = _SUFFIXED_VOICE_NAME.fullmatch(requested_voice)
-        if not match:
+        parsed = parse_tts_voice_name(requested_voice)
+        if not parsed:
             return None
 
-        matches = self._get_voices_by_backend_name(match["voice"])
+        voice_name, model_name = parsed
+        matches = self._get_voices_by_backend_name(voice_name)
         if not matches:
             return None
 
         # A model that is gone falls back to the speech API where possible rather than onto a Realtime model
-        model_matches = [voice for voice in matches if voice.model_name == match["model"]]
+        model_matches = [voice for voice in matches if voice.model_name == model_name]
         voice = (model_matches or self._prefer_speech_api_voices(matches))[0]
         _LOGGER.log(
             self._get_voice_fallback_log_level(requested_voice),
@@ -1802,8 +1915,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         extra_body = dict(self._tts_realtime_extra_body or {})
         audio_override = extra_body.pop("audio", None)
         audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
-        audio_override.pop("output", None)
-        output_override = get_realtime_tts_audio_output(self._tts_realtime_extra_body)
+        output_override = audio_override.pop("output", None)
+        output_override = dict(output_override) if isinstance(output_override, dict) else {}
         output_override.pop("speed", None)
 
         instructions = REALTIME_TTS_INSTRUCTIONS
@@ -1854,46 +1967,47 @@ class OpenAIEventHandler(AsyncEventHandler):
             pending_audio = b""  # Trailing part of a sample that a delta split
             spoken_parts: list[str] = []  # Transcripts of finished content parts
             spoken_pending = ""  # Transcript deltas of the part still being spoken
-            events = aiter(connection)
-            while True:
-                try:
-                    event = await asyncio.wait_for(anext(events), REALTIME_TTS_EVENT_TIMEOUT)
-                except StopAsyncIteration:
-                    break
-                except TimeoutError as err:
-                    raise RealtimeSynthesisError(
-                        f"No Realtime event received for {REALTIME_TTS_EVENT_TIMEOUT:g} seconds during synthesis"
-                    ) from err
-
-                event_type = getattr(event, "type", "")
-                if event_type == "response.output_audio.delta":
-                    if delta := getattr(event, "delta", ""):
-                        received_audio = True
-                        # Wyoming chunks must hold whole samples, and deltas are not guaranteed to
-                        audio = pending_audio + base64.b64decode(delta)
-                        aligned_size = len(audio) - len(audio) % REALTIME_AUDIO_WIDTH
-                        pending_audio = audio[aligned_size:]
-                        if aligned_size:
-                            yield audio[:aligned_size]
-                elif event_type == "response.output_audio_transcript.delta":
-                    spoken_pending += getattr(event, "delta", "") or ""
-                elif event_type == "response.output_audio_transcript.done":
-                    spoken_parts.append(getattr(event, "transcript", "") or spoken_pending)
-                    spoken_pending = ""
-                elif event_type == "response.done":
-                    response = getattr(event, "response", None)
-                    status = getattr(response, "status", None)
-                    if status not in (None, "completed"):
+            # Closed explicitly so the SDK's event iterator is not left to garbage collection
+            async with contextlib.aclosing(aiter(connection)) as events:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(anext(events), REALTIME_TTS_EVENT_TIMEOUT)
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError as err:
                         raise RealtimeSynthesisError(
-                            f"Realtime response ended with status {status}"
-                            f"{self._describe_realtime_status_details(response)}"
-                        )
-                    if not received_audio:
-                        raise RealtimeSynthesisError("Realtime response completed without any audio")
-                    self._check_realtime_tts_fidelity(text, " ".join([*spoken_parts, spoken_pending]))
-                    return
-                elif event_type == "error":
-                    raise RealtimeSynthesisError(self._get_realtime_event_error_message(event))
+                            f"No Realtime event received for {REALTIME_TTS_EVENT_TIMEOUT:g} seconds during synthesis"
+                        ) from err
+
+                    event_type = getattr(event, "type", "")
+                    if event_type == "response.output_audio.delta":
+                        if delta := getattr(event, "delta", ""):
+                            received_audio = True
+                            # Wyoming chunks must hold whole samples, and deltas are not guaranteed to
+                            audio = pending_audio + base64.b64decode(delta)
+                            aligned_size = len(audio) - len(audio) % REALTIME_AUDIO_WIDTH
+                            pending_audio = audio[aligned_size:]
+                            if aligned_size:
+                                yield audio[:aligned_size]
+                    elif event_type == "response.output_audio_transcript.delta":
+                        spoken_pending += getattr(event, "delta", "") or ""
+                    elif event_type == "response.output_audio_transcript.done":
+                        spoken_parts.append(getattr(event, "transcript", "") or spoken_pending)
+                        spoken_pending = ""
+                    elif event_type == "response.done":
+                        response = getattr(event, "response", None)
+                        status = getattr(response, "status", None)
+                        if status not in (None, "completed"):
+                            raise RealtimeSynthesisError(
+                                f"Realtime response ended with status {status}"
+                                f"{self._describe_realtime_status_details(response)}"
+                            )
+                        if not received_audio:
+                            raise RealtimeSynthesisError("Realtime response completed without any audio")
+                        self._check_realtime_tts_fidelity(text, " ".join([*spoken_parts, spoken_pending]))
+                        return
+                    elif event_type == "error":
+                        raise RealtimeSynthesisError(self._get_realtime_event_error_message(event))
 
             raise RealtimeSynthesisError("Realtime connection closed before synthesis completed")
         finally:
@@ -1937,35 +2051,24 @@ class OpenAIEventHandler(AsyncEventHandler):
             float | None: Final timestamp after streaming, or None on error.
         """
         try:
-            audio_rate = audio_format.rate
-            audio_width = DEFAULT_AUDIO_WIDTH
-            audio_channels = DEFAULT_AUDIO_CHANNELS
             timestamp = start_timestamp
 
-            # Try to parse WAV header
-            wav_params = None if audio_format.headerless else self._parse_wav_header(audio_data)
-            if wav_params:
-                audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
-                audio_data, missing_wav_data, pcm_size = self._split_wav_audio(data_size, audio_data[data_offset:])
-                if missing_wav_data and not audio_data:
-                    # As on the direct path, a WAV that declares samples and delivers none is truncated
-                    _LOGGER.error("TTS WAV response declared %d PCM bytes and delivered none", data_size)
-                    return None
-                if missing_wav_data:
-                    _LOGGER.warning(
-                        "TTS WAV response ended after %d of %d declared PCM bytes", len(audio_data), data_size
-                    )
-                _LOGGER.debug(
-                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
-                    "header offset: %d, PCM size: %s",
-                    audio_rate,
-                    audio_channels,
-                    audio_width,
-                    data_offset,
-                    pcm_size,
-                )
-            elif not audio_format.headerless:
+            # The same framing as the direct path, fed the whole response at once
+            framer = _WavFramer(audio_format, self._parse_wav_header)
+            audio_data = framer.feed(audio_data)
+            header_missing = framer.awaiting_header
+            audio_data += framer.finish()
+            if header_missing:
                 _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
+            elif framer.missing_bytes and not audio_data:
+                # As on the direct path, a WAV that declares samples and delivers none is truncated
+                _LOGGER.error("TTS WAV response declared %d PCM bytes and delivered none", framer.declared_size)
+                return None
+            elif framer.missing_bytes:
+                _LOGGER.warning(
+                    "TTS WAV response ended after %d of %d declared PCM bytes", len(audio_data), framer.declared_size
+                )
+            audio_rate, audio_width, audio_channels = framer.rate, framer.width, framer.channels
 
             # Send audio start if requested
             if is_first_chunk:
@@ -2034,15 +2137,36 @@ class OpenAIEventHandler(AsyncEventHandler):
         audio_start_requested = send_audio_start
         timestamp = start_timestamp
         try:
-            audio_format = self._get_tts_audio_format(voice)
-            audio_rate = audio_format.rate
-            audio_width = DEFAULT_AUDIO_WIDTH
-            audio_channels = DEFAULT_AUDIO_CHANNELS
-            awaiting_wav_header = not audio_format.headerless
+            framer = _WavFramer(self._get_tts_audio_format(voice), self._parse_wav_header)
             wrote_audio = False
-            declared_empty_wav = False
-            pending_header = b""
-            remaining_wav_data: int | None = None
+
+            async def write_audio(audio_data: bytes) -> None:
+                """Send the audio start once the format is known, then the PCM."""
+                nonlocal send_audio_start, timestamp, wrote_audio
+                if send_audio_start:
+                    await self.write_event(
+                        AudioStart(rate=framer.rate, width=framer.width, channels=framer.channels).event()
+                    )
+                    send_audio_start = False
+                if not audio_data:
+                    return
+                await self.write_event(
+                    AudioChunk(
+                        audio=audio_data,
+                        rate=framer.rate,
+                        width=framer.width,
+                        channels=framer.channels,
+                        timestamp=int(timestamp),
+                    ).event()
+                )
+                timestamp = self._advance_audio_timestamp(
+                    timestamp,
+                    audio_data=audio_data,
+                    audio_rate=framer.rate,
+                    audio_width=framer.width,
+                    audio_channels=framer.channels,
+                )
+                wrote_audio = True
 
             if self._tts_client is None:
                 _LOGGER.error("No TTS client configured for synthesis")
@@ -2050,112 +2174,28 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             if not self._is_tts_text_speakable(text, voice):
                 _LOGGER.debug("Skipping text with nothing to speak: %s", _truncate_for_log(text, 50))
-                if send_audio_start:
-                    await self.write_event(
-                        AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
-                    )
+                await write_audio(b"")
                 return timestamp
 
             async with self._tts_semaphore:
                 async with contextlib.aclosing(self._iter_tts_audio(text, voice)) as audio_stream:
                     async for chunk in audio_stream:
-                        if awaiting_wav_header:
-                            pending_header += chunk
-                            wav_params = self._parse_wav_header(pending_header)
-                            if wav_params:
-                                audio_rate, audio_channels, audio_width, data_offset, data_size = wav_params
-                                audio_data, remaining_wav_data, pcm_size = self._split_wav_audio(
-                                    data_size, pending_header[data_offset:]
-                                )
-                                pending_header = b""
-                                awaiting_wav_header = False
-                                declared_empty_wav = not data_size
-                                _LOGGER.debug(
-                                    "Detected audio format: %d Hz, %d channels, %d bytes/sample, "
-                                    "header offset: %d, PCM size: %s",
-                                    audio_rate,
-                                    audio_channels,
-                                    audio_width,
-                                    data_offset,
-                                    pcm_size,
-                                )
-                            elif len(pending_header) <= TTS_WAV_HEADER_MAX_BYTES:
-                                continue
-                            else:
-                                _LOGGER.warning(
-                                    "Could not parse WAV header after buffering %d bytes, falling back to raw PCM",
-                                    len(pending_header),
-                                )
-                                audio_data = pending_header
-                                pending_header = b""
-                                awaiting_wav_header = False
-                        else:
-                            audio_data = chunk
-                            if remaining_wav_data is not None:
-                                audio_data = audio_data[:remaining_wav_data]
-                                remaining_wav_data -= len(audio_data)
+                        audio_data = framer.feed(chunk)
+                        if not framer.awaiting_header:
+                            await write_audio(audio_data)
 
-                        if send_audio_start:
-                            await self.write_event(
-                                AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
-                            )
-                            send_audio_start = False
+            if framer.missing_bytes:
+                _LOGGER.warning("TTS WAV response ended with %d declared PCM bytes missing", framer.missing_bytes)
 
-                        # Send audio chunk after any buffered WAV header bytes have been removed.
-                        if audio_data:
-                            await self.write_event(
-                                AudioChunk(
-                                    audio=audio_data,
-                                    rate=audio_rate,
-                                    width=audio_width,
-                                    channels=audio_channels,
-                                    timestamp=int(timestamp),
-                                ).event()
-                            )
-                            timestamp = self._advance_audio_timestamp(
-                                timestamp,
-                                audio_data=audio_data,
-                                audio_rate=audio_rate,
-                                audio_width=audio_width,
-                                audio_channels=audio_channels,
-                            )
-                            wrote_audio = True
-
-            if remaining_wav_data:
-                _LOGGER.warning(
-                    "TTS WAV response ended with %d declared PCM bytes missing",
-                    remaining_wav_data,
-                )
-
-            if awaiting_wav_header and pending_header:
-                _LOGGER.warning(
-                    "TTS response ended before a complete WAV header was available, falling back to raw PCM"
-                )
-                if send_audio_start:
-                    await self.write_event(
-                        AudioStart(rate=audio_rate, width=audio_width, channels=audio_channels).event()
+            header_missing = framer.awaiting_header
+            if held_audio := framer.finish():
+                if header_missing:
+                    _LOGGER.warning(
+                        "TTS response ended before a complete WAV header was available, falling back to raw PCM"
                     )
-                    send_audio_start = False
+                await write_audio(held_audio)
 
-                await self.write_event(
-                    AudioChunk(
-                        audio=pending_header,
-                        rate=audio_rate,
-                        width=audio_width,
-                        channels=audio_channels,
-                        timestamp=int(timestamp),
-                    ).event()
-                )
-                timestamp = self._advance_audio_timestamp(
-                    timestamp,
-                    audio_data=pending_header,
-                    audio_rate=audio_rate,
-                    audio_width=audio_width,
-                    audio_channels=audio_channels,
-                )
-                wrote_audio = True
-
-            if not wrote_audio and not declared_empty_wav:
+            if not wrote_audio and not framer.declared_empty:
                 # Reporting success here would let callers close or continue an audio stream that never started.
                 # A WAV declaring zero samples, or an unknown length, is not a failure: the backend had nothing
                 # to say. One that declares samples and delivers none is truncated
@@ -2175,18 +2215,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         if opened_stream:
             with contextlib.suppress(Exception):
                 await self.write_event(AudioStop(timestamp=int(timestamp)).event())
-
-    def _split_wav_audio(self, data_size: int | None, available_audio: bytes) -> tuple[bytes, int | None, str]:
-        """
-        Split the bytes after a WAV header into the PCM to play.
-        Returns (audio, declared bytes not received yet, size description for logging); the missing count
-        is None when the header does not bound the data.
-        """
-        if not data_size:
-            # A zero size is also what servers write when streaming audio of unknown length
-            return available_audio, None, "unknown (unbounded or zero size)"
-        audio_data = available_audio[:data_size]
-        return audio_data, data_size - len(audio_data), f"{data_size} bytes"
 
     def _advance_audio_timestamp(
         self,

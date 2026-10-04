@@ -414,7 +414,11 @@ def validate_extra_body_boolean_field(
 
 
 def validate_extra_body_disallowed_fields(
-    extra_body: dict[str, object] | None, *, field_names: set[str], body_name: str
+    extra_body: dict[str, object] | None,
+    *,
+    field_names: set[str] | frozenset[str],
+    body_name: str,
+    reason: str = "Wyoming expects raw audio bytes",
 ) -> None:
     """Reject extra_body fields that would change the response transport."""
     if not extra_body:
@@ -425,10 +429,7 @@ def validate_extra_body_disallowed_fields(
         return
 
     formatted_fields = ", ".join(repr(field_name) for field_name in disallowed_fields)
-    raise ValueError(
-        f"{body_name} extra_body does not support overriding {formatted_fields}; "
-        "Wyoming expects raw audio bytes"
-    )
+    raise ValueError(f"{body_name} extra_body does not support overriding {formatted_fields}; {reason}")
 
 
 def get_extra_body_boolean_field(
@@ -479,13 +480,15 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
     if not extra_body:
         return
 
-    fixed_fields = sorted(REALTIME_TTS_FIXED_SESSION_FIELDS & extra_body.keys())
-    if fixed_fields:
-        raise ValueError(
-            f"TTS Realtime extra_body does not support overriding {', '.join(map(repr, fixed_fields))}; "
+    validate_extra_body_disallowed_fields(
+        extra_body,
+        field_names=REALTIME_TTS_FIXED_SESSION_FIELDS,
+        body_name="TTS Realtime",
+        reason=(
             "the session has to stay audio-only speech, the model comes from TTS_REALTIME_MODELS "
             "and the delivery style from TTS_INSTRUCTIONS"
-        )
+        ),
+    )
 
     audio = extra_body.get("audio", {})
     if not isinstance(audio, dict) or not isinstance(audio.get("output", {}), dict):
@@ -537,7 +540,13 @@ def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object
 
 def _is_finite_number(value: object) -> TypeGuard[int | float]:
     """Check for a finite int or float; booleans are not numbers here."""
-    return not isinstance(value, bool) and isinstance(value, int | float) and math.isfinite(value)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # An int too large for a float is not a usable number either
+        return False
 
 
 def clamp_realtime_tts_speed(speed: float) -> float:

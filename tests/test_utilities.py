@@ -319,6 +319,8 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         ({"audio": {"output": {"speed": "fast"}}}, "speed must be a finite number"),
         ({"audio": {"output": {"speed": True}}}, "speed must be a finite number"),
         ({"audio": {"output": {"speed": float("nan")}}}, "speed must be a finite number"),
+        # An int too large for a float is rejected like any other unusable number
+        ({"audio": {"output": {"speed": 10**400}}}, "speed must be a finite number"),
         ({"audio": {"output": {"voice": "cedar"}}}, r"audio\.output\.voice"),
         ({"output_modalities": ["text"]}, "'output_modalities'"),
         ({"type": "transcription", "tools": []}, "'tools', 'type'"),

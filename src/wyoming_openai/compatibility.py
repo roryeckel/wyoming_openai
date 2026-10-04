@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import Counter
 from enum import Enum
 from urllib.parse import urlparse
@@ -63,6 +64,21 @@ def _get_ordered_unique_models(models: list[str], streaming_models: list[str]) -
     return _get_ordered_unique_model_names(streaming_models, models)
 
 
+# A voice advertised next to other models, e.g. "alloy (gpt-4o-mini-tts)", optionally with a duplicate counter
+_SUFFIXED_TTS_VOICE_NAME = re.compile(r"(?P<voice>.+) \((?P<model>[^()]+)\)(?: \[\d+\])?")
+
+
+def format_tts_voice_name(voice_name: str, model_name: str) -> str:
+    """Build the public name of a voice that several models share."""
+    return f"{voice_name} ({model_name})"
+
+
+def parse_tts_voice_name(public_name: str) -> tuple[str, str] | None:
+    """Split a name built by `format_tts_voice_name` into (voice, model), or None for any other name."""
+    match = _SUFFIXED_TTS_VOICE_NAME.fullmatch(public_name)
+    return (match["voice"], match["model"]) if match else None
+
+
 def _create_tts_voice_models(
     model_voice_pairs: list[tuple[str, str]],
     tts_url: str,
@@ -74,7 +90,7 @@ def _create_tts_voice_models(
 
     raw_name_counts = Counter(raw_voice_name for _, raw_voice_name in model_voice_pairs)
     base_public_names = [
-        raw_voice_name if raw_name_counts[raw_voice_name] == 1 else f"{raw_voice_name} ({model_name})"
+        raw_voice_name if raw_name_counts[raw_voice_name] == 1 else format_tts_voice_name(raw_voice_name, model_name)
         for model_name, raw_voice_name in model_voice_pairs
     ]
     public_name_counts = Counter(base_public_names)
@@ -645,7 +661,9 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         if not base_url:
             return False
         try:
-            return urlparse(str(base_url)).hostname == cls._OPENAI_HOSTNAME
+            hostname = urlparse(str(base_url)).hostname or ""
+            # Regional hosts such as eu.api.openai.com are the official API too
+            return hostname == cls._OPENAI_HOSTNAME or hostname.endswith(f".{cls._OPENAI_HOSTNAME}")
         except Exception:
             return False
 

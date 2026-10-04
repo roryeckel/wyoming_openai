@@ -12,6 +12,8 @@ from wyoming_openai.compatibility import (
     create_info,
     create_tts_programs,
     create_tts_voices,
+    format_tts_voice_name,
+    parse_tts_voice_name,
     tts_voice_to_string,
 )
 from wyoming_openai.const import (
@@ -363,6 +365,9 @@ class TestCustomAsyncOpenAI:
         ("base_url", "backend", "expected"),
         [
             ("https://api.openai.com/v1", OpenAIBackend.OPENAI, True),
+            # Regional hosts are the official API too; a lookalike domain is not
+            ("https://eu.api.openai.com/v1", OpenAIBackend.OPENAI, True),
+            ("https://api.openai.com.example.test/v1", OpenAIBackend.OPENAI, False),
             ("http://localhost:8000/v1", OpenAIBackend.OPENAI, False),
             ("https://api.openai.com/v1", OpenAIBackend.SPEACHES, False),
         ],
@@ -372,6 +377,15 @@ class TestCustomAsyncOpenAI:
         custom_client = CustomAsyncOpenAI(api_key="test-key", base_url=base_url, backend=backend)
 
         assert custom_client.is_official_openai is expected
+
+    def test_tts_voice_name_round_trip(self):
+        """Test the public name of a shared voice parses back into its voice and model."""
+        name = format_tts_voice_name("alloy", "gpt-4o-mini-tts")
+
+        assert name == "alloy (gpt-4o-mini-tts)"
+        assert parse_tts_voice_name(name) == ("alloy", "gpt-4o-mini-tts")
+        assert parse_tts_voice_name(f"{name} [2]") == ("alloy", "gpt-4o-mini-tts")
+        assert parse_tts_voice_name("alloy") is None
 
     @pytest.mark.asyncio
     async def test_list_supported_voices_speaches(self):
