@@ -464,8 +464,9 @@ def validate_tts_extra_body(extra_body: dict[str, object] | None) -> None:
 
 def validate_realtime_stt_extra_body(extra_body: dict[str, object] | None) -> None:
     """Validate Realtime STT extra_body fields; the model is the one the Wyoming client selected."""
-    if extra_body and "model" in extra_body:
-        raise ValueError("STT Realtime extra_body does not support overriding 'model'; use STT_REALTIME_MODELS")
+    validate_extra_body_disallowed_fields(
+        extra_body, field_names={"model"}, body_name="STT Realtime", reason="use STT_REALTIME_MODELS"
+    )
 
 
 # Session fields Realtime TTS sets itself: the ones it relies on to get speech, and only speech, back,

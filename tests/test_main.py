@@ -1,10 +1,20 @@
+import os
 import sys
 from unittest.mock import Mock
 
 import pytest
+from conftest import WYOMING_CONFIG_ENV_PREFIXES
 
 import wyoming_openai.__main__ as main_module
 from wyoming_openai.__main__ import main
+
+
+@pytest.fixture(autouse=True)
+def _clean_config_env(monkeypatch):
+    """Keep proxy settings exported in the developer's shell out of main(); tests set the ones they need."""
+    for env_var in list(os.environ):
+        if env_var.startswith(WYOMING_CONFIG_ENV_PREFIXES):
+            monkeypatch.delenv(env_var)
 
 
 @pytest.mark.asyncio
@@ -433,8 +443,6 @@ async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
         "from_uri",
         staticmethod(lambda uri: server),
     )
-    for env_var in ("STT_MODELS", "STT_STREAMING_MODELS", "STT_REALTIME_MODELS", "TTS_MODELS", "TTS_VOICES"):
-        monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -479,18 +487,6 @@ async def test_main_realtime_tts_voice_filter_and_warnings(
     )
     monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
     monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
-    for env_var in (
-        "STT_MODELS",
-        "STT_STREAMING_MODELS",
-        "STT_REALTIME_MODELS",
-        "TTS_MODELS",
-        "TTS_STREAMING_MODELS",
-        "TTS_VOICES",
-        "TTS_BACKEND",
-        "TTS_EXTRA_BODY",
-        "TTS_REALTIME_EXTRA_BODY",
-    ):
-        monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -519,6 +515,8 @@ async def test_main_realtime_tts_voice_filter_and_warnings(
     assert handler._tts_realtime_extra_body == {"reasoning": {"effort": "low"}}
     assert "Realtime TTS speed must be between" in caplog.text
     assert ("must implement /v1/realtime" in caplog.text) is expect_backend_warning
+    # Every TTS model is a Realtime one, so the speech API body goes unused
+    assert "TTS extra body is set but unused" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -545,7 +543,6 @@ async def test_main_rejects_incompatible_realtime_extra_body(monkeypatch, capsys
 @pytest.mark.asyncio
 async def test_main_rejects_incompatible_realtime_extra_body_without_realtime_models(monkeypatch, capsys):
     """Test a Realtime extra body is validated even when no Realtime models would use it."""
-    monkeypatch.delenv("TTS_REALTIME_MODELS", raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -572,8 +569,6 @@ async def test_main_warns_about_unused_realtime_extra_bodies(monkeypatch, caplog
     )
     monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
     monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
-    for env_var in _MAIN_ENV_VARS:
-        monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -587,6 +582,8 @@ async def test_main_warns_about_unused_realtime_extra_bodies(monkeypatch, caplog
             "gpt-4o-mini-tts",
             "--tts-voices",
             "alloy",
+            "--tts-extra-body",
+            '{"lang_code":"en"}',
             "--tts-realtime-extra-body",
             '{"reasoning":{"effort":"low"}}',
         ],
@@ -597,22 +594,8 @@ async def test_main_warns_about_unused_realtime_extra_bodies(monkeypatch, caplog
 
     assert "TTS Realtime extra body is set but unused" in caplog.text
     assert "STT Realtime extra body is set but unused" in caplog.text
-
-
-_MAIN_ENV_VARS = (
-    "STT_MODELS",
-    "STT_STREAMING_MODELS",
-    "STT_REALTIME_MODELS",
-    "STT_EXTRA_BODY",
-    "STT_REALTIME_EXTRA_BODY",
-    "TTS_MODELS",
-    "TTS_STREAMING_MODELS",
-    "TTS_REALTIME_MODELS",
-    "TTS_VOICES",
-    "TTS_BACKEND",
-    "TTS_EXTRA_BODY",
-    "TTS_REALTIME_EXTRA_BODY",
-)
+    # A speech API model is configured, so its extra body is in use
+    assert "TTS extra body is set but unused" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -629,8 +612,6 @@ async def test_main_rejects_realtime_tts_model_left_without_voices(monkeypatch, 
         staticmethod(lambda: fake_factory),
     )
     monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
-    for env_var in _MAIN_ENV_VARS:
-        monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -660,8 +641,6 @@ async def test_main_passes_stt_realtime_extra_body(monkeypatch):
     )
     monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
     monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
-    for env_var in _MAIN_ENV_VARS:
-        monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setenv("STT_REALTIME_EXTRA_BODY", '{"keywords":["Wyoming"]}')
     monkeypatch.setattr(
         sys,

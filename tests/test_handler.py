@@ -3835,6 +3835,7 @@ async def test_http_tts_zero_size_wav_does_not_play_trailing_riff_chunks(enhance
 
     # A buffered sentence without samples leaves the stream for the next sentence to open
     enhanced_handler.write_event.reset_mock()
+    enhanced_handler._audio_started = False  # The direct calls above opened it and were never stopped
     wav = _header_only_wav() + trailer
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
     enhanced_handler.write_event.assert_not_called()
@@ -4081,6 +4082,134 @@ async def test_zero_size_wav_does_not_play_a_large_trailing_riff_chunk(
     _mock_speech_response(tts_client, [wav[offset : offset + 2048] for offset in range(0, len(wav), 2048)])
     assert await enhanced_handler._stream_tts_audio(voice, "...", send_audio_start=True) == 0
     assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trailer",
+    [
+        # More metadata than is held while deciding, in chunks that are each whole
+        _riff_chunk(b"LIST", b"\x01" * 40000) + _riff_chunk(b"C2PA", b"\x02" * 40000),
+        # A response cut off inside a chunk that follows a whole one
+        _riff_chunk(b"LIST", b"\x01" * 12) + b"C2PA" + struct.pack("<I", 100) + b"\x02" * 10,
+    ],
+    # Named, so the payload does not become the test id
+    ids=["over_the_hold_limit", "cut_off_after_a_whole_chunk"],
+)
+async def test_zero_size_wav_does_not_play_a_trailer_of_several_riff_chunks(
+    enhanced_handler, mock_info, mock_clients, trailer
+):
+    """Test whole chunks after an empty data chunk mark the rest as metadata, past the hold limit or cut off."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    wav = _header_only_wav() + trailer
+
+    assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
+    enhanced_handler.write_event.assert_not_called()
+
+    _mock_speech_response(tts_client, [wav[offset : offset + 2048] for offset in range(0, len(wav), 2048)])
+    assert await enhanced_handler._stream_tts_audio(voice, "...", send_audio_start=True) == 0
+    assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("batches", "expected_event_types", "expected_stop_timestamp"),
+    [
+        # The cancelled sentence streams directly, into a stream the batch before it opened; the 10 ms it
+        # sent before it was cancelled count towards the stop
+        ([["Hello there."], ["Stalls here."]], ["audio-start", "audio-chunk", "audio-chunk", "audio-stop"], 20),
+        # The cancelled sentence is still being buffered behind the one that opened the stream
+        ([["Hello there.", "Stalls here."]], ["audio-start", "audio-chunk", "audio-stop"], 10),
+    ],
+)
+async def test_stop_closes_the_audio_an_earlier_sentence_opened(
+    enhanced_handler, mock_info, mock_clients, batches, expected_event_types, expected_stop_timestamp
+):
+    """Test a sentence cancelled by stop() does not leave a stream an earlier sentence opened without audio-stop."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    stalled = asyncio.Event()
+
+    def create(**kwargs):
+        stalls = kwargs["input"].startswith("Stalls")
+
+        async def iter_bytes(chunk_size=None):
+            yield b"\x00\x01" * 240
+            if stalls:
+                stalled.set()
+                await asyncio.Event().wait()
+
+        response = Mock()
+        response.iter_bytes = iter_bytes
+        stream_response = AsyncMock()
+        stream_response.__aenter__ = AsyncMock(return_value=response)
+        stream_response.__aexit__ = AsyncMock(return_value=None)
+        return stream_response
+
+    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+
+    async def synthesize():
+        for sentences in batches:
+            await enhanced_handler._process_ready_sentences(sentences)
+
+    task = asyncio.create_task(synthesize())
+    async with asyncio.timeout(1):
+        await stalled.wait()
+        # Everything before the stalled sentence has been played
+        while len(enhanced_handler.write_event.call_args_list) < len(expected_event_types) - 1:
+            await asyncio.sleep(0)
+
+    with patch("wyoming.server.AsyncEventHandler.stop", new=AsyncMock()):
+        await enhanced_handler.stop()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert [event.type for event in events] == expected_event_types
+    assert events[-1].data["timestamp"] == expected_stop_timestamp
+    assert enhanced_handler._audio_started is False
+
+
+@pytest.mark.asyncio
+async def test_failed_sentence_stops_the_audio_at_what_was_sent(enhanced_handler, mock_info, mock_clients):
+    """Test a sentence failing midway in a stream an earlier one opened is stopped after the audio it sent."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+
+    def create(**kwargs):
+        fails = kwargs["input"].startswith("Fails")
+
+        async def iter_bytes(chunk_size=None):
+            yield b"\x00\x01" * 240
+            if fails:
+                raise RuntimeError("backend went away")
+
+        response = Mock()
+        response.iter_bytes = iter_bytes
+        stream_response = AsyncMock()
+        stream_response.__aenter__ = AsyncMock(return_value=response)
+        stream_response.__aexit__ = AsyncMock(return_value=None)
+        return stream_response
+
+    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+
+    assert await enhanced_handler._process_ready_sentences(["Hello there."])
+    assert not await enhanced_handler._process_ready_sentences(["Fails here."])
+
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert [event.type for event in events] == [
+        "audio-start",
+        "audio-chunk",
+        "audio-chunk",
+        "audio-stop",
+        "synthesize-stopped",
+    ]
+    assert events[3].data["timestamp"] == 20
 
 
 @pytest.mark.asyncio
