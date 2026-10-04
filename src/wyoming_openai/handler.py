@@ -7,7 +7,7 @@ import struct
 import unicodedata
 import wave
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from openai import AsyncStream, omit
@@ -118,6 +118,23 @@ class TtsAudioFormat:
 
     headerless: bool  # Raw PCM16 mono rather than a WAV file
     rate: int  # Hz; for WAV only a fallback until the header is parsed
+
+
+@dataclass
+class _SynthesisState:
+    """What one synthesis keeps between events. Replaced as a whole, so nothing carries over to the next one."""
+
+    active: bool = False  # Between synthesize-start and synthesize-stop
+    buffer: list[str] = field(default_factory=list)  # All text of the session, for the synthesize-stop fallback
+    text_accumulator: str = ""  # Text not handed to the backend yet
+    voice: TtsVoiceModel | None = None  # Resolved once per streaming synthesis
+    language: str | None = None  # Requested along with that voice
+    ssml_transformer: SsmlTextTransformer | None = None
+    segmenters: dict[str, BoundaryDetector] = field(default_factory=dict)  # Sentence segmenters per language
+    audio_started: bool = False  # AudioStart was sent and AudioStop was not
+    timestamp: float = 0  # End of the audio sent so far
+    synthesized_incrementally: bool = False  # Sentences of this synthesis already went to the backend
+    skipped_speakable_sentence: bool = False  # A sentence with something to say came back without audio
 
 
 class _WavFramer:
@@ -320,22 +337,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._last_event_type: str | None = None
         self._event_counter: int = 0
 
-        # State for streaming synthesis
-        self._synthesis_buffer: list[str] = []
-        self._resolved_synthesis_voice: TtsVoiceModel | None = None  # Resolved once per streaming synthesis
-        self._synthesis_language: str | None = None  # Requested along with that voice
-        self._synthesis_text_format: str | SynthesizeTextFormat | None = None
-        self._ssml_transformer: SsmlTextTransformer | None = None
-        self._is_synthesizing: bool = False
-
-        # State for incremental sentence detection
-        self._text_accumulator: str = ""
-        self._ready_chunks: list[str] = []
-        self._segmenters: dict[str, BoundaryDetector] = {}  # Cache sentence segmenters per language
-        self._audio_started: bool = False  # Track if AudioStart has been sent
-        self._current_timestamp: float = 0  # Track timestamp continuity across chunks
-        self._synthesized_incrementally: bool = False  # Sentences of this synthesis already went to the backend
-        self._skipped_speakable_sentence = False
+        # State of the current synthesis
+        self._synthesis = _SynthesisState()
 
         if tts_concurrent_requests < 1:
             raise ValueError(f"tts_concurrent_requests must be at least 1, got {tts_concurrent_requests}")
@@ -402,7 +405,7 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def disconnect(self) -> None:
         """Clean up handler-owned realtime resources when the Wyoming client disconnects."""
         try:
-            await self._cancel_synthesis_tasks()
+            await self._stop_sentence_playback()
             await self._cleanup_realtime_transcription()
         finally:
             # Closed before the drain so the client is not kept waiting on websocket closing handshakes
@@ -412,7 +415,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
         try:
-            await self._cancel_synthesis_tasks()
+            # The client is still connected, so an open audio stream is closed before the writer is
+            await self._stop_sentence_playback()
             await self._cleanup_realtime_transcription()
         finally:
             await super().stop()
@@ -1161,7 +1165,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             bool: True if processing succeeded, False if synthesis was aborted.
         """
         # A synthesis that named no voice is synthesized as a whole when it stops
-        voice = self._resolved_synthesis_voice
+        voice = self._synthesis.voice
         if not sentences or voice is None:
             return True
 
@@ -1175,7 +1179,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     return True
 
                 # Even if none of them has anything to say, synthesize-stop must not synthesize the text again
-                self._synthesized_incrementally = True
+                self._synthesis.synthesized_incrementally = True
                 if not await self._play_sentences(valid_sentences, voice):
                     return await self._abort_synthesis()
 
@@ -1193,7 +1197,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             voice (TtsVoiceModel): Voice to use for synthesis.
 
         Returns:
-            bool: True if every sentence was played or skipped, False if playback failed.
+            bool: True if every sentence was played or skipped, False if playback failed. Pending sentences
+                and an open audio stream are then left to `_stop_sentence_playback`, which the caller runs.
         """
         _LOGGER.info("Starting concurrent synthesis for %d sentences", len(sentences))
 
@@ -1219,11 +1224,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             self._allow_streaming_task_id = task_id
             try:
                 result = await task
-            except asyncio.CancelledError:
-                # stop() cancelled the sentence while the client is still connected. It only closes a stream
-                # it opened itself, so one an earlier sentence opened is closed here, before the writer is
-                await self._stop_failed_tts_stream(self._audio_started, self._current_timestamp)
-                raise
             except TtsStreamError as err:
                 _LOGGER.error(
                     "Failed to synthesize sentence %d (%s) with voice %s: %s",
@@ -1232,7 +1232,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                     err.voice,
                     err,
                 )
-                await self._stop_sentence_playback()
                 return False
             except Exception as err:
                 _LOGGER.exception(
@@ -1241,7 +1240,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                     sentence_preview,
                     err,
                 )
-                await self._stop_sentence_playback()
                 return False
             finally:
                 self._allow_streaming_task_id = None
@@ -1254,18 +1252,17 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Otherwise, task completed and buffered - stream the buffered data now
             chunk_timestamp = await self._stream_audio_to_wyoming(
                 result.audio or b"",
-                is_first_chunk=(not self._audio_started),
-                start_timestamp=self._current_timestamp,
+                is_first_chunk=(not self._synthesis.audio_started),
+                start_timestamp=self._synthesis.timestamp,
                 audio_format=self._get_tts_audio_format(voice),
                 text=sentences[i],
             )
 
             if chunk_timestamp is None:
                 _LOGGER.error("Failed to stream sentence %d (%s) to Wyoming", i + 1, sentence_preview)
-                await self._stop_sentence_playback()
                 return False
 
-            self._current_timestamp = chunk_timestamp
+            self._synthesis.timestamp = chunk_timestamp
             _LOGGER.debug(
                 "Successfully streamed buffered sentence %d, timestamp: %.2f",
                 i + 1,
@@ -1292,13 +1289,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         timestamp = await self._stream_tts_audio(
             voice=voice,
             text=text,
-            send_audio_start=(not self._audio_started),
-            start_timestamp=self._current_timestamp,
+            send_audio_start=(not self._synthesis.audio_started),
+            start_timestamp=self._synthesis.timestamp,
             sentence=True,
         )
 
         if timestamp is not None:
-            self._current_timestamp = timestamp
+            self._synthesis.timestamp = timestamp
 
         return timestamp
 
@@ -1339,33 +1336,41 @@ class OpenAIEventHandler(AsyncEventHandler):
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
 
+    async def _write_event_bounded(self, event: Event) -> None:
+        """Write an event of an abort or a shutdown, which a client that stopped reading must not hold up."""
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.write_event(event), TTS_STREAM_STOP_TIMEOUT)
+
+    async def _abort_audio_stream(self) -> None:
+        """
+        Close the audio stream of a synthesis that failed or was cancelled.
+        Playback only reports failure; this is the one place that sends the audio stop for it. It runs when
+        the handler of a synthesis event unwinds, and from stop() while the client is still connected.
+        """
+        if self._synthesis.audio_started:
+            # Closed for good even if the client does not take the stop, so nobody sends it a second time
+            self._synthesis.audio_started = False
+            await self._write_event_bounded(AudioStop(timestamp=int(self._synthesis.timestamp)).event())
+
     async def _stop_sentence_playback(self) -> None:
-        """Cancel pending sentences and close their audio stream without ending the text session."""
+        """
+        Cancel pending synthesis requests and close their audio stream without ending the text session.
+        Does nothing after a synthesis that completed, which has no request pending and closed its own stream.
+        """
         await self._cancel_synthesis_tasks()
-        if self._audio_started:
-            await self._write_tts_audio_stop(self._current_timestamp)
+        await self._abort_audio_stream()
 
     async def _abort_synthesis(self) -> bool:
         """Abort the current synthesis session, emitting stop events and resetting state."""
-        await self._stop_sentence_playback()
-        await self.write_event(SynthesizeStopped().event())
-
-        self._audio_started = False
-        self._current_timestamp = 0
-        self._synthesized_incrementally = False
-        self._skipped_speakable_sentence = False
-        self._allow_streaming_task_id = None
-        self._is_synthesizing = False
-        self._synthesis_buffer = []
-        self._text_accumulator = ""
-        self._ready_chunks = []
-        self._segmenters.clear()
-        self._resolved_synthesis_voice = None
-        self._synthesis_language = None
-        self._synthesis_text_format = None
-        self._ssml_transformer = None
-
+        await self._end_synthesis()
+        await self._write_event_bounded(SynthesizeStopped().event())
         return False
+
+    async def _end_synthesis(self) -> None:
+        """Leave nothing of the current synthesis behind: no pending request, no open stream, no state."""
+        await self._stop_sentence_playback()
+        self._synthesis = _SynthesisState()
+        self._allow_streaming_task_id = None
 
     def _log_unsupported_asr_model(self, model_name: str | None = None):
         """Log an unsupported ASR model"""
@@ -1516,20 +1521,17 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_synthesize(self, synthesize: Synthesize) -> bool:
         """Handle text-to-speech synthesis request"""
+        _LOGGER.debug("Handling synthesize request %s", synthesize)
+
+        # IMPORTANT: Ignore standalone synthesize events when streaming synthesis is already active
+        # This prevents duplicate audio synthesis when both streaming events (synthesize-start/chunk/stop)
+        # and standalone synthesize events are used together
+        if self._synthesis.active:
+            _LOGGER.debug("Ignoring standalone synthesize event - streaming synthesis is already active")
+            return True
+
+        self._synthesis = _SynthesisState()
         try:
-            _LOGGER.debug("Handling synthesize request %s", synthesize)
-
-            # IMPORTANT: Ignore standalone synthesize events when streaming synthesis is already active
-            # This prevents duplicate audio synthesis when both streaming events (synthesize-start/chunk/stop)
-            # and standalone synthesize events are used together
-            if self._is_synthesizing:
-                _LOGGER.debug("Ignoring standalone synthesize event - streaming synthesis is already active")
-                return True
-
-            self._audio_started = False
-            self._current_timestamp = 0
-            self._skipped_speakable_sentence = False
-
             if synthesize.voice:
                 requested_voice = synthesize.voice.name
                 requested_language = synthesize.voice.language
@@ -1551,41 +1553,24 @@ class OpenAIEventHandler(AsyncEventHandler):
                 chunks = self._chunk_text_for_streaming(
                     text, self._tts_streaming_min_words, self._tts_streaming_max_chars, requested_language
                 )
-                try:
-                    if not await self._play_sentences(chunks, voice):
-                        return False
-                    return await self._finish_tts_audio_stream(voice)
-                finally:
-                    await self._stop_sentence_playback()
-                    self._current_timestamp = 0
-                    self._skipped_speakable_sentence = False
+                if not await self._play_sentences(chunks, voice):
+                    return False
+                return await self._finish_tts_audio_stream(voice)
 
             return await self._synthesize_non_streaming(text, voice)
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
+        finally:
+            await self._end_synthesis()
 
     async def _handle_synthesize_start(self, synthesize_start: SynthesizeStart) -> bool:
         """Handle start of streaming synthesis"""
         _LOGGER.debug("Handling synthesize-start event: %s", synthesize_start)
 
-        # Reset synthesis state
-        self._synthesis_buffer = []
-        self._is_synthesizing = True
-        self._synthesis_text_format = synthesize_start.text_format
-        self._ssml_transformer = SsmlTextTransformer() if self._is_ssml_format(synthesize_start.text_format) else None
-
-        # Reset incremental detection state
-        self._text_accumulator = ""
-        self._ready_chunks = []
-        self._segmenters.clear()  # Clear segmenter cache for new session
-        self._audio_started = False  # Reset audio started flag
-        self._current_timestamp = 0  # Reset timestamp for new synthesis session
-        self._synthesized_incrementally = False
-        self._skipped_speakable_sentence = False
-        self._resolved_synthesis_voice = None
-        self._synthesis_language = None
+        ssml_transformer = SsmlTextTransformer() if self._is_ssml_format(synthesize_start.text_format) else None
+        self._synthesis = _SynthesisState(active=True, ssml_transformer=ssml_transformer)
 
         # Store voice information if provided
         if synthesize_start.voice:
@@ -1595,48 +1580,48 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Validate voice and language
             voice = self._validate_tts_voice_and_language(requested_voice, requested_language)
             if not voice:
-                self._is_synthesizing = False
+                self._synthesis.active = False
                 return False
             # Sentences reuse this instead of resolving, and warning about, the name again
-            self._resolved_synthesis_voice = voice
-            self._synthesis_language = requested_language
+            self._synthesis.voice = voice
+            self._synthesis.language = requested_language
 
         return True
 
     async def _handle_synthesize_chunk(self, synthesize_chunk: SynthesizeChunk) -> bool:
         """Handle text chunk during streaming synthesis with incremental sentence detection"""
-        if not self._is_synthesizing:
+        if not self._synthesis.active:
             _LOGGER.warning("Received synthesize-chunk without active synthesis")
             return False
 
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
         _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
 
-        if self._ssml_transformer is not None:
-            chunk_text = self._ssml_transformer.feed(chunk_text)
+        if self._synthesis.ssml_transformer is not None:
+            chunk_text = self._synthesis.ssml_transformer.feed(chunk_text)
 
         # Keep the fallback buffer and sentence accumulator as one identical
         # projected stream. The transformer owns all SSML whitespace repair.
-        self._synthesis_buffer.append(chunk_text)
+        self._synthesis.buffer.append(chunk_text)
 
         # Add to accumulator for sentence detection across chunks
-        self._text_accumulator += chunk_text
+        self._synthesis.text_accumulator += chunk_text
 
         # Get or create segmenter for the current language
-        requested_language = self._synthesis_language
+        requested_language = self._synthesis.language
         sd_language = self._get_segmenter_language(requested_language)
 
         # Use cached segmenter or create a new one
-        if sd_language not in self._segmenters:
+        if sd_language not in self._synthesis.segmenters:
             _LOGGER.debug("Creating new yasbd segmenter for language: %s", sd_language)
-            self._segmenters[sd_language] = BoundaryDetector(lang=sd_language)
+            self._synthesis.segmenters[sd_language] = BoundaryDetector(lang=sd_language)
 
-        segmenter = self._segmenters[sd_language]
+        segmenter = self._synthesis.segmenters[sd_language]
 
         # Segment the entire accumulated text. preserve_whitespace=True keeps every
         # character (the retained last segment is appended to by later events), so no
         # text is lost at sentence boundaries even when yasbd redistributes the space.
-        sentences: list[str] = list(segmenter.segment(self._text_accumulator, preserve_whitespace=True))
+        sentences: list[str] = list(segmenter.segment(self._synthesis.text_accumulator, preserve_whitespace=True))
 
         # Process complete sentences (all but the last one)
         ready_sentences: list[str] = []
@@ -1652,7 +1637,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 ready_sentences.append(open_chunk)
                 open_chunk = ""
             # A chunk below the minimum waits for more text; synthesize-stop speaks whatever is left
-            self._text_accumulator = open_chunk + unfinished_sentence
+            self._synthesis.text_accumulator = open_chunk + unfinished_sentence
 
         if ready_sentences:
             _LOGGER.info(
@@ -1664,84 +1649,69 @@ class OpenAIEventHandler(AsyncEventHandler):
                 return False
         else:
             _LOGGER.debug(
-                "No complete sentences ready yet, accumulator has: '%s'", _truncate_for_log(self._text_accumulator)
+                "No complete sentences ready yet, accumulator has: '%s'",
+                _truncate_for_log(self._synthesis.text_accumulator),
             )
 
         return True
 
     async def _handle_synthesize_stop(self) -> bool:
         """Handle end of streaming synthesis"""
-        if not self._is_synthesizing:
+        state = self._synthesis
+        if not state.active:
             _LOGGER.warning("Received synthesize-stop without active synthesis")
             return False
 
-        self._is_synthesizing = False
+        state.active = False
+        try:
+            return await self._finish_synthesis(state)
+        finally:
+            await self._end_synthesis()
 
-        if self._ssml_transformer is not None:
-            flushed = self._ssml_transformer.finish()
-            self._text_accumulator += flushed
-            self._synthesis_buffer.append(flushed)
+    async def _finish_synthesis(self, state: _SynthesisState) -> bool:
+        """Speak what a streaming synthesis has left and end it with synthesize-stopped."""
+        if state.ssml_transformer is not None:
+            flushed = state.ssml_transformer.finish()
+            state.text_accumulator += flushed
+            state.buffer.append(flushed)
 
         # Process any remaining text in the accumulator (even if it's incomplete)
         # This is the final text, so we process it regardless of sentence completion
-        if self._text_accumulator.strip():
-            _LOGGER.info("Processing final remaining text: '%s'", _truncate_for_log(self._text_accumulator))
-            if not await self._process_ready_sentences([self._text_accumulator]):
+        if state.text_accumulator.strip():
+            _LOGGER.info("Processing final remaining text: '%s'", _truncate_for_log(state.text_accumulator))
+            if not await self._process_ready_sentences([state.text_accumulator]):
                 return False
 
-        # Get accumulated text and voice for fallback
-        full_text = "".join(self._synthesis_buffer)
-        resolved_voice = self._resolved_synthesis_voice
-        requested_language = self._synthesis_language
-        synthesized_incrementally = self._synthesized_incrementally
-
+        full_text = "".join(state.buffer)
         _LOGGER.debug("Streaming synthesis completed with text: %s", _truncate_for_log(full_text))
-
-        # Clear synthesis state early
-        self._synthesis_buffer = []
-        self._resolved_synthesis_voice = None
-        self._synthesis_language = None
-        self._synthesized_incrementally = False
-        self._synthesis_text_format = None
-        self._ssml_transformer = None
-        self._text_accumulator = ""
-        self._ready_chunks = []
-        self._segmenters.clear()  # Clear segmenter cache
 
         # Finish here if the sentences were synthesized incrementally, even when none of them had anything to say:
         # the fallback below would send the same text to the backend again
-        if self._audio_started or synthesized_incrementally:
-            if not await self._finish_tts_audio_stream(resolved_voice):
+        if state.audio_started or state.synthesized_incrementally:
+            if not await self._finish_tts_audio_stream(state.voice):
                 return await self._abort_synthesis()
             await self.write_event(SynthesizeStopped().event())
             _LOGGER.info(
-                "Successfully completed incremental streaming synthesis, final timestamp: %.2f", self._current_timestamp
+                "Successfully completed incremental streaming synthesis, final timestamp: %.2f", state.timestamp
             )
-            self._audio_started = False  # Reset for next session
-            self._current_timestamp = 0  # Reset for next session
-            self._segmenters.clear()  # Clear segmenter cache
             return True  # Exit early to prevent duplicate events
 
         if not full_text.strip():
             _LOGGER.warning("No text to synthesize")
-            self._skipped_speakable_sentence = False
             await self.write_event(SynthesizeStopped().event())
             return True
 
         try:
             # A synthesis that named no voice gets the default one
-            voice = resolved_voice or self._validate_tts_voice_and_language(None, None)
+            voice = state.voice or self._validate_tts_voice_and_language(None, None)
             if not voice:
                 await self.write_event(SynthesizeStopped().event())
                 return False
 
-            # Check if streaming is enabled for this voice
-            use_streaming = self._is_tts_voice_streaming(voice.name)
-
-            if use_streaming:
+            if self._is_tts_voice_streaming(voice.name):
                 # Chunk text for streaming synthesis
                 chunks = self._chunk_text_for_streaming(
-                    full_text, self._tts_streaming_min_words, self._tts_streaming_max_chars, requested_language
+                    full_text, self._tts_streaming_min_words, self._tts_streaming_max_chars, state.language
                 )
                 _LOGGER.debug("Text chunked into %d parts for streaming synthesis", len(chunks))
 
@@ -1750,15 +1720,12 @@ class OpenAIEventHandler(AsyncEventHandler):
 
                 if not await self._finish_tts_audio_stream(voice):
                     return await self._abort_synthesis()
-                self._current_timestamp = 0  # Reset for next session
                 _LOGGER.info("Successfully completed concurrent streaming synthesis: %s", _truncate_for_log(full_text))
             else:
                 # Use non-streaming synthesis for non-streaming voices
                 _LOGGER.debug("Using non-streaming synthesis for voice: %s", voice.name)
-                success = await self._synthesize_non_streaming(full_text, voice)
-                if not success:
-                    await self.write_event(SynthesizeStopped().event())
-                    return False
+                if not await self._synthesize_non_streaming(full_text, voice):
+                    return await self._abort_synthesis()
 
             await self.write_event(SynthesizeStopped().event())
             return True
@@ -2033,27 +2000,26 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _write_tts_audio_start(self, rate: int, width: int, channels: int) -> None:
         """Send the audio start for the selected format and mark the stream as open."""
         await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
-        self._audio_started = True
+        self._synthesis.audio_started = True
 
     async def _write_tts_audio_stop(self, timestamp: float) -> None:
         """Send the audio stop and mark the stream as closed."""
         await self.write_event(AudioStop(timestamp=int(timestamp)).event())
-        self._audio_started = False
+        self._synthesis.audio_started = False
 
     async def _finish_tts_audio_stream(self, voice: TtsVoiceModel | None) -> bool:
         """Send the audio stop of a completed synthesis, opening the stream first if no sentence had audio."""
-        if not self._audio_started and self._skipped_speakable_sentence:
+        if not self._synthesis.audio_started and self._synthesis.skipped_speakable_sentence:
             _LOGGER.error("TTS synthesis returned no audio for any speakable sentence")
             return False
-        if not self._audio_started and voice is not None:
+        if not self._synthesis.audio_started and voice is not None:
             # Clients build their output from audio-start, so a synthesis with nothing to say still ends as
             # an empty stream rather than without one
             await self._write_tts_audio_start(
                 self._get_tts_audio_format(voice).rate, DEFAULT_AUDIO_WIDTH, DEFAULT_AUDIO_CHANNELS
             )
-        if self._audio_started:
-            await self._write_tts_audio_stop(self._current_timestamp)
-        self._skipped_speakable_sentence = False
+        if self._synthesis.audio_started:
+            await self._write_tts_audio_stop(self._synthesis.timestamp)
         return True
 
     async def _write_tts_audio_chunk(self, audio_data: bytes, framer: _WavFramer, timestamp: float) -> float:
@@ -2077,7 +2043,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_channels=framer.channels,
         )
         # Kept current chunk by chunk, so a sentence that fails or is cancelled midway is stopped at what was sent
-        self._current_timestamp = timestamp
+        self._synthesis.timestamp = timestamp
         return timestamp
 
     async def _stream_tts_audio(
@@ -2142,9 +2108,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                 still opens the stream when there is nothing to say and fails without audio for speakable text.
 
         Returns:
-            float | None: Final timestamp after streaming, or None on error.
+            float | None: Final timestamp after streaming, or None on error. A stream left open by a failure
+                or a cancellation is closed by `_abort_audio_stream`, not here.
         """
-        opened_stream = False  # This call sent AudioStart
         timestamp = start_timestamp
         try:
             framer = _WavFramer(audio_format, self._parse_wav_header)
@@ -2155,11 +2121,10 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             async def write_audio(audio_data: bytes) -> None:
                 """Send the audio start once the format is known, then the PCM."""
-                nonlocal send_audio_start, opened_stream, timestamp, wrote_audio
+                nonlocal send_audio_start, timestamp, wrote_audio
                 if send_audio_start:
                     await self._write_tts_audio_start(framer.rate, framer.width, framer.channels)
                     send_audio_start = False
-                    opened_stream = True
                 if not audio_data:
                     return
                 timestamp = await self._write_tts_audio_chunk(audio_data, framer, timestamp)
@@ -2194,38 +2159,20 @@ class OpenAIEventHandler(AsyncEventHandler):
             speakable = _has_speakable_content(text)
             if framer.missing_bytes or (speakable and not sentence):
                 _LOGGER.error("TTS backend returned no audio for: %s", _truncate_for_log(text, 50))
-                await self._stop_failed_tts_stream(opened_stream, timestamp)
                 return None
 
             if speakable:
                 _LOGGER.warning("Skipping sentence without audio: %s", _truncate_for_log(text, 50))
-                self._skipped_speakable_sentence = True
+                self._synthesis.skipped_speakable_sentence = True
             else:
                 _LOGGER.debug("No audio for text with nothing to speak: %s", _truncate_for_log(text, 50))
             if not sentence:
                 await write_audio(b"")
             return timestamp
 
-        except asyncio.CancelledError:
-            # stop() cancels sentence tasks while the client is still connected, so a stream this call opened
-            # is closed as on failure; one an earlier sentence opened is closed by `_play_sentences`
-            await self._stop_failed_tts_stream(opened_stream, timestamp)
-            raise
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
-            await self._stop_failed_tts_stream(opened_stream, timestamp)
             return None
-
-    async def _stop_failed_tts_stream(self, opened_stream: bool, timestamp: float) -> None:
-        """
-        Close an audio stream a failed or cancelled synthesis left open; callers only close streams that completed.
-        """
-        if opened_stream:
-            # Bounded, so a client that stopped reading cannot hold up an abort or a shutdown
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._write_tts_audio_stop(timestamp), TTS_STREAM_STOP_TIMEOUT)
-            # Closed for good even if the client did not take the stop, so nobody sends it a second time
-            self._audio_started = False
 
     def _advance_audio_timestamp(
         self,
