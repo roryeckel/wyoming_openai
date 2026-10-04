@@ -490,6 +490,14 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         ),
     )
 
+    # The pre-GA session shape; sent as is, the API would reject every synthesis request
+    validate_extra_body_disallowed_fields(
+        extra_body,
+        field_names={"voice", "speed"},
+        body_name="TTS Realtime",
+        reason="the voice is chosen per request by the Wyoming client and the speed is set with audio.output.speed",
+    )
+
     audio = extra_body.get("audio", {})
     if not isinstance(audio, dict) or not isinstance(audio.get("output", {}), dict):
         raise ValueError("TTS Realtime extra_body audio must be an object whose output, if set, is an object")
@@ -528,7 +536,11 @@ def get_realtime_tts_audio_output(extra_body: dict[str, object] | None) -> dict[
 
 def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
     """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
-    speed = get_realtime_tts_audio_output(extra_body).get("speed")
+    return resolve_realtime_tts_speed(tts_speed, get_realtime_tts_audio_output(extra_body).get("speed"))
+
+
+def resolve_realtime_tts_speed(tts_speed: float | None, speed: object) -> float | None:
+    """Return the usable Realtime TTS speed given an audio.output.speed override, or None for the default."""
     if speed is None:
         # A null override is the same as no override
         speed = tts_speed

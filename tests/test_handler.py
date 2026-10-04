@@ -27,6 +27,7 @@ from wyoming_openai.handler import (
     OpenAIEventHandler,
     TtsAudioFormat,
     TtsStreamError,
+    _has_speakable_content,
 )
 
 
@@ -630,10 +631,6 @@ def mock_clients():
     # Mock close methods
     stt_client.close = AsyncMock()
     tts_client.close = AsyncMock()
-
-    # A mock attribute is truthy, so say what kind of server this is
-    stt_client.is_official_openai = False
-    tts_client.is_official_openai = False
 
     return stt_client, tts_client
 
@@ -2843,6 +2840,7 @@ async def test_transcribe_keeps_singular_language_for_other_models_and_backends(
 
     assert call_args["language"] == "en"
     assert call_args["temperature"] == 0.5
+    assert call_args["languages"] is omit
     assert "languages" not in call_args.get("extra_body", {})
 
 
@@ -3411,13 +3409,9 @@ async def test_realtime_tts_skips_text_with_nothing_to_speak(enhanced_handler, m
         ("\U0001f642", False),
     ],
 )
-def test_realtime_tts_speakable_text(enhanced_handler, mock_info, text, speakable):
-    """Test only text with nothing to read aloud is kept from a Realtime model."""
-    voice = mock_info.tts[0].voices[0]
-    assert enhanced_handler._is_tts_text_speakable(text, voice) is True
-
-    enhanced_handler._tts_realtime_models = {voice.model_name}
-    assert enhanced_handler._is_tts_text_speakable(text, voice) is speakable
+def test_speakable_text(text, speakable):
+    """Test only punctuation and emoji count as text with nothing to read aloud."""
+    assert _has_speakable_content(text) is speakable
 
 
 @pytest.mark.asyncio
@@ -3517,6 +3511,12 @@ async def test_http_tts_truncated_wav_without_samples_fails(enhanced_handler, mo
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
     assert event_types == ["audio-start", "audio-stop"]
 
+    # As on the buffered path, text with nothing to say does not excuse the missing samples
+    _mock_speech_response(tts_client, [header_only])
+    assert not await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": "...", "voice": {"name": "alloy"}})
+    )
+
 
 class _OverlapRecordingSpeech:
     """Stand-in for ``audio.speech.with_streaming_response`` that records how many requests are in flight at once."""
@@ -3582,22 +3582,20 @@ def test_init_rejects_non_positive_tts_concurrent_requests(dummy_info, dummy_cli
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("backend", "official", "model_name", "expected"),
+    ("backend", "model_name", "expected"),
     [
-        # A body shared with gpt-live-transcribe must not send both fields to a singular-language model
-        (OpenAIBackend.OPENAI, True, "gpt-realtime-whisper", {"language": "en"}),
-        # Other servers take whatever the extra body says, including unrecognized ones classed as OPENAI
-        (OpenAIBackend.OPENAI, False, "gpt-realtime-whisper", {"language": "en", "languages": ["en", "de"]}),
-        (OpenAIBackend.SPEACHES, False, "gpt-realtime-whisper", {"language": "en", "languages": ["en", "de"]}),
+        # A singular-language model never gets both fields, on the official API, a proxy or another server
+        (OpenAIBackend.OPENAI, "gpt-realtime-whisper", {"languages": ["en", "de"]}),
+        (OpenAIBackend.SPEACHES, "gpt-realtime-whisper", {"languages": ["en", "de"]}),
+        (OpenAIBackend.OPENAI, "gpt-live-transcribe", {"languages": ["en", "de"]}),
     ],
 )
-async def test_realtime_transcription_drops_plural_languages_for_singular_models(
-    enhanced_handler, mock_info, mock_clients, backend, official, model_name, expected
+async def test_realtime_transcription_extra_body_languages_replace_the_request_language(
+    enhanced_handler, mock_info, mock_clients, backend, model_name, expected
 ):
-    """Test an extra_body `languages` list never reaches an official OpenAI model that takes `language`."""
+    """Test an extra_body `languages` list is passed through and suppresses the request language."""
     stt_client, _ = mock_clients
     stt_client.backend = backend
-    stt_client.is_official_openai = official
     mock_info.asr[0].models[0].name = model_name
     enhanced_handler._stt_realtime_models = {model_name}
     enhanced_handler._stt_realtime_extra_body = {"languages": ["en", "de"]}
@@ -3609,19 +3607,24 @@ async def test_realtime_transcription_drops_plural_languages_for_singular_models
 
 
 @pytest.mark.asyncio
-async def test_transcribe_drops_plural_languages_for_singular_models(enhanced_handler, mock_info, mock_clients):
-    """Test the HTTP path drops an extra_body `languages` list for an OpenAI model that takes `language`."""
+@pytest.mark.parametrize("backend", [OpenAIBackend.OPENAI, OpenAIBackend.SPEACHES])
+async def test_transcribe_extra_body_languages_replace_the_request_language(
+    enhanced_handler, mock_info, mock_clients, backend
+):
+    """Test the HTTP path sends an extra_body `languages` list instead of `language` for any model."""
     stt_client, _ = mock_clients
-    stt_client.backend = OpenAIBackend.OPENAI
-    stt_client.is_official_openai = True
+    stt_client.backend = backend
     mock_info.asr[0].models[0].name = "whisper-1"
-    enhanced_handler._stt_extra_body = {"languages": ["en", "de"], "keywords": ["Wyoming"]}
+    # A singular field in the same body gives way too, as an aliased model may reject it
+    enhanced_handler._stt_extra_body = {"language": "en", "languages": ["en", "de"], "keywords": ["Wyoming"]}
 
     call_args = await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1")
 
-    assert call_args["language"] == "en"
+    assert call_args["language"] is omit
     assert call_args["languages"] is omit
-    assert call_args["extra_body"] == {"keywords": ["Wyoming"]}
+    assert "language" not in call_args["extra_body"]
+    assert call_args["extra_body"]["languages"] == ["en", "de"]
+    assert call_args["extra_body"]["keywords"] == ["Wyoming"]
 
 
 def _add_realtime_voice_first(mock_info, enhanced_handler):
@@ -3683,10 +3686,69 @@ async def test_realtime_tts_transport_refuses_unspeakable_text(enhanced_handler,
     _, tts_client = mock_clients
     realtime_tts(_realtime_tts_events())
 
-    with pytest.raises(TtsStreamError):
-        await enhanced_handler._get_tts_audio_stream("...", mock_info.tts[0].voices[0])
+    result = await enhanced_handler._get_tts_audio_stream("...", mock_info.tts[0].voices[0])
+
+    assert result.skipped is True
+    tts_client.realtime.connect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_streaming_realtime_tts_with_nothing_to_speak_sends_no_audio_events(
+    enhanced_handler, mock_info, mock_clients, realtime_tts
+):
+    """Test a streaming synthesis of unspeakable text ends on synthesize-stopped without opening the stream."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    realtime_tts(_realtime_tts_events())
+
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+    assert await enhanced_handler.handle_event(SynthesizeChunk(text="... \U0001f642").event())
+    assert await enhanced_handler.handle_event(Event(type="synthesize-stop"))
 
     tts_client.realtime.connect.assert_not_called()
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["synthesize-stopped"]
+
+
+@pytest.mark.asyncio
+async def test_incremental_tts_skipped_first_sentence_does_not_fix_the_audio_format(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test audio-start carries the format of the first sentence with audio, not the fallback one."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(22050)
+        wav_file.writeframes(b"\x00\x01" * 10)
+
+    def create(**kwargs):
+        chunks = [wav_buffer.getvalue()] if any(char.isalnum() for char in kwargs["input"]) else []
+
+        async def iter_bytes(chunk_size=None):
+            for chunk in chunks:
+                yield chunk
+
+        response = Mock()
+        response.iter_bytes = iter_bytes
+        stream_response = AsyncMock()
+        stream_response.__aenter__ = AsyncMock(return_value=response)
+        stream_response.__aexit__ = AsyncMock(return_value=None)
+        return stream_response
+
+    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+
+    assert await enhanced_handler._process_ready_sentences(["..."])
+    enhanced_handler.write_event.assert_not_called()
+    assert enhanced_handler._audio_started is False
+
+    assert await enhanced_handler._process_ready_sentences(["Hello there.", "Bye now."])
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert [event.type for event in events] == ["audio-start", "audio-chunk", "audio-chunk"]
+    assert {event.data["rate"] for event in events} == {22050}
 
 
 @pytest.mark.asyncio
@@ -3904,6 +3966,9 @@ async def test_zero_size_wav_does_not_play_any_whole_riff_chunk(enhanced_handler
         ("Stra\u00dfe", "STRASSE", False),
         # Symbol-only text has nothing to compare against its spoken name
         ("+", "plus", False),
+        # Numbers and symbols are spelled out in a transcript
+        ("It is 72\u00b0F", "It is seventy-two degrees Fahrenheit", False),
+        ("Tom & Jerry", "Tom and Jerry", False),
         ("Hello world", "Sure, I can help with that.", True),
     ],
 )

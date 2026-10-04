@@ -322,6 +322,9 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         # An int too large for a float is rejected like any other unusable number
         ({"audio": {"output": {"speed": 10**400}}}, "speed must be a finite number"),
         ({"audio": {"output": {"voice": "cedar"}}}, r"audio\.output\.voice"),
+        # The pre-GA session shape would be rejected by the API on every request
+        ({"voice": "cedar"}, "'voice'"),
+        ({"speed": 1.2}, r"'speed'.*audio\.output\.speed"),
         ({"output_modalities": ["text"]}, "'output_modalities'"),
         ({"type": "transcription", "tools": []}, "'tools', 'type'"),
         ({"tool_choice": "required"}, "'tool_choice'"),
