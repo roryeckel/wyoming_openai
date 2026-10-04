@@ -317,7 +317,7 @@ class TestCustomAsyncOpenAI:
 
     @pytest.mark.asyncio
     async def test_list_supported_voices_realtime_models_on_other_servers(self):
-        """Test Realtime TTS models keep the regular voice list on servers other than the official API."""
+        """Test a proxy in front of OpenAI, classed as the OPENAI backend, gets the Realtime voice set too."""
         custom_client = CustomAsyncOpenAI(
             api_key="test-key", base_url="http://localhost:8000/v1", backend=OpenAIBackend.OPENAI
         )
@@ -327,8 +327,19 @@ class TestCustomAsyncOpenAI:
         )
 
         voice_names = {v.backend_voice_name for v in voices}
-        assert {"fable", "onyx", "nova"} <= voice_names
-        assert not {"marin", "cedar"} & voice_names
+        assert not {"fable", "onyx", "nova"} & voice_names
+        assert {"marin", "cedar"} <= voice_names
+
+    def test_speech_only_voices_are_derived_from_the_voice_lists(self):
+        """Test the voices skipped for Realtime models are the speech voices the Realtime API lacks."""
+        from wyoming_openai.const import (
+            OPENAI_REALTIME_TTS_VOICES,
+            OPENAI_SPEECH_ONLY_TTS_VOICES,
+            OPENAI_SPEECH_TTS_VOICES,
+        )
+
+        assert OPENAI_SPEECH_ONLY_TTS_VOICES == ("fable", "onyx", "nova")
+        assert set(OPENAI_SPEECH_ONLY_TTS_VOICES) == set(OPENAI_SPEECH_TTS_VOICES) - set(OPENAI_REALTIME_TTS_VOICES)
 
     def test_create_tts_voices_limits_realtime_models_to_realtime_voices(self, caplog):
         """Test configured voices the Realtime API does not offer are not advertised for Realtime models."""

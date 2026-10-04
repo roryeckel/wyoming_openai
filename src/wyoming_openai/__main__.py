@@ -287,8 +287,8 @@ async def main():
             validate_realtime_stt_extra_body(args.stt_realtime_extra_body)
         if tts_requested and args.tts_voices:
             validate_tts_extra_body(args.tts_extra_body)
-        if args.tts_realtime_models:
-            validate_realtime_tts_extra_body(args.tts_realtime_extra_body)
+        # Checked even without Realtime models, so a misplaced body is reported instead of ignored
+        validate_realtime_tts_extra_body(args.tts_realtime_extra_body)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -296,6 +296,11 @@ async def main():
     _logger = logging.getLogger(__name__)
 
     _logger.info("Starting Wyoming OpenAI %s", __version__)
+
+    if args.tts_realtime_extra_body and not args.tts_realtime_models:
+        _logger.warning("TTS Realtime extra body is set but unused: no --tts-realtime-models are configured")
+    if args.stt_realtime_extra_body and not args.stt_realtime_models:
+        _logger.warning("STT Realtime extra body is set but unused: no --stt-realtime-models are configured")
 
     if not stt_requested and not tts_requested:
         _logger.error("No STT or TTS models specified. Exiting.")
@@ -332,9 +337,10 @@ async def main():
 
         openai_realtime_tts_models: list[str] = []
         if args.tts_realtime_models and tts_client is not None:
-            if tts_client.is_official_openai:
+            # As with STT `languages`, a proxy in front of OpenAI is treated as OpenAI
+            if tts_client.backend == OpenAIBackend.OPENAI:
                 openai_realtime_tts_models = args.tts_realtime_models
-            else:
+            if not tts_client.is_official_openai:
                 _logger.warning(
                     "TTS Realtime models are written for the official OpenAI Realtime API; "
                     "%s (%s backend) must implement /v1/realtime the same way for %s to work",

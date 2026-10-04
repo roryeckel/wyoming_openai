@@ -15,6 +15,7 @@ from .const import (
     DEFAULT_OPENAI_BASE_URL,
     OPENAI_REALTIME_TTS_VOICES,
     OPENAI_SPEECH_ONLY_TTS_VOICES,
+    OPENAI_SPEECH_TTS_VOICES,
     __version__,
 )
 
@@ -488,7 +489,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         Not official implemented by OpenAI, hard-coded.
         https://platform.openai.com/docs/guides/text-to-speech/voice-options
         """
-        return ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"]
+        return list(OPENAI_SPEECH_TTS_VOICES)
 
     async def list_openai_realtime_voices(self) -> list[str]:
         """
@@ -627,7 +628,8 @@ class CustomAsyncOpenAI(AsyncOpenAI):
         """
         Fetches the available voices via unofficial specs with streaming model fallback (consistent with ASR behavior).
         Uses streaming models if regular models not specified.
-        Models in realtime_model_names get the Realtime API voice set on the official OpenAI API only.
+        Models in realtime_model_names get the Realtime API voice set on the OPENAI backend,
+        which also covers proxies in front of OpenAI.
         Note: this is not the list of CONFIGURED voices.
         """
         ordered_models = _get_ordered_unique_models(model_names, streaming_model_names)
@@ -635,7 +637,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
         model_voice_pairs: list[tuple[str, str]] = []
         for model_name in ordered_models:
-            if self.is_official_openai and model_name in realtime_models:
+            if self.backend == OpenAIBackend.OPENAI and model_name in realtime_models:
                 tts_voices = await self.list_openai_realtime_voices()
             elif self.backend == OpenAIBackend.OPENAI:
                 tts_voices = await self.list_openai_voices()

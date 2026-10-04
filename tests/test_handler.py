@@ -631,6 +631,10 @@ def mock_clients():
     stt_client.close = AsyncMock()
     tts_client.close = AsyncMock()
 
+    # A mock attribute is truthy, so say what kind of server this is
+    stt_client.is_official_openai = False
+    tts_client.is_official_openai = False
+
     return stt_client, tts_client
 
 
@@ -2898,6 +2902,20 @@ async def realtime_tts(enhanced_handler, mock_info, mock_clients):
         tts_client.realtime.connect = Mock(return_value=manager)
         return connection, manager
 
+    def connect_each(events_per_connection):
+        """Give every websocket its own connection, scripted in the order they are opened."""
+        pending = list(events_per_connection)
+
+        def open_connection(**kwargs):
+            manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection(pending.pop(0)))
+            managers.append(manager)
+            return manager
+
+        tts_client.realtime.connect = Mock(side_effect=open_connection)
+        return managers
+
+    setattr(connect, "each", connect_each)
+
     yield connect
 
     await enhanced_handler._drain_background_tasks()
@@ -3433,11 +3451,9 @@ def test_suffixed_voice_name_resolves_after_models_change(enhanced_handler, mock
     """Test a "voice (model)" name from a multi-model setup still resolves once the suffix is gone."""
     with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
         voice = enhanced_handler._validate_tts_voice_and_language("alloy (gpt-4o-mini-tts)", None)
-        # A synthesis validates its voice several times; the warning is logged once per connection
-        assert enhanced_handler._validate_tts_voice_and_language("alloy (gpt-4o-mini-tts)", None) is voice
 
     assert voice is mock_info.tts[0].voices[0]
-    assert caplog.text.count("no longer advertised") == 1
+    assert "no longer advertised" in caplog.text
     assert enhanced_handler._validate_tts_voice_and_language("unknown (gpt-4o-mini-tts)", None) is None
 
 
@@ -3783,3 +3799,159 @@ async def test_http_tts_zero_size_wav_plays_pcm_that_starts_with_a_chunk_id(
     enhanced_handler.write_event.reset_mock()
     assert await enhanced_handler._stream_audio_to_wyoming(_header_only_wav() + pcm, True, 0, WAV_AUDIO_FORMAT)
     assert enhanced_handler.write_event.call_args.args[0].payload == pcm
+
+
+@pytest.mark.asyncio
+async def test_streaming_synthesis_resolves_its_voice_once(enhanced_handler, mock_info, mock_clients, caplog):
+    """Test a legacy voice name is resolved, and warned about, once per synthesis rather than per sentence."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    _mock_speech_response(tts_client, [b"\x00\x01" * 10])
+
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        voice = SynthesizeVoice(name="alloy (gpt-4o-mini-tts)")
+        assert await enhanced_handler.handle_event(SynthesizeStart(voice=voice).event())
+        assert await enhanced_handler.handle_event(SynthesizeChunk(text="First sentence. Second one. ").event())
+        assert await enhanced_handler.handle_event(SynthesizeChunk(text="Third one. Tail").event())
+        assert await enhanced_handler.handle_event(Event(type="synthesize-stop"))
+
+    assert caplog.text.count("no longer advertised") == 1
+    assert enhanced_handler._resolved_synthesis_voice is None
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types[0] == "audio-start"
+    assert event_types[-2:] == ["audio-stop", "synthesize-stopped"]
+
+
+@pytest.mark.asyncio
+async def test_http_tts_empty_headerless_audio_for_unspeakable_text_is_skipped(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test PCM backends that return nothing for punctuation do not fail the synthesis."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+
+    _mock_speech_response(tts_client, [])
+    assert await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": "...", "voice": {"name": "alloy"}})
+    )
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-stop"]
+
+    result = await enhanced_handler._get_tts_audio_stream("...", voice)
+    assert result.skipped is True
+
+    # Text with something to say still has to produce audio
+    with pytest.raises(TtsStreamError):
+        await enhanced_handler._get_tts_audio_stream("Hello", voice)
+
+
+@pytest.mark.asyncio
+async def test_incremental_http_tts_skips_sentences_without_audio(enhanced_handler, mock_info, mock_clients):
+    """Test an unspeakable sentence that yields no PCM is dropped from a batch instead of aborting it."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    pcm = b"\x00\x01" * 10
+
+    def create(**kwargs):
+        async def iter_bytes(chunk_size=None):
+            if any(char.isalnum() for char in kwargs["input"]):
+                yield pcm
+
+        response = Mock()
+        response.iter_bytes = iter_bytes
+        stream_response = AsyncMock()
+        stream_response.__aenter__ = AsyncMock(return_value=response)
+        stream_response.__aexit__ = AsyncMock(return_value=None)
+        return stream_response
+
+    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+
+    for sentences in (["...", "Hello there.", "Bye now."], ["Hello there.", "...", "Bye now."]):
+        enhanced_handler.write_event.reset_mock()
+        enhanced_handler._audio_started = False
+        enhanced_handler._current_timestamp = 0
+        assert await enhanced_handler._process_ready_sentences(sentences)
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["audio-start", "audio-chunk", "audio-chunk"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trailer",
+    [
+        b"JUNK" + struct.pack("<I", 8) + b"\x00" * 8,
+        b"PEAK" + struct.pack("<I", 16) + b"\x01" * 16,
+        # An odd-sized chunk is followed by a pad byte
+        b"iXML" + struct.pack("<I", 5) + b"<a/> " + b"\x00",
+    ],
+)
+async def test_zero_size_wav_does_not_play_any_whole_riff_chunk(enhanced_handler, trailer):
+    """Test metadata after an empty data chunk is recognised by its shape, not by a list of chunk ids."""
+    wav = _header_only_wav() + trailer
+    assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
+    assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["audio-start"]
+
+
+@pytest.mark.parametrize(
+    ("requested", "spoken", "expect_warning"),
+    [
+        # Decomposed and composed forms of the same letters
+        ("Cafe\u0301 fu\u0308r O\u0308l", "Caf\u00e9 f\u00fcr \u00d6l", False),
+        ("Stra\u00dfe", "STRASSE", False),
+        # Symbol-only text has nothing to compare against its spoken name
+        ("+", "plus", False),
+        ("Hello world", "Sure, I can help with that.", True),
+    ],
+)
+def test_realtime_tts_fidelity_normalizes_unicode(enhanced_handler, caplog, requested, spoken, expect_warning):
+    """Test the fidelity check does not warn about text that only differs in Unicode form or case folding."""
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        enhanced_handler._check_realtime_tts_fidelity(requested, spoken)
+
+    assert ("differs from the request" in caplog.text) is expect_warning
+
+
+@pytest.mark.asyncio
+async def test_incremental_realtime_tts_uses_one_websocket_per_sentence(enhanced_handler, mock_info, realtime_tts):
+    """Test concurrent Realtime sentences play in order over their own websockets, which are all closed."""
+    mock_info.tts[0].supports_synthesize_streaming = True
+    sentences = ["One sentence.", "Two sentences.", "Three sentences."]
+    managers = realtime_tts.each([_realtime_tts_events(spoken_text=sentence) for sentence in sentences])
+    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+
+    assert await enhanced_handler._process_ready_sentences(sentences)
+
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-chunk", "audio-chunk", "audio-chunk"]
+    assert len(managers) == 3
+    spoken = [manager.connection.response.created[0]["input"][0]["content"][0]["text"] for manager in managers]
+    assert spoken == sentences
+    await enhanced_handler._drain_background_tasks()
+    assert all(manager.exited and manager.connection.closed for manager in managers)
+
+
+@pytest.mark.asyncio
+async def test_incremental_realtime_tts_failed_sentence_aborts_the_others(enhanced_handler, mock_info, realtime_tts):
+    """Test a sentence failing on its own websocket stops the audio once and leaves no task or socket behind."""
+    mock_info.tts[0].supports_synthesize_streaming = True
+    managers = realtime_tts.each(
+        [
+            _realtime_tts_events(spoken_text="One sentence."),
+            [_FakeRealtimeServerEvent("error", error={"message": "boom"})],
+            _realtime_tts_events(spoken_text="Three sentences."),
+        ]
+    )
+    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+
+    assert not await enhanced_handler._process_ready_sentences(["One sentence.", "Two sentences.", "Three sentences."])
+
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-chunk", "audio-stop", "synthesize-stopped"]
+    await asyncio.sleep(0)
+    assert not enhanced_handler._synthesis_tasks
+    await enhanced_handler._drain_background_tasks()
+    assert all(manager.exited for manager in managers if manager.entered)

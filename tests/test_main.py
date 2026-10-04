@@ -456,8 +456,8 @@ async def test_main_treats_tts_realtime_models_as_tts_models(monkeypatch):
     ("backend", "official", "expected_voices", "expect_backend_warning"),
     [
         (main_module.OpenAIBackend.OPENAI, True, ["alloy"], False),
-        # Unrecognized compatible servers are autodetected as OPENAI without being the official API
-        (main_module.OpenAIBackend.OPENAI, False, ["alloy", "fable"], True),
+        # A proxy in front of OpenAI is classed as OPENAI without being the official API
+        (main_module.OpenAIBackend.OPENAI, False, ["alloy"], True),
         (main_module.OpenAIBackend.SPEACHES, False, ["alloy", "fable"], True),
     ],
 )
@@ -540,6 +540,63 @@ async def test_main_rejects_incompatible_realtime_extra_body(monkeypatch, capsys
 
     assert exc_info.value.code == 2
     assert "audio.output.format" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_incompatible_realtime_extra_body_without_realtime_models(monkeypatch, capsys):
+    """Test a Realtime extra body is validated even when no Realtime models would use it."""
+    monkeypatch.delenv("TTS_REALTIME_MODELS", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["wyoming_openai", "--tts-models", "gpt-4o-mini-tts", "--tts-realtime-extra-body", '{"model":"x"}'],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "'model'" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_main_warns_about_unused_realtime_extra_bodies(monkeypatch, caplog):
+    """Test Realtime extra bodies without Realtime models are reported instead of silently ignored."""
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI, "create_autodetected_factory", staticmethod(lambda: fake_factory)
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in _MAIN_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wyoming_openai",
+            "--stt-models",
+            "whisper-1",
+            "--stt-realtime-extra-body",
+            '{"keywords":["Wyoming"]}',
+            "--tts-models",
+            "gpt-4o-mini-tts",
+            "--tts-voices",
+            "alloy",
+            "--tts-realtime-extra-body",
+            '{"reasoning":{"effort":"low"}}',
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        await main()
+
+    assert "TTS Realtime extra body is set but unused" in caplog.text
+    assert "STT Realtime extra body is set but unused" in caplog.text
 
 
 _MAIN_ENV_VARS = (

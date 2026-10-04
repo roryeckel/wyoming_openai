@@ -47,6 +47,7 @@ from .utilities import (
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
+    get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
     validate_realtime_stt_extra_body,
@@ -66,8 +67,12 @@ def _truncate_for_log(text: str, max_length: int = 100) -> str:
 
 
 def _normalize_for_comparison(text: str) -> str:
-    """Reduce text to lowercase alphanumerics for comparing requested and spoken text."""
-    return "".join(char for char in text.lower() if char.isalnum())
+    """
+    Reduce text to case-folded alphanumerics for comparing requested and spoken text.
+    Numbers and symbols a transcript spells out ("50%" as "fifty percent") still compare as different.
+    """
+    # NFKC so composed and decomposed forms of the same letter compare equal
+    return "".join(char for char in unicodedata.normalize("NFKC", text).casefold() if char.isalnum())
 
 
 # Symbols that are read aloud on their own ("plus", "and", "percent"), unlike punctuation or emoji
@@ -99,6 +104,7 @@ class TtsStreamResult:
 
     streamed: bool
     audio: bytes | None = None
+    skipped: bool = False  # The backend had nothing to say for text with nothing to read aloud
 
 
 @dataclass(frozen=True)
@@ -109,10 +115,6 @@ class TtsAudioFormat:
     rate: int  # Hz; for WAV only a fallback until the header is parsed
 
 
-# Chunk ids that can follow an empty WAV data chunk and are metadata, not audio
-_WAV_TRAILER_CHUNK_IDS = frozenset((b"LIST", b"fact", b"cue ", b"bext", b"id3 ", b"ID3 "))
-
-
 def _scan_riff_chunks(data: bytes) -> bool | None:
     """
     Check if bytes are nothing but whole RIFF metadata chunks.
@@ -121,7 +123,8 @@ def _scan_riff_chunks(data: bytes) -> bool | None:
     offset = 0
     while offset < len(data):
         chunk_id = data[offset : offset + 4]
-        if not any(known_id.startswith(chunk_id) for known_id in _WAV_TRAILER_CHUNK_IDS):
+        # Any chunk id is four printable ASCII characters ("LIST", "JUNK", "cue "), which PCM rarely starts with
+        if not all(0x20 <= byte <= 0x7E for byte in chunk_id):
             return False
         if len(data) - offset < 8:
             return None
@@ -343,6 +346,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State for streaming synthesis
         self._synthesis_buffer: list[str] = []
         self._synthesis_voice: SynthesizeVoice | None = None
+        self._resolved_synthesis_voice: TtsVoiceModel | None = None  # Resolved once per streaming synthesis
         self._synthesis_text_format: str | SynthesizeTextFormat | None = None
         self._ssml_transformer: SsmlTextTransformer | None = None
         self._is_synthesizing: bool = False
@@ -360,7 +364,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
         self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence tasks still running
         self._background_tasks: set[asyncio.Task[Any]] = set()  # Cleanup that must not delay audio
-        self._warned_voice_fallbacks: set[str] = set()  # Requested names already warned about on this connection
 
     async def handle_event(self, event: Event) -> bool:
         """
@@ -1018,7 +1021,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         extra_body = dict(extra_body or {})
         if not self._uses_plural_stt_languages(model_name):
             # Only the official API is known to reject the field; other servers get what was configured
-            is_official = self._stt_client is not None and self._stt_client.is_official_openai is True
+            is_official = self._stt_client is not None and self._stt_client.is_official_openai
             if is_official and extra_body.pop("languages", None) is not None:
                 # A body shared with the models above would otherwise send both fields, which OpenAI rejects
                 _LOGGER.debug("Ignoring extra_body `languages` for %s, which takes `language`", model_name)
@@ -1172,12 +1175,13 @@ class OpenAIEventHandler(AsyncEventHandler):
             return True
 
         try:
-            requested_voice = self._synthesis_voice.name
-            requested_language = self._synthesis_voice.language
-            voice = self._validate_tts_voice_and_language(requested_voice, requested_language)
+            voice = self._resolved_synthesis_voice or self._validate_tts_voice_and_language(
+                self._synthesis_voice.name, self._synthesis_voice.language
+            )
             if not voice:
                 _LOGGER.error("Failed to validate voice for incremental synthesis")
                 return await self._abort_synthesis()
+            self._resolved_synthesis_voice = voice
 
             use_streaming = self._is_tts_voice_streaming(voice.name)
 
@@ -1230,6 +1234,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                         return await self._abort_synthesis()
                     finally:
                         self._allow_streaming_task_id = None
+
+                    if result.skipped:
+                        continue
 
                     if result.streamed:
                         _LOGGER.debug("Sentence %d streamed directly with minimal latency", i + 1)
@@ -1349,6 +1356,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._ready_chunks = []
         self._segmenters.clear()
         self._synthesis_voice = None
+        self._resolved_synthesis_voice = None
         self._synthesis_text_format = None
         self._ssml_transformer = None
 
@@ -1403,8 +1411,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # A model that is gone falls back to the speech API where possible rather than onto a Realtime model
         model_matches = [voice for voice in matches if voice.model_name == model_name]
         voice = (model_matches or self._prefer_speech_api_voices(matches))[0]
-        _LOGGER.log(
-            self._get_voice_fallback_log_level(requested_voice),
+        _LOGGER.warning(
             "Voice %s is no longer advertised under that name. Falling back to %s for backward compatibility. "
             "Update the client to use one of: %s",
             requested_voice,
@@ -1416,13 +1423,6 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _prefer_speech_api_voices(self, voices: list[TtsVoiceModel]) -> list[TtsVoiceModel]:
         """Narrow voices a request did not pin down to the speech API ones, so it never moves onto Realtime unasked."""
         return [voice for voice in voices if not self._is_tts_voice_realtime(voice)] or voices
-
-    def _get_voice_fallback_log_level(self, requested_voice: str) -> int:
-        """Warn once per connection about a legacy voice name; a synthesis validates its voice several times."""
-        if requested_voice in self._warned_voice_fallbacks:
-            return logging.DEBUG
-        self._warned_voice_fallbacks.add(requested_voice)
-        return logging.WARNING
 
     def _get_backend_voice_name(self, voice: TtsVoice) -> str:
         """Get the raw backend voice identifier for synthesis requests."""
@@ -1510,8 +1510,7 @@ class OpenAIEventHandler(AsyncEventHandler):
     ) -> None:
         """Log when a legacy raw voice name falls back to a configured voice."""
         available = [voice.name for voice in matches]
-        _LOGGER.log(
-            self._get_voice_fallback_log_level(requested_voice),
+        _LOGGER.warning(
             "Voice %s matched multiple configured voices. Falling back to %s for backward compatibility. "
             "Update the client to use one of: %s",
             requested_voice,
@@ -1583,6 +1582,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._segmenters.clear()  # Clear segmenter cache for new session
         self._audio_started = False  # Reset audio started flag
         self._current_timestamp = 0  # Reset timestamp for new synthesis session
+        self._resolved_synthesis_voice = None
 
         # Store voice information if provided
         if synthesize_start.voice:
@@ -1595,6 +1595,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             if not voice:
                 self._is_synthesizing = False
                 return False
+            # Sentences reuse this instead of resolving, and warning about, the name again
+            self._resolved_synthesis_voice = voice
         else:
             self._synthesis_voice = None
 
@@ -1679,12 +1681,14 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Get accumulated text and voice for fallback
         full_text = "".join(self._synthesis_buffer)
         voice_info = self._synthesis_voice
+        resolved_voice = self._resolved_synthesis_voice
 
         _LOGGER.debug("Streaming synthesis completed with text: %s", _truncate_for_log(full_text))
 
         # Clear synthesis state early
         self._synthesis_buffer = []
         self._synthesis_voice = None
+        self._resolved_synthesis_voice = None
         self._synthesis_text_format = None
         self._ssml_transformer = None
         self._text_accumulator = ""
@@ -1718,7 +1722,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 requested_language = None
 
             # Validate voice and language
-            voice = self._validate_tts_voice_and_language(requested_voice, requested_language)
+            voice = resolved_voice or self._validate_tts_voice_and_language(requested_voice, requested_language)
             if not voice:
                 await self.write_event(SynthesizeStopped().event())
                 return False
@@ -1781,6 +1785,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                         return await self._abort_synthesis()
                     finally:
                         self._allow_streaming_task_id = None
+
+                    if result.skipped:
+                        continue
 
                     if result.streamed:
                         _LOGGER.debug("Chunk %d streamed directly", i + 1)
@@ -1872,6 +1879,10 @@ class OpenAIEventHandler(AsyncEventHandler):
                     chunks.append(chunk)
 
             audio_data = b"".join(chunks)
+            if not audio_data and not _has_speakable_content(text):
+                # As on the direct path, nothing to say is not a failure; there is nothing left to play
+                _LOGGER.debug("TTS backend returned no audio for unspeakable text: %s", chunk_preview)
+                return TtsStreamResult(streamed=False, skipped=True)
             if not audio_data:
                 raise TtsStreamError("OpenAI returned empty audio response", chunk_preview, voice.name)
 
@@ -1913,11 +1924,11 @@ class OpenAIEventHandler(AsyncEventHandler):
     def _get_realtime_tts_session(self, voice: TtsVoiceModel) -> dict[str, object]:
         """Build a Realtime session update payload that speaks text as PCM audio."""
         extra_body = dict(self._tts_realtime_extra_body or {})
+        output_override = get_realtime_tts_audio_output(extra_body)
+        output_override.pop("speed", None)
         audio_override = extra_body.pop("audio", None)
         audio_override = dict(audio_override) if isinstance(audio_override, dict) else {}
-        output_override = audio_override.pop("output", None)
-        output_override = dict(output_override) if isinstance(output_override, dict) else {}
-        output_override.pop("speed", None)
+        audio_override.pop("output", None)
 
         instructions = REALTIME_TTS_INSTRUCTIONS
         if self._tts_instructions:
@@ -2024,7 +2035,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _check_realtime_tts_fidelity(self, text: str, spoken_text: str) -> None:
         """Warn when a Realtime model spoke something other than the requested text."""
-        if spoken_text.strip() and _normalize_for_comparison(spoken_text) != _normalize_for_comparison(text):
+        requested = _normalize_for_comparison(text)
+        # Symbol-only text ("+") has nothing to compare against its spoken name
+        if requested and spoken_text.strip() and _normalize_for_comparison(spoken_text) != requested:
             _LOGGER.warning(
                 "Realtime TTS spoke text that differs from the request. Requested: %s | Spoken: %s",
                 _truncate_for_log(text),
@@ -2194,6 +2207,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                         "TTS response ended before a complete WAV header was available, falling back to raw PCM"
                     )
                 await write_audio(held_audio)
+
+            if not wrote_audio and not framer.declared_empty and not _has_speakable_content(text):
+                # Headerless audio cannot declare itself empty, but punctuation or emoji leave nothing to say
+                _LOGGER.debug("TTS backend returned no audio for unspeakable text: %s", _truncate_for_log(text, 50))
+                await write_audio(b"")
+                return timestamp
 
             if not wrote_audio and not framer.declared_empty:
                 # Reporting success here would let callers close or continue an audio stream that never started.
