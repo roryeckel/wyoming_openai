@@ -388,6 +388,7 @@ async def main():
                     args.tts_openai_url,
                     args.languages,
                     openai_realtime_models=openai_realtime_tts_models,
+                    official_openai=tts_client is not None and tts_client.is_official_openai,
                 )
             except ValueError as exc:
                 parser.error(str(exc))

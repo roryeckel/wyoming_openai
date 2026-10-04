@@ -5,6 +5,7 @@ import io
 import logging
 import struct
 import wave
+from collections.abc import AsyncIterator, Callable
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -543,7 +544,8 @@ async def test_empty_audio_data_aborts(handler):
     # Verify state was fully reset
     assert handler._audio_started is False
     assert handler._current_timestamp == 0
-    assert handler._synthesis_voice is None
+    assert handler._resolved_synthesis_voice is None
+    assert handler._synthesis_language is None
 
 
 @pytest.mark.asyncio
@@ -1215,7 +1217,7 @@ class TestOpenAIEventHandlerComprehensive:
         ]
         assert b"".join(event.payload for event in audio_chunk_events) == pcm[:-10]
         assert timestamp == pytest.approx(470 / 2 / 24000 * 1000)
-        assert "ended after 470 of 480 declared PCM bytes" in caplog.text
+        assert "ended with 10 declared PCM bytes missing" in caplog.text
 
     @pytest.mark.asyncio
     async def test_stream_audio_to_wyoming_accepts_unbounded_wav_data(self, enhanced_handler, caplog):
@@ -3263,19 +3265,34 @@ async def test_realtime_transcription_session_applies_stt_extra_body(enhanced_ha
     }
 
 
-def _mock_speech_response(tts_client, chunks):
-    """Make /v1/audio/speech return the given byte chunks."""
+def _mock_speech_response(
+    tts_client, chunks: list[bytes] | Callable[[str], list[bytes] | AsyncIterator[bytes]]
+) -> None:
+    """Make /v1/audio/speech return byte chunks.
 
-    async def iter_bytes(chunk_size=None):
-        for chunk in chunks:
-            yield chunk
+    `chunks` is a list of chunks, or a callable that takes the request input and returns the chunks for it
+    as a list or as an async iterator, which may stall or raise midway.
+    """
 
-    response = Mock()
-    response.iter_bytes = iter_bytes
-    stream_response = AsyncMock()
-    stream_response.__aenter__ = AsyncMock(return_value=response)
-    stream_response.__aexit__ = AsyncMock(return_value=None)
-    tts_client.audio.speech.with_streaming_response.create = Mock(return_value=stream_response)
+    def create(**kwargs):
+        source = chunks if isinstance(chunks, list) else chunks(kwargs["input"])
+
+        async def iter_bytes(chunk_size=None):
+            if isinstance(source, list):
+                for chunk in source:
+                    yield chunk
+            else:
+                async for chunk in source:
+                    yield chunk
+
+        response = Mock()
+        response.iter_bytes = iter_bytes
+        stream_response = AsyncMock()
+        stream_response.__aenter__ = AsyncMock(return_value=response)
+        stream_response.__aexit__ = AsyncMock(return_value=None)
+        return stream_response
+
+    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
 
 
 def _header_only_wav():
@@ -3294,10 +3311,55 @@ def _unbounded_header_only_wav():
     return _header_only_wav()[:-4] + struct.pack("<I", 0xFFFFFFFF)
 
 
+def _empty_wav_with_trailer(trailer: bytes) -> bytes:
+    """Build a WAV file without samples whose RIFF container goes on with metadata after the data chunk."""
+    wav = _header_only_wav() + trailer
+    return wav[:4] + struct.pack("<I", len(wav) - 8) + wav[8:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header_only_wav", [_header_only_wav, _unbounded_header_only_wav])
+async def test_http_tts_header_only_wav_for_speakable_text_fails(
+    enhanced_handler, mock_info, mock_clients, header_only_wav
+):
+    """Test a WAV without samples fails for text with something to say, whatever length it declares."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    _mock_speech_response(tts_client, [header_only_wav()])
+
+    assert not await enhanced_handler.handle_event(
+        Event(type="synthesize", data={"text": "Hello", "voice": {"name": "alloy"}})
+    )
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-stop"]
+
+    assert await enhanced_handler._stream_tts_audio(voice, "Hello", send_audio_start=False) is None
+
+    result = await enhanced_handler._get_tts_audio_stream("Hello", voice)
+    assert await enhanced_handler._stream_audio_to_wyoming(result.audio, False, 0, WAV_AUDIO_FORMAT, "Hello") is None
+
+
+@pytest.mark.asyncio
+async def test_incremental_tts_sentence_without_audio_aborts_instead_of_going_missing(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test a sentence that comes back as a header-only WAV fails the synthesis rather than being dropped."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    spoken = _pcm_wav_with_unbounded_sizes(b"\x00\x01" * 240)
+    _mock_speech_response(tts_client, lambda text: [_unbounded_header_only_wav() if "Second" in text else spoken])
+
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+    assert not await enhanced_handler._process_ready_sentences(["First one.", "Second one.", "Third one."])
+
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-chunk", "audio-stop", "synthesize-stopped"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("header_only_wav", [_header_only_wav, _unbounded_header_only_wav])
 async def test_http_tts_header_only_wav_is_an_empty_success(enhanced_handler, mock_info, mock_clients, header_only_wav):
-    """Test a WAV without samples is not a failure on the standalone, direct and buffered paths."""
+    """Test a WAV without samples for text with nothing to say is not a failure on any of the three paths."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
 
@@ -3372,9 +3434,11 @@ async def test_http_tts_empty_body_fails_without_starting_audio(enhanced_handler
     _mock_speech_response(tts_client, [])
     assert await enhanced_handler._stream_tts_audio(voice, "Hello", send_audio_start=False) is None
 
+    # A buffered sentence fails when it is played, by the same rule
     _mock_speech_response(tts_client, [])
-    with pytest.raises(TtsStreamError):
-        await enhanced_handler._get_tts_audio_stream("Hello", voice)
+    result = await enhanced_handler._get_tts_audio_stream("Hello", voice)
+    assert await enhanced_handler._stream_audio_to_wyoming(result.audio, True, 0, WAV_AUDIO_FORMAT, "Hello") is None
+    enhanced_handler.write_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -3419,7 +3483,7 @@ async def test_incremental_realtime_tts_skips_unspeakable_sentences(enhanced_han
     """Test unspeakable sentences are dropped from a streaming batch instead of aborting it."""
     mock_info.tts[0].supports_synthesize_streaming = True
     realtime_tts(_realtime_tts_events(spoken_text="Hello world."))
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
 
     assert await enhanced_handler._process_ready_sentences(["...", "Hello world."])
 
@@ -3451,8 +3515,8 @@ def test_suffixed_voice_name_resolves_after_models_change(enhanced_handler, mock
     assert enhanced_handler._validate_tts_voice_and_language("unknown (gpt-4o-mini-tts)", None) is None
 
 
-def test_suffixed_voice_name_of_a_removed_model_prefers_the_speech_api(enhanced_handler, mock_info):
-    """Test a "voice (model)" name whose model is gone does not move the client onto a Realtime model."""
+def _add_realtime_voice_first(mock_info, enhanced_handler):
+    """Advertise a Realtime voice ahead of the speech API one and return both."""
     speech_voice = mock_info.tts[0].voices[0]
     realtime_voice = TtsVoiceModel(
         name="alloy (gpt-realtime-2.1-mini)",
@@ -3466,6 +3530,12 @@ def test_suffixed_voice_name_of_a_removed_model_prefers_the_speech_api(enhanced_
     )
     mock_info.tts[0].voices.insert(0, realtime_voice)
     enhanced_handler._tts_realtime_models = {REALTIME_TTS_MODEL}
+    return speech_voice, realtime_voice
+
+
+def test_suffixed_voice_name_of_a_removed_model_prefers_the_speech_api(enhanced_handler, mock_info):
+    """Test a "voice (model)" name whose model is gone does not move the client onto a Realtime model."""
+    speech_voice, _ = _add_realtime_voice_first(mock_info, enhanced_handler)
 
     assert enhanced_handler._validate_tts_voice_and_language("alloy (tts-1-hd)", None) is speech_voice
     # A plain name shared by both transports follows the same rule
@@ -3586,8 +3656,8 @@ def test_init_rejects_non_positive_tts_concurrent_requests(dummy_info, dummy_cli
     [
         # A singular-language model never gets both fields, on the official API, a proxy or another server
         (OpenAIBackend.OPENAI, "gpt-realtime-whisper", {"languages": ["en", "de"]}),
-        (OpenAIBackend.SPEACHES, "gpt-realtime-whisper", {"languages": ["en", "de"]}),
-        (OpenAIBackend.OPENAI, "gpt-live-transcribe", {"languages": ["en", "de"]}),
+        (OpenAIBackend.SPEACHES, "gpt-realtime-whisper", {"languages": ["en", "de"], "prompt": "Test prompt"}),
+        (OpenAIBackend.OPENAI, "gpt-live-transcribe", {"languages": ["en", "de"], "prompt": "Test prompt"}),
     ],
 )
 async def test_realtime_transcription_extra_body_languages_replace_the_request_language(
@@ -3603,7 +3673,32 @@ async def test_realtime_transcription_extra_body_languages_replace_the_request_l
     assert await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": model_name}))
 
     transcription = enhanced_handler._get_realtime_transcription_session()["audio"]["input"]["transcription"]
-    assert transcription == {"model": model_name, "prompt": "Test prompt", **expected}
+    assert transcription == {"model": model_name, **expected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "model_name", "expect_prompt"),
+    [
+        # OpenAI's Realtime sessions for this model do not take a prompt; the other model and servers do
+        (OpenAIBackend.OPENAI, "gpt-realtime-whisper", False),
+        (OpenAIBackend.OPENAI, "gpt-live-transcribe", True),
+        (OpenAIBackend.SPEACHES, "gpt-realtime-whisper", True),
+    ],
+)
+async def test_realtime_transcription_session_leaves_out_an_unsupported_prompt(
+    enhanced_handler, mock_info, mock_clients, backend, model_name, expect_prompt
+):
+    """Test STT_PROMPT is only sent to Realtime models that support one."""
+    stt_client, _ = mock_clients
+    stt_client.backend = backend
+    mock_info.asr[0].models[0].name = model_name
+    enhanced_handler._stt_realtime_models = {model_name}
+
+    assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": model_name}))
+
+    transcription = enhanced_handler._get_realtime_transcription_session()["audio"]["input"]["transcription"]
+    assert ("prompt" in transcription) is expect_prompt
 
 
 @pytest.mark.asyncio
@@ -3625,24 +3720,6 @@ async def test_transcribe_extra_body_languages_replace_the_request_language(
     assert "language" not in call_args["extra_body"]
     assert call_args["extra_body"]["languages"] == ["en", "de"]
     assert call_args["extra_body"]["keywords"] == ["Wyoming"]
-
-
-def _add_realtime_voice_first(mock_info, enhanced_handler):
-    """Advertise a Realtime voice ahead of the speech API one and return both."""
-    speech_voice = mock_info.tts[0].voices[0]
-    realtime_voice = TtsVoiceModel(
-        name="alloy (gpt-realtime-2.1-mini)",
-        model_name=REALTIME_TTS_MODEL,
-        backend_voice_name=speech_voice.backend_voice_name,
-        description="alloy",
-        attribution=speech_voice.attribution,
-        installed=True,
-        languages=speech_voice.languages,
-        version=None,
-    )
-    mock_info.tts[0].voices.insert(0, realtime_voice)
-    enhanced_handler._tts_realtime_models = {REALTIME_TTS_MODEL}
-    return speech_voice, realtime_voice
 
 
 def test_nameless_voice_request_prefers_the_speech_api(enhanced_handler, mock_info):
@@ -3686,17 +3763,22 @@ async def test_realtime_tts_transport_refuses_unspeakable_text(enhanced_handler,
     _, tts_client = mock_clients
     realtime_tts(_realtime_tts_events())
 
-    result = await enhanced_handler._get_tts_audio_stream("...", mock_info.tts[0].voices[0])
+    voice = mock_info.tts[0].voices[0]
+    result = await enhanced_handler._get_tts_audio_stream("...", voice)
 
-    assert result.skipped is True
+    assert result.audio == b""
     tts_client.realtime.connect.assert_not_called()
+    # Playing it is a success that sends nothing
+    audio_format = enhanced_handler._get_tts_audio_format(voice)
+    assert await enhanced_handler._stream_audio_to_wyoming(result.audio, True, 5, audio_format, "...") == 5
+    enhanced_handler.write_event.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_streaming_realtime_tts_with_nothing_to_speak_sends_no_audio_events(
+async def test_streaming_realtime_tts_with_nothing_to_speak_sends_an_empty_audio_stream(
     enhanced_handler, mock_info, mock_clients, realtime_tts
 ):
-    """Test a streaming synthesis of unspeakable text ends on synthesize-stopped without opening the stream."""
+    """Test a streaming synthesis of unspeakable text never reaches the model and ends as an empty stream."""
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
     realtime_tts(_realtime_tts_events())
@@ -3706,8 +3788,11 @@ async def test_streaming_realtime_tts_with_nothing_to_speak_sends_no_audio_event
     assert await enhanced_handler.handle_event(Event(type="synthesize-stop"))
 
     tts_client.realtime.connect.assert_not_called()
-    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-    assert event_types == ["synthesize-stopped"]
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    # Clients build their output from audio-start, so they still get one, in the voice's format
+    assert [event.type for event in events] == ["audio-start", "audio-stop", "synthesize-stopped"]
+    assert events[0].data["rate"] == 24000
+    assert events[1].data["timestamp"] == 0
 
 
 def _header_only_wav_at_16khz():
@@ -3729,7 +3814,7 @@ async def test_incremental_tts_skipped_first_sentence_does_not_fix_the_audio_for
     """Test audio-start carries the format of the first sentence with audio, not the fallback or an empty WAV's."""
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
     wav_buffer = io.BytesIO()
     with wave.open(wav_buffer, "wb") as wav_file:
         wav_file.setnchannels(1)
@@ -3737,21 +3822,10 @@ async def test_incremental_tts_skipped_first_sentence_does_not_fix_the_audio_for
         wav_file.setframerate(22050)
         wav_file.writeframes(b"\x00\x01" * 10)
 
-    def create(**kwargs):
-        chunks = [wav_buffer.getvalue()] if any(char.isalnum() for char in kwargs["input"]) else silent_chunks
-
-        async def iter_bytes(chunk_size=None):
-            for chunk in chunks:
-                yield chunk
-
-        response = Mock()
-        response.iter_bytes = iter_bytes
-        stream_response = AsyncMock()
-        stream_response.__aenter__ = AsyncMock(return_value=response)
-        stream_response.__aexit__ = AsyncMock(return_value=None)
-        return stream_response
-
-    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+    _mock_speech_response(
+        tts_client,
+        lambda text: [wav_buffer.getvalue()] if any(char.isalnum() for char in text) else silent_chunks,
+    )
 
     assert await enhanced_handler._process_ready_sentences(["..."])
     enhanced_handler.write_event.assert_not_called()
@@ -3824,10 +3898,11 @@ async def test_http_tts_zero_size_wav_does_not_play_trailing_riff_chunks(enhance
     """Test metadata after an empty data chunk is not mistaken for audio of unknown length."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
-    trailer = b"LIST" + struct.pack("<I", 12) + b"INFOISFT" + struct.pack("<I", 0)
+    wav = _empty_wav_with_trailer(b"LIST" + struct.pack("<I", 12) + b"INFOISFT" + struct.pack("<I", 0))
+    header_size = len(_header_only_wav())
 
     # The trailer may arrive with the header or split over later chunks
-    for chunks in ([_header_only_wav() + trailer], [_header_only_wav(), trailer[:6], trailer[6:]]):
+    for chunks in ([wav], [wav[:header_size], wav[header_size : header_size + 6], wav[header_size + 6 :]]):
         enhanced_handler.write_event.reset_mock()
         _mock_speech_response(tts_client, chunks)
         assert await enhanced_handler._stream_tts_audio(voice, "...", send_audio_start=True) == 0
@@ -3836,7 +3911,6 @@ async def test_http_tts_zero_size_wav_does_not_play_trailing_riff_chunks(enhance
     # A buffered sentence without samples leaves the stream for the next sentence to open
     enhanced_handler.write_event.reset_mock()
     enhanced_handler._audio_started = False  # The direct calls above opened it and were never stopped
-    wav = _header_only_wav() + trailer
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
     enhanced_handler.write_event.assert_not_called()
     assert enhanced_handler._audio_started is False
@@ -3916,12 +3990,13 @@ async def test_http_tts_empty_headerless_audio_for_unspeakable_text_is_skipped(
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
     assert event_types == ["audio-start", "audio-stop"]
 
+    audio_format = enhanced_handler._get_tts_audio_format(voice)
     result = await enhanced_handler._get_tts_audio_stream("...", voice)
-    assert result.skipped is True
+    assert await enhanced_handler._stream_audio_to_wyoming(result.audio, False, 5, audio_format, "...") == 5
 
     # Text with something to say still has to produce audio
-    with pytest.raises(TtsStreamError):
-        await enhanced_handler._get_tts_audio_stream("Hello", voice)
+    result = await enhanced_handler._get_tts_audio_stream("Hello", voice)
+    assert await enhanced_handler._stream_audio_to_wyoming(result.audio, False, 5, audio_format, "Hello") is None
 
 
 @pytest.mark.asyncio
@@ -3930,22 +4005,10 @@ async def test_incremental_http_tts_skips_sentences_without_audio(enhanced_handl
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
     enhanced_handler._tts_extra_body = {"response_format": "pcm"}
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
     pcm = b"\x00\x01" * 10
 
-    def create(**kwargs):
-        async def iter_bytes(chunk_size=None):
-            if any(char.isalnum() for char in kwargs["input"]):
-                yield pcm
-
-        response = Mock()
-        response.iter_bytes = iter_bytes
-        stream_response = AsyncMock()
-        stream_response.__aenter__ = AsyncMock(return_value=response)
-        stream_response.__aexit__ = AsyncMock(return_value=None)
-        return stream_response
-
-    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+    _mock_speech_response(tts_client, lambda text: [pcm] if any(char.isalnum() for char in text) else [])
 
     for sentences in (["...", "Hello there.", "Bye now."], ["Hello there.", "...", "Bye now."]):
         enhanced_handler.write_event.reset_mock()
@@ -3966,11 +4029,23 @@ async def test_incremental_http_tts_skips_sentences_without_audio(enhanced_handl
         b"iXML" + struct.pack("<I", 5) + b"<a/> " + b"\x00",
     ],
 )
-async def test_zero_size_wav_does_not_play_any_whole_riff_chunk(enhanced_handler, trailer):
-    """Test metadata after an empty data chunk is recognised by its shape, not by a list of chunk ids."""
-    wav = _header_only_wav() + trailer
+async def test_zero_size_wav_does_not_play_any_riff_chunk_in_its_container(enhanced_handler, trailer):
+    """Test metadata after an empty data chunk is recognised by the RIFF size, not by a list of chunk ids."""
+    wav = _empty_wav_with_trailer(trailer)
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
     enhanced_handler.write_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("riff_size", [0x7FFFFFFF, 0xFFFFFFFF])
+async def test_zero_size_wav_with_a_placeholder_riff_size_is_played(enhanced_handler, riff_size):
+    """Test a RIFF size that stands in for an unknown length marks streamed audio, which is played."""
+    pcm = b"\x00\x01" * 240
+    header = _header_only_wav()
+    wav = header[:4] + struct.pack("<I", riff_size) + header[8:] + pcm
+
+    assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 10
+    assert enhanced_handler.write_event.call_args.args[0].payload == pcm
 
 
 @pytest.mark.parametrize(
@@ -4001,7 +4076,7 @@ async def test_incremental_realtime_tts_uses_one_websocket_per_sentence(enhanced
     mock_info.tts[0].supports_synthesize_streaming = True
     sentences = ["One sentence.", "Two sentences.", "Three sentences."]
     managers = realtime_tts.each([_realtime_tts_events(spoken_text=sentence) for sentence in sentences])
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
 
     assert await enhanced_handler._process_ready_sentences(sentences)
 
@@ -4025,7 +4100,7 @@ async def test_incremental_realtime_tts_failed_sentence_aborts_the_others(enhanc
             _realtime_tts_events(spoken_text="Three sentences."),
         ]
     )
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
 
     assert not await enhanced_handler._process_ready_sentences(["One sentence.", "Two sentences.", "Three sentences."])
 
@@ -4061,19 +4136,20 @@ async def test_streaming_http_tts_with_nothing_to_speak_is_synthesized_once(
 
     assert tts_client.audio.speech.with_streaming_response.create.call_count == 1
     event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-    assert event_types == ["synthesize-stopped"]
+    assert event_types == ["audio-start", "audio-stop", "synthesize-stopped"]
     assert enhanced_handler._synthesized_incrementally is False
+    assert enhanced_handler._audio_started is False
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload_size", [8192, 60000])
+@pytest.mark.parametrize("payload_size", [8192, 60000, 70000])
 async def test_zero_size_wav_does_not_play_a_large_trailing_riff_chunk(
     enhanced_handler, mock_info, mock_clients, payload_size
 ):
     """Test metadata far larger than a stream chunk is not played, whether it arrives whole or split up."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
-    wav = _header_only_wav() + _riff_chunk(b"JUNK", b"\x01" * payload_size)
+    wav = _empty_wav_with_trailer(_riff_chunk(b"JUNK", b"\x01" * payload_size))
 
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
     enhanced_handler.write_event.assert_not_called()
@@ -4086,23 +4162,23 @@ async def test_zero_size_wav_does_not_play_a_large_trailing_riff_chunk(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "trailer",
+    "wav",
     [
-        # More metadata than is held while deciding, in chunks that are each whole
-        _riff_chunk(b"LIST", b"\x01" * 40000) + _riff_chunk(b"C2PA", b"\x02" * 40000),
-        # A response cut off inside a chunk that follows a whole one
-        _riff_chunk(b"LIST", b"\x01" * 12) + b"C2PA" + struct.pack("<I", 100) + b"\x02" * 10,
+        _empty_wav_with_trailer(_riff_chunk(b"LIST", b"\x01" * 40000) + _riff_chunk(b"C2PA", b"\x02" * 40000)),
+        # A response cut off inside a chunk the RIFF size covers
+        _empty_wav_with_trailer(_riff_chunk(b"LIST", b"\x01" * 12) + _riff_chunk(b"C2PA", b"\x02" * 100))[:-90],
+        # A finite RIFF size is taken at its word however much metadata it covers
+        _empty_wav_with_trailer(_riff_chunk(b"JUNK", b"\x01" * 64000) * 17),
     ],
     # Named, so the payload does not become the test id
-    ids=["over_the_hold_limit", "cut_off_after_a_whole_chunk"],
+    ids=["several_chunks", "cut_off_inside_a_chunk", "over_a_mebibyte"],
 )
 async def test_zero_size_wav_does_not_play_a_trailer_of_several_riff_chunks(
-    enhanced_handler, mock_info, mock_clients, trailer
+    enhanced_handler, mock_info, mock_clients, wav
 ):
-    """Test whole chunks after an empty data chunk mark the rest as metadata, past the hold limit or cut off."""
+    """Test everything the RIFF size covers after an empty data chunk is metadata, even when it is cut off."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
-    wav = _header_only_wav() + trailer
 
     assert await enhanced_handler._stream_audio_to_wyoming(wav, True, 0, WAV_AUDIO_FORMAT) == 0
     enhanced_handler.write_event.assert_not_called()
@@ -4129,27 +4205,17 @@ async def test_stop_closes_the_audio_an_earlier_sentence_opened(
     """Test a sentence cancelled by stop() does not leave a stream an earlier sentence opened without audio-stop."""
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
     enhanced_handler._tts_extra_body = {"response_format": "pcm"}
     stalled = asyncio.Event()
 
-    def create(**kwargs):
-        stalls = kwargs["input"].startswith("Stalls")
+    async def respond(text):
+        yield b"\x00\x01" * 240
+        if text.startswith("Stalls"):
+            stalled.set()
+            await asyncio.Event().wait()
 
-        async def iter_bytes(chunk_size=None):
-            yield b"\x00\x01" * 240
-            if stalls:
-                stalled.set()
-                await asyncio.Event().wait()
-
-        response = Mock()
-        response.iter_bytes = iter_bytes
-        stream_response = AsyncMock()
-        stream_response.__aenter__ = AsyncMock(return_value=response)
-        stream_response.__aexit__ = AsyncMock(return_value=None)
-        return stream_response
-
-    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+    _mock_speech_response(tts_client, respond)
 
     async def synthesize():
         for sentences in batches:
@@ -4178,25 +4244,15 @@ async def test_failed_sentence_stops_the_audio_at_what_was_sent(enhanced_handler
     """Test a sentence failing midway in a stream an earlier one opened is stopped after the audio it sent."""
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
-    enhanced_handler._synthesis_voice = SynthesizeVoice(name="alloy")
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
     enhanced_handler._tts_extra_body = {"response_format": "pcm"}
 
-    def create(**kwargs):
-        fails = kwargs["input"].startswith("Fails")
+    async def respond(text):
+        yield b"\x00\x01" * 240
+        if text.startswith("Fails"):
+            raise RuntimeError("backend went away")
 
-        async def iter_bytes(chunk_size=None):
-            yield b"\x00\x01" * 240
-            if fails:
-                raise RuntimeError("backend went away")
-
-        response = Mock()
-        response.iter_bytes = iter_bytes
-        stream_response = AsyncMock()
-        stream_response.__aenter__ = AsyncMock(return_value=response)
-        stream_response.__aexit__ = AsyncMock(return_value=None)
-        return stream_response
-
-    tts_client.audio.speech.with_streaming_response.create = Mock(side_effect=create)
+    _mock_speech_response(tts_client, respond)
 
     assert await enhanced_handler._process_ready_sentences(["Hello there."])
     assert not await enhanced_handler._process_ready_sentences(["Fails here."])
@@ -4230,17 +4286,12 @@ async def test_cancelled_tts_stream_closes_the_audio_it_opened(
     enhanced_handler._tts_extra_body = {"response_format": "pcm"}
     first_chunk_written = asyncio.Event()
 
-    async def iter_bytes(chunk_size=None):
+    async def respond(text):
         yield b"\x00\x01" * 240
         first_chunk_written.set()
         await asyncio.Event().wait()
 
-    response = Mock()
-    response.iter_bytes = iter_bytes
-    stream_response = AsyncMock()
-    stream_response.__aenter__ = AsyncMock(return_value=response)
-    stream_response.__aexit__ = AsyncMock(return_value=None)
-    tts_client.audio.speech.with_streaming_response.create = Mock(return_value=stream_response)
+    _mock_speech_response(tts_client, respond)
 
     task = asyncio.create_task(enhanced_handler._stream_tts_audio(voice, "Hello", send_audio_start=send_audio_start))
     await first_chunk_written.wait()

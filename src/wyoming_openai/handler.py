@@ -30,13 +30,13 @@ from wyoming.tts import (
     SynthesizeStop,
     SynthesizeStopped,
     SynthesizeTextFormat,
-    SynthesizeVoice,
 )
 from yasbd import BoundaryDetector, get_supported_langs
 
 from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel, parse_tts_voice_name
 from .const import (
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
+    OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES,
     REALTIME_AUDIO_RATE,
     REALTIME_TTS_AUDIO_FORMAT,
     REALTIME_TTS_EVENT_TIMEOUT,
@@ -100,6 +100,9 @@ TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests 
 TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the audio stop of a failed or cancelled stream
 WAV_UNBOUNDED_SIZE = 0xFFFFFFFF  # Streaming WAV data chunk size sentinel
+# RIFF sizes that stand in for a length the writer did not know: the largest unsigned and signed 32-bit values.
+# Any other RIFF size is a real length, however large
+WAV_PLACEHOLDER_RIFF_SIZES = frozenset((WAV_UNBOUNDED_SIZE, 0x7FFFFFFF))
 
 @dataclass(frozen=True)
 class TtsStreamResult:
@@ -107,7 +110,6 @@ class TtsStreamResult:
 
     streamed: bool
     audio: bytes | None = None
-    skipped: bool = False  # The backend had nothing to say for text with nothing to read aloud
 
 
 @dataclass(frozen=True)
@@ -116,34 +118,6 @@ class TtsAudioFormat:
 
     headerless: bool  # Raw PCM16 mono rather than a WAV file
     rate: int  # Hz; for WAV only a fallback until the header is parsed
-
-
-def _scan_riff_chunks(data: bytes) -> tuple[bool | None, int]:
-    """
-    Check if bytes are nothing but whole RIFF metadata chunks, and count the whole chunks they start with.
-    The verdict is True when they are, False when they cannot be, and None when more bytes could still complete one.
-    """
-    offset = 0
-    whole_chunks = 0
-    while offset < len(data):
-        chunk_id = data[offset : offset + 4]
-        # Any chunk id is four printable ASCII characters ("LIST", "JUNK", "cue "), which PCM rarely starts with
-        if not all(0x20 <= byte <= 0x7E for byte in chunk_id):
-            return False, whole_chunks
-        if len(data) - offset < 8:
-            return None, whole_chunks
-        chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
-        if chunk_size > TTS_WAV_HEADER_MAX_BYTES:
-            # PCM that happens to start with a chunk id; real metadata is small. A single chunk larger than
-            # this is therefore still played
-            return False, whole_chunks
-        end = offset + 8 + chunk_size
-        if end > len(data):
-            return None, whole_chunks
-        whole_chunks += 1
-        # Odd-sized chunks are followed by a pad byte
-        offset = end + (chunk_size & 1 if end < len(data) else 0)
-    return True, whole_chunks
 
 
 class _WavFramer:
@@ -158,13 +132,10 @@ class _WavFramer:
         self.width = DEFAULT_AUDIO_WIDTH
         self.channels = DEFAULT_AUDIO_CHANNELS
         self.awaiting_header = not audio_format.headerless
-        self.declared_size: int | None = None  # PCM bytes the header declares; None when unbounded or unparsed
-        self.declared_empty = False  # The header declares zero samples or an unknown length
         self.header_missing = False  # No WAV header could be parsed, so the bytes were released as raw PCM
         self._parse_header = parse_header
-        self._pending = b""  # Bytes held until the header, or what follows an empty data chunk, is understood
+        self._pending = b""  # Bytes held until the header is understood
         self._remaining: int | None = None  # Declared PCM bytes not received yet; None when unbounded
-        self._check_trailer = False  # Still deciding if the bytes after a zero-size header are metadata
 
     @property
     def missing_bytes(self) -> int:
@@ -180,21 +151,25 @@ class _WavFramer:
         wav_params = self._parse_header(self._pending)
         if wav_params:
             self.rate, self.channels, self.width, data_offset, data_size = wav_params
+            riff_size = struct.unpack_from("<I", self._pending, 4)[0]
             available_audio = self._pending[data_offset:]
             self._pending = b""
             self.awaiting_header = False
-            self.declared_empty = not data_size
-            # A zero size is also what servers write when streaming audio of unknown length
-            self.declared_size = data_size or None
-            self._remaining = self.declared_size
-            self._check_trailer = data_size == 0
+            if data_size == 0 and riff_size not in WAV_PLACEHOLDER_RIFF_SIZES and 8 + riff_size > data_offset:
+                # The RIFF container goes on after an empty data chunk: an empty file, followed by metadata
+                # of whatever length the container declares
+                self._remaining = 0
+            else:
+                # A zero size is also what servers write when streaming audio of unknown length: the RIFF
+                # size is then a placeholder or covers nothing past the header
+                self._remaining = data_size or None
             _LOGGER.debug(
                 "Detected audio format: %d Hz, %d channels, %d bytes/sample, header offset: %d, PCM size: %s",
                 self.rate,
                 self.channels,
                 self.width,
                 data_offset,
-                f"{data_size} bytes" if data_size else "unknown (unbounded or zero size)",
+                "unknown" if self._remaining is None else f"{self._remaining} bytes",
             )
             return self._bound(available_audio)
 
@@ -205,41 +180,15 @@ class _WavFramer:
         return self.finish()
 
     def finish(self) -> bytes:
-        """
-        Return the bytes still held when the response ends, to be played as raw PCM: a response without a
-        WAV header, or bytes after an empty data chunk that did not turn out to be whole metadata chunks.
-        """
+        """Return the bytes still held when the response ends without a WAV header, to be played as raw PCM."""
         audio, self._pending = self._pending, b""
-        is_metadata = False
-        if self._check_trailer:
-            # A chunk the response cut off is still metadata when whole chunks came before it. On its own it
-            # cannot be told from short PCM that starts with a chunk id, so it is played
-            verdict, whole_chunks = _scan_riff_chunks(audio)
-            is_metadata = verdict is True or (verdict is None and whole_chunks > 0)
         if self.awaiting_header and audio:
             self.header_missing = True
         self.awaiting_header = False
-        self._check_trailer = False
-        return b"" if is_metadata else audio
+        return audio
 
     def _bound(self, audio: bytes) -> bytes:
         """Keep only the PCM the header covers."""
-        if self._check_trailer:
-            # A zero size means either an empty file followed by metadata chunks or audio of unknown length.
-            # Bytes are only held while they are consistent with whole metadata chunks, so PCM that merely
-            # starts with a chunk id is released as soon as it stops looking like one. A chunk is waited on
-            # until it is whole, however it is split over the stream: giving up sooner would play real
-            # metadata as noise, while waiting only delays audio whose first samples happen to spell a chunk
-            self._pending += audio
-            verdict, whole_chunks = _scan_riff_chunks(self._pending)
-            if verdict is not False and len(self._pending) <= TTS_WAV_HEADER_MAX_BYTES:
-                return b""
-            self._check_trailer = False
-            audio, self._pending = self._pending, b""
-            if verdict is not False and whole_chunks:
-                # Too much to keep holding, but PCM does not parse as one whole chunk after another: the file
-                # is empty and everything after its data chunk is the trailer
-                self._remaining = 0
         if self._remaining is None:
             return audio
         audio = audio[: self._remaining]
@@ -364,8 +313,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # State for streaming synthesis
         self._synthesis_buffer: list[str] = []
-        self._synthesis_voice: SynthesizeVoice | None = None
         self._resolved_synthesis_voice: TtsVoiceModel | None = None  # Resolved once per streaming synthesis
+        self._synthesis_language: str | None = None  # Requested along with that voice
         self._synthesis_text_format: str | SynthesizeTextFormat | None = None
         self._ssml_transformer: SsmlTextTransformer | None = None
         self._is_synthesizing: bool = False
@@ -669,7 +618,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         if languages is not None:
             transcription["languages"] = languages
         if self._stt_prompt is not None:
-            transcription["prompt"] = self._stt_prompt
+            if self._is_openai_stt_model(self._current_asr_model.name, OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES):
+                _LOGGER.debug("Leaving out the STT prompt: %s does not support one", self._current_asr_model.name)
+            else:
+                transcription["prompt"] = self._stt_prompt
         transcription.update(extra_body)
 
         return {
@@ -1027,12 +979,16 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Check if an ASR model should use OpenAI Realtime transcription."""
         return model_name in self._stt_realtime_models
 
-    def _uses_plural_stt_languages(self, model_name: str) -> bool:
-        """Check if an ASR model takes a `languages` list instead of the singular `language` field."""
-        # Not limited to the official domain: proxies in front of OpenAI need `languages` for these models too
+    def _is_openai_stt_model(self, model_name: str, prefixes: tuple[str, ...]) -> bool:
+        """Check if an ASR model is one of a family of OpenAI models, named by prefix, on the OPENAI backend."""
+        # Not limited to the official domain: proxies in front of OpenAI serve these models the same way
         if self._stt_client is None or self._stt_client.backend != OpenAIBackend.OPENAI:
             return False
-        return model_name.startswith(OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES)
+        return model_name.startswith(prefixes)
+
+    def _uses_plural_stt_languages(self, model_name: str) -> bool:
+        """Check if an ASR model takes a `languages` list instead of the singular `language` field."""
+        return self._is_openai_stt_model(model_name, OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES)
 
     def _apply_plural_stt_languages(
         self, model_name: str, language: str | None, extra_body: dict[str, object] | None
@@ -1184,18 +1140,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             bool: True if processing succeeded, False if synthesis was aborted.
         """
-        if not sentences or not self._synthesis_voice:
+        # A synthesis that named no voice is synthesized as a whole when it stops
+        voice = self._resolved_synthesis_voice
+        if not sentences or voice is None:
             return True
 
         try:
-            voice = self._resolved_synthesis_voice or self._validate_tts_voice_and_language(
-                self._synthesis_voice.name, self._synthesis_voice.language
-            )
-            if not voice:
-                _LOGGER.error("Failed to validate voice for incremental synthesis")
-                return await self._abort_synthesis()
-            self._resolved_synthesis_voice = voice
-
             use_streaming = self._is_tts_voice_streaming(voice.name)
 
             if use_streaming:
@@ -1222,7 +1172,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             voice (TtsVoiceModel): Voice to use for synthesis.
 
         Returns:
-            bool: True if every sentence was played or skipped, False if the synthesis was aborted.
+            bool: True if every sentence was played or had nothing to say, False if the synthesis was aborted.
         """
         _LOGGER.info("Starting concurrent synthesis for %d sentences", len(sentences))
 
@@ -1273,33 +1223,22 @@ class OpenAIEventHandler(AsyncEventHandler):
             finally:
                 self._allow_streaming_task_id = None
 
-            if result.skipped:
-                continue
-
             if result.streamed:
                 _LOGGER.debug("Sentence %d streamed directly with minimal latency", i + 1)
                 # Timestamp already updated by _stream_tts_audio_incremental
                 continue
 
             # Otherwise, task completed and buffered - stream the buffered data now
-            audio_data = result.audio
-            if not audio_data:
-                _LOGGER.error(
-                    "Buffered synthesis returned no audio for sentence %d (%s)",
-                    i + 1,
-                    sentence_preview,
-                )
-                return await self._abort_synthesis()
-
             chunk_timestamp = await self._stream_audio_to_wyoming(
-                audio_data,
+                result.audio or b"",
                 is_first_chunk=(not self._audio_started),
                 start_timestamp=self._current_timestamp,
                 audio_format=self._get_tts_audio_format(voice),
+                text=sentences[i],
             )
 
             if chunk_timestamp is None:
-                _LOGGER.error("Failed to stream sentence %d to Wyoming", i + 1)
+                _LOGGER.error("Failed to stream sentence %d (%s) to Wyoming", i + 1, sentence_preview)
                 return await self._abort_synthesis()
 
             self._current_timestamp = chunk_timestamp
@@ -1394,8 +1333,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._text_accumulator = ""
         self._ready_chunks = []
         self._segmenters.clear()
-        self._synthesis_voice = None
         self._resolved_synthesis_voice = None
+        self._synthesis_language = None
         self._synthesis_text_format = None
         self._ssml_transformer = None
 
@@ -1623,10 +1562,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._current_timestamp = 0  # Reset timestamp for new synthesis session
         self._synthesized_incrementally = False
         self._resolved_synthesis_voice = None
+        self._synthesis_language = None
 
         # Store voice information if provided
         if synthesize_start.voice:
-            self._synthesis_voice = synthesize_start.voice
             requested_voice = synthesize_start.voice.name
             requested_language = synthesize_start.voice.language
 
@@ -1637,8 +1576,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 return False
             # Sentences reuse this instead of resolving, and warning about, the name again
             self._resolved_synthesis_voice = voice
-        else:
-            self._synthesis_voice = None
+            self._synthesis_language = requested_language
 
         return True
 
@@ -1662,7 +1600,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._text_accumulator += chunk_text
 
         # Get or create segmenter for the current language
-        requested_language = self._synthesis_voice.language if self._synthesis_voice else None
+        requested_language = self._synthesis_language
         sd_language = self._get_segmenter_language(requested_language)
 
         # Use cached segmenter or create a new one
@@ -1714,22 +1652,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         # This is the final text, so we process it regardless of sentence completion
         if self._text_accumulator.strip():
             _LOGGER.info("Processing final remaining text: '%s'", _truncate_for_log(self._text_accumulator))
-            requested_language = self._synthesis_voice.language if self._synthesis_voice else None
-            if not await self._process_ready_sentences([self._text_accumulator], requested_language):
+            if not await self._process_ready_sentences([self._text_accumulator], self._synthesis_language):
                 return False
 
         # Get accumulated text and voice for fallback
         full_text = "".join(self._synthesis_buffer)
-        voice_info = self._synthesis_voice
         resolved_voice = self._resolved_synthesis_voice
+        requested_language = self._synthesis_language
         synthesized_incrementally = self._synthesized_incrementally
 
         _LOGGER.debug("Streaming synthesis completed with text: %s", _truncate_for_log(full_text))
 
         # Clear synthesis state early
         self._synthesis_buffer = []
-        self._synthesis_voice = None
         self._resolved_synthesis_voice = None
+        self._synthesis_language = None
         self._synthesized_incrementally = False
         self._synthesis_text_format = None
         self._ssml_transformer = None
@@ -1740,8 +1677,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Finish here if the sentences were synthesized incrementally, even when none of them had anything to say:
         # the fallback below would send the same text to the backend again
         if self._audio_started or synthesized_incrementally:
-            if self._audio_started:
-                await self._write_tts_audio_stop(self._current_timestamp)
+            await self._finish_tts_audio_stream(resolved_voice)
             await self.write_event(SynthesizeStopped().event())
             _LOGGER.info(
                 "Successfully completed incremental streaming synthesis, final timestamp: %.2f", self._current_timestamp
@@ -1757,16 +1693,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             return True
 
         try:
-            # Determine voice for synthesis
-            if voice_info:
-                requested_voice = voice_info.name
-                requested_language = voice_info.language
-            else:
-                requested_voice = None
-                requested_language = None
-
-            # Validate voice and language
-            voice = resolved_voice or self._validate_tts_voice_and_language(requested_voice, requested_language)
+            # A synthesis that named no voice gets the default one
+            voice = resolved_voice or self._validate_tts_voice_and_language(None, None)
             if not voice:
                 await self.write_event(SynthesizeStopped().event())
                 return False
@@ -1784,9 +1712,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 if not await self._play_sentences(chunks, voice):
                     return False
 
-                # Send final audio stop, unless no chunk had anything to say
-                if self._audio_started:
-                    await self._write_tts_audio_stop(self._current_timestamp)
+                await self._finish_tts_audio_stream(voice)
                 self._current_timestamp = 0  # Reset for next session
                 _LOGGER.info("Successfully completed concurrent streaming synthesis: %s", _truncate_for_log(full_text))
             else:
@@ -1840,22 +1766,15 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.debug("Completed direct streaming for chunk: %s", chunk_preview)
                 return TtsStreamResult(streamed=True)
 
-            # Buffer audio (default behavior for parallel tasks)
+            # Buffer audio (default behavior for parallel tasks). Whether it holds anything to play is decided
+            # when it is played, by the rule `_play_tts_audio` applies to streamed audio too
             chunks: list[bytes] = []
             async with self._tts_semaphore, contextlib.aclosing(self._iter_tts_audio(text, voice)) as audio_stream:
                 async for chunk in audio_stream:
                     chunks.append(chunk)
 
-            audio_data = b"".join(chunks)
-            if not audio_data and not _has_speakable_content(text):
-                # As on the direct path, nothing to say is not a failure; there is nothing left to play
-                _LOGGER.debug("TTS backend returned no audio for unspeakable text: %s", chunk_preview)
-                return TtsStreamResult(streamed=False, skipped=True)
-            if not audio_data:
-                raise TtsStreamError("OpenAI returned empty audio response", chunk_preview, voice.name)
-
             _LOGGER.debug("Completed buffered synthesis for chunk: %s", chunk_preview)
-            return TtsStreamResult(streamed=False, audio=audio_data)
+            return TtsStreamResult(streamed=False, audio=b"".join(chunks))
 
         except TtsStreamError:
             raise
@@ -1926,7 +1845,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         assert self._tts_client is not None
         if not _has_speakable_content(text):
             # A conversational model handed only punctuation or emoji may improvise a reply instead of
-            # staying silent, so it is never sent; callers treat no audio for such text as a skip
+            # staying silent, so it is never sent; playback accepts no audio for such text
             return
         connection_manager = self._tts_client.realtime.connect(model=voice.model_name)
         connection = await self._enter_realtime_connection(connection_manager)
@@ -2022,9 +1941,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         is_first_chunk: bool,
         start_timestamp: float,
         audio_format: TtsAudioFormat,
+        text: str = "",
     ) -> float | None:
         """
-        Stream audio data to Wyoming with proper timestamp calculation.
+        Stream a buffered TTS response to Wyoming with proper timestamp calculation.
 
         Args:
             audio_data (bytes): Complete audio data to stream.
@@ -2032,39 +1952,25 @@ class OpenAIEventHandler(AsyncEventHandler):
                 marked as started, once there is audio to play.
             start_timestamp (float): Starting timestamp for this chunk.
             audio_format (TtsAudioFormat): How the audio is framed, from `_get_tts_audio_format`.
+            text (str): The text that was synthesized; only text with nothing to read aloud may have no audio.
 
         Returns:
             float | None: Final timestamp after streaming, or None on error.
         """
-        try:
-            timestamp = start_timestamp
 
-            # The same framing as the direct path, fed the whole response at once
-            framer = _WavFramer(audio_format, self._parse_wav_header)
-            audio_data = framer.feed(audio_data)
-            audio_data += framer.finish()
-            if framer.header_missing:
-                _LOGGER.debug("Could not parse WAV header, using defaults: %d Hz", TTS_AUDIO_RATE)
-            elif framer.missing_bytes and not audio_data:
-                # As on the direct path, a WAV that declares samples and delivers none is truncated
-                _LOGGER.error("TTS WAV response declared %d PCM bytes and delivered none", framer.declared_size)
-                return None
-            elif framer.missing_bytes:
-                _LOGGER.warning(
-                    "TTS WAV response ended after %d of %d declared PCM bytes", len(audio_data), framer.declared_size
-                )
+        async def buffered_response() -> AsyncGenerator[bytes, None]:
+            yield audio_data
 
-            # Send audio start if requested. As on the direct path, a sentence without samples does not open
-            # the stream: the next one may have another audio format
-            if is_first_chunk and audio_data:
-                await self._write_tts_audio_start(framer)
-
-            # Send audio chunk (header stripped if present)
-            return await self._write_tts_audio_chunk(audio_data, framer, timestamp)
-
-        except Exception as e:
-            _LOGGER.exception("Error streaming audio to Wyoming: %s", e)
-            return None
+        # A sentence without samples does not open the stream: the next one may have another audio format
+        return await self._play_tts_audio(
+            buffered_response(),
+            audio_format=audio_format,
+            text=text,
+            send_audio_start=is_first_chunk,
+            start_timestamp=start_timestamp,
+            open_empty_stream=False,
+            streamed=False,
+        )
 
     async def _synthesize_non_streaming(self, text: str, voice: TtsVoiceModel) -> bool:
         """
@@ -2095,6 +2001,15 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Send the audio stop and mark the stream as closed."""
         await self.write_event(AudioStop(timestamp=int(timestamp)).event())
         self._audio_started = False
+
+    async def _finish_tts_audio_stream(self, voice: TtsVoiceModel | None) -> None:
+        """Send the audio stop of a completed synthesis, opening the stream first if no sentence had audio."""
+        if not self._audio_started and voice is not None:
+            # Clients build their output from audio-start, so a synthesis with nothing to say still ends as
+            # an empty stream rather than without one
+            await self._write_tts_audio_start(_WavFramer(self._get_tts_audio_format(voice), self._parse_wav_header))
+        if self._audio_started:
+            await self._write_tts_audio_stop(self._current_timestamp)
 
     async def _write_tts_audio_chunk(self, audio_data: bytes, framer: _WavFramer, timestamp: float) -> float:
         """Send PCM in a framer's format and return the timestamp after it; empty audio sends nothing."""
@@ -2141,11 +2056,55 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             float | None: Final timestamp after streaming, or None on error.
         """
+        if self._tts_client is None:
+            _LOGGER.error("No TTS client configured for synthesis")
+            return None
+
+        async with self._tts_semaphore:
+            return await self._play_tts_audio(
+                self._iter_tts_audio(text, voice),
+                audio_format=self._get_tts_audio_format(voice),
+                text=text,
+                send_audio_start=send_audio_start,
+                start_timestamp=start_timestamp,
+                open_empty_stream=open_empty_stream,
+                streamed=True,
+            )
+
+    async def _play_tts_audio(
+        self,
+        chunks: AsyncGenerator[bytes, None],
+        *,
+        audio_format: TtsAudioFormat,
+        text: str,
+        send_audio_start: bool,
+        start_timestamp: float,
+        open_empty_stream: bool,
+        streamed: bool,
+    ) -> float | None:
+        """
+        Send the audio of one TTS response to Wyoming, as it arrives or from a buffered response.
+
+        Args:
+            chunks (AsyncGenerator[bytes, None]): The response bytes; closed when playback ends.
+            audio_format (TtsAudioFormat): How the bytes are framed, from `_get_tts_audio_format`.
+            text (str): The text that was synthesized; only text with nothing to read aloud may have no audio.
+            send_audio_start (bool): Whether the stream is still unopened, so AudioStart is sent first.
+            start_timestamp (float): Starting timestamp for audio chunks.
+            open_empty_stream (bool): Whether a response without audio still sends the requested AudioStart.
+            streamed (bool): Whether the bytes arrive from the backend right now, not from a buffered response.
+
+        Returns:
+            float | None: Final timestamp after streaming, or None on error.
+        """
         opened_stream = False  # This call sent AudioStart
         timestamp = start_timestamp
         try:
-            framer = _WavFramer(self._get_tts_audio_format(voice), self._parse_wav_header)
+            framer = _WavFramer(audio_format, self._parse_wav_header)
             wrote_audio = False
+            # A backend that answers without a WAV header does so for every sentence; the one that streams
+            # reports it, the buffered ones behind it do not repeat the warning
+            log_missing_header = _LOGGER.warning if streamed else _LOGGER.debug
 
             async def write_audio(audio_data: bytes) -> None:
                 """Send the audio start once the format is known, then the PCM."""
@@ -2159,57 +2118,45 @@ class OpenAIEventHandler(AsyncEventHandler):
                 timestamp = await self._write_tts_audio_chunk(audio_data, framer, timestamp)
                 wrote_audio = True
 
-            if self._tts_client is None:
-                _LOGGER.error("No TTS client configured for synthesis")
-                return None
+            async with contextlib.aclosing(chunks) as audio_stream:
+                async for chunk in audio_stream:
+                    awaiting_header = framer.awaiting_header
+                    audio_data = framer.feed(chunk)
+                    if awaiting_header and framer.header_missing:
+                        log_missing_header(
+                            "Could not parse WAV header after buffering %d bytes, falling back to raw PCM",
+                            len(audio_data),
+                        )
+                    # A parsed header alone only opens the stream for a caller that wants it opened when
+                    # empty; a sentence that turns out to have no samples leaves it to the next one
+                    if audio_data or (open_empty_stream and not framer.awaiting_header):
+                        await write_audio(audio_data)
 
-            async with self._tts_semaphore:
-                async with contextlib.aclosing(self._iter_tts_audio(text, voice)) as audio_stream:
-                    async for chunk in audio_stream:
-                        awaiting_header = framer.awaiting_header
-                        audio_data = framer.feed(chunk)
-                        if awaiting_header and framer.header_missing:
-                            _LOGGER.warning(
-                                "Could not parse WAV header after buffering %d bytes, falling back to raw PCM",
-                                len(audio_data),
-                            )
-                        # A parsed header alone only opens the stream for a caller that wants it opened when
-                        # empty; a sentence that turns out to have no samples leaves it to the next one
-                        if audio_data or (open_empty_stream and not framer.awaiting_header):
-                            await write_audio(audio_data)
+            if held_audio := framer.finish():
+                log_missing_header(
+                    "TTS response ended before a complete WAV header was available, falling back to raw PCM"
+                )
+                await write_audio(held_audio)
 
             if framer.missing_bytes:
                 _LOGGER.warning("TTS WAV response ended with %d declared PCM bytes missing", framer.missing_bytes)
 
-            header_missing = framer.awaiting_header
-            if held_audio := framer.finish():
-                if header_missing:
-                    _LOGGER.warning(
-                        "TTS response ended before a complete WAV header was available, falling back to raw PCM"
-                    )
-                await write_audio(held_audio)
-
-            if (
-                not wrote_audio
-                and not framer.declared_empty
-                and not framer.missing_bytes
-                and not _has_speakable_content(text)
-            ):
-                # Headerless audio cannot declare itself empty, but punctuation or emoji leave nothing to say.
-                # As on the buffered path, a WAV that declares samples and delivers none still fails below
-                _LOGGER.debug("No audio for text with nothing to speak: %s", _truncate_for_log(text, 50))
-                if open_empty_stream:
-                    await write_audio(b"")
+            if wrote_audio:
                 return timestamp
 
-            if not wrote_audio and not framer.declared_empty:
-                # Reporting success here would let callers close or continue an audio stream that never started.
-                # A WAV declaring zero samples, or an unknown length, is not a failure: the backend had nothing
-                # to say. One that declares samples and delivers none is truncated
+            if framer.missing_bytes or _has_speakable_content(text):
+                # Reporting success here would let callers close or continue an audio stream that never
+                # started, and drop a sentence without a trace. A response is only allowed to hold no audio
+                # for text with nothing to read aloud, whatever its header declares: a zero or unknown length
+                # is also what a stream that was cut off after its header looks like
                 _LOGGER.error("TTS backend returned no audio for: %s", _truncate_for_log(text, 50))
                 await self._stop_failed_tts_stream(opened_stream, timestamp)
                 return None
 
+            # Punctuation or emoji leave nothing to say
+            _LOGGER.debug("No audio for text with nothing to speak: %s", _truncate_for_log(text, 50))
+            if open_empty_stream:
+                await write_audio(b"")
             return timestamp
 
         except asyncio.CancelledError:

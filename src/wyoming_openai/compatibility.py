@@ -246,6 +246,7 @@ def create_tts_voices(
     tts_url: str,
     languages: list[str],
     openai_realtime_models: list[str] | None = None,
+    official_openai: bool = True,
 ) -> list[TtsVoiceModel]:
     """
     Creates a list of TTS (Text-to-Speech) voice models in the Wyoming Protocol format.
@@ -259,6 +260,9 @@ def create_tts_voices(
         languages (list[str]): A list of supported languages.
         openai_realtime_models (list[str] | None): Models that synthesize over OpenAI's Realtime API,
             which do not get the configured voices only the speech API offers.
+        official_openai (bool): Whether the server is the official OpenAI API, where a Realtime model
+            left without voices is an error. Any other server may offer voices of its own under those
+            names, so there they are passed through instead.
 
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
@@ -269,16 +273,26 @@ def create_tts_voices(
     realtime_voices = [voice_name for voice_name in tts_voices if voice_name not in OPENAI_SPEECH_ONLY_TTS_VOICES]
     if realtime_models and len(realtime_voices) < len(tts_voices):
         skipped_voices = [voice_name for voice_name in tts_voices if voice_name in OPENAI_SPEECH_ONLY_TTS_VOICES]
-        if not realtime_voices:
+        if realtime_voices:
+            _LOGGER.warning(
+                "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
+                skipped_voices,
+            )
+        elif official_openai:
             # Advertising nothing would silently drop these models
             raise ValueError(
                 f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
                 f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}"
             )
-        _LOGGER.warning(
-            "Voices not offered by the OpenAI Realtime API are skipped for Realtime TTS models: %s",
-            skipped_voices,
-        )
+        else:
+            _LOGGER.warning(
+                "None of the configured TTS voices %s are offered by the OpenAI Realtime API. "
+                "They are kept for %s because %s is not the official OpenAI API",
+                skipped_voices,
+                sorted(realtime_models),
+                tts_url,
+            )
+            realtime_voices = tts_voices
 
     model_voice_pairs = [
         (model_name, voice_name)

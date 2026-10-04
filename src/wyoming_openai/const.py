@@ -19,6 +19,8 @@ ATTRIBUTION_URL = "https://github.com/roryeckel/wyoming_openai"
 
 # OpenAI STT models that take a `languages` list instead of the singular `language` field
 OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES = ("gpt-transcribe", "gpt-live-transcribe")
+# OpenAI STT models whose Realtime sessions do not support a `prompt`
+OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES = ("gpt-realtime-whisper",)
 
 # Realtime models are conversational, so TTS over Realtime has to tell the model to read rather than reply
 REALTIME_TTS_INSTRUCTIONS = (

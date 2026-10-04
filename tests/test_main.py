@@ -628,6 +628,38 @@ async def test_main_rejects_realtime_tts_model_left_without_voices(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_main_keeps_configured_voices_for_realtime_models_off_the_official_api(monkeypatch, caplog):
+    """Test a server that only counts as OPENAI by default is not blocked over voice names it may offer itself."""
+    server = _CapturingServer()
+
+    async def fake_factory(*args, **kwargs):
+        client = _FakeClient()
+        client.backend = main_module.OpenAIBackend.OPENAI
+        client.is_official_openai = False
+        return client
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["wyoming_openai", "--tts-realtime-models", "gpt-realtime-2.1-mini", "--tts-voices", "onyx", "nova"],
+    )
+
+    with caplog.at_level("WARNING"):
+        await main()
+
+    handler = server.handlers[0]
+    assert [voice.name for voice in handler._wyoming_info.tts[0].voices] == ["onyx", "nova"]
+    assert "is not the official OpenAI API" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_main_passes_stt_realtime_extra_body(monkeypatch):
     server = _CapturingServer()
 
