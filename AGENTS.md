@@ -64,6 +64,7 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 - **`compatibility.py`**: Provides `CustomAsyncOpenAI` class with backend detection and OpenAI API compatibility layer
 - **`__main__.py`**: Entry point with argument parsing and server initialization
 - **`utilities.py`**: Helper functions for audio processing and data handling
+- **`wav.py`**: WAV header parsing and `WavFramer`, which turns TTS response bytes into PCM
 - **`const.py`**: Version constants and configuration
 
 ### Key Architecture Patterns
@@ -104,5 +105,6 @@ Tests are organized by module:
 - `test_handler.py`: Event handler logic
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
+- `test_wav.py`: WAV header parsing and framing
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios

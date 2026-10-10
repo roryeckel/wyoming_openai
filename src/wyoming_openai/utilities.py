@@ -7,7 +7,7 @@ from enum import Enum
 from io import BytesIO
 from typing import TypeGuard
 
-from .const import REALTIME_TTS_AUDIO_FORMAT, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED
+from .const import REALTIME_AUDIO_FORMAT, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED
 
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
@@ -518,13 +518,13 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         return
 
     audio_format = output["format"]
-    if isinstance(audio_format, dict) and {"rate": REALTIME_TTS_AUDIO_FORMAT["rate"], **audio_format} == (
-        REALTIME_TTS_AUDIO_FORMAT
+    if isinstance(audio_format, dict) and {"rate": REALTIME_AUDIO_FORMAT["rate"], **audio_format} == (
+        REALTIME_AUDIO_FORMAT
     ):
         return
 
     raise ValueError(
-        f"TTS Realtime extra_body audio.output.format must be {REALTIME_TTS_AUDIO_FORMAT!r}; got {audio_format!r}"
+        f"TTS Realtime extra_body audio.output.format must be {REALTIME_AUDIO_FORMAT!r}; got {audio_format!r}"
     )
 
 
@@ -536,12 +536,11 @@ def get_realtime_tts_audio_output(extra_body: dict[str, object] | None) -> dict[
 
 
 def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
-    """Return the speed requested for Realtime TTS, where audio.output.speed overrides the TTS speed."""
-    return resolve_realtime_tts_speed(tts_speed, get_realtime_tts_audio_output(extra_body).get("speed"))
-
-
-def resolve_realtime_tts_speed(tts_speed: float | None, speed: object) -> float | None:
-    """Return the usable Realtime TTS speed given an audio.output.speed override, or None for the default."""
+    """
+    Return the speed requested for Realtime TTS, or None for the default.
+    An audio.output.speed in the extra body overrides the TTS speed.
+    """
+    speed = get_realtime_tts_audio_output(extra_body).get("speed")
     if speed is None:
         # A null override is the same as no override
         speed = tts_speed
