@@ -44,7 +44,7 @@ pyright
 pip install -e .
 
 # Run the server locally
-python -m wyoming_openai --uri tcp://0.0.0.0:10300 --stt-models whisper-1 --tts-models tts-1
+python -m wyoming_openai --uri tcp://0.0.0.0:10300 --stt-models gpt-transcribe --tts-models gpt-4o-mini-tts
 ```
 
 ### Docker Development
@@ -64,6 +64,7 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 - **`compatibility.py`**: Provides `CustomAsyncOpenAI` class with backend detection and OpenAI API compatibility layer
 - **`__main__.py`**: Entry point with argument parsing and server initialization
 - **`utilities.py`**: Helper functions for audio processing and data handling
+- **`wav.py`**: WAV header parsing and `WavFramer`, which turns TTS response bytes into PCM
 - **`const.py`**: Version constants and configuration
 
 ### Key Architecture Patterns
@@ -95,7 +96,8 @@ The server accepts both command-line arguments and environment variables. Key co
 - Model lists for STT and TTS
 - Voice configurations
 - Backend-specific settings (temperature, speed, etc.)
-- STT/TTS extra request body fields (`--stt-extra-body` / `--tts-extra-body`)
+- STT/TTS extra request body fields (`--stt-extra-body` / `--stt-realtime-extra-body` / `--tts-extra-body` / `--tts-realtime-extra-body`)
+- Realtime transports for OpenAI models (`--stt-realtime-models` / `--tts-realtime-models`)
 
 ## Testing Strategy
 
@@ -103,5 +105,6 @@ Tests are organized by module:
 - `test_handler.py`: Event handler logic
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
+- `test_wav.py`: WAV header parsing and framing
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios

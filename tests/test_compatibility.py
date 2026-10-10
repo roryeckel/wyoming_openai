@@ -12,7 +12,10 @@ from wyoming_openai.compatibility import (
     create_info,
     create_tts_programs,
     create_tts_voices,
+    format_tts_voice_name,
+    parse_tts_voice_name,
     tts_voice_to_string,
+    uses_openai_realtime_voices,
 )
 from wyoming_openai.const import (
     ATTRIBUTION_NAME_PROGRAM,
@@ -294,6 +297,131 @@ class TestCustomAsyncOpenAI:
         alloy_voices = [v for v in voices if v.backend_voice_name == "alloy"]
         assert len(alloy_voices) == 2
         assert {v.name for v in alloy_voices} == {"alloy (tts-1)", "alloy (tts-1-hd)"}
+
+    @pytest.mark.asyncio
+    async def test_list_supported_voices_openai_realtime_models(self):
+        """Test Realtime TTS models get the Realtime voice set on the OpenAI backend."""
+        custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.OPENAI)
+
+        voices = await custom_client.list_supported_voices(
+            ["gpt-4o-mini-tts", "gpt-realtime-2.1-mini"],
+            [],
+            ["en"],
+            realtime_model_names=["gpt-realtime-2.1-mini"],
+        )
+
+        realtime_voices = {v.backend_voice_name for v in voices if v.model_name == "gpt-realtime-2.1-mini"}
+        speech_voices = {v.backend_voice_name for v in voices if v.model_name == "gpt-4o-mini-tts"}
+        assert {"marin", "cedar"} <= realtime_voices
+        assert not {"fable", "onyx", "nova"} & realtime_voices
+        assert {"fable", "onyx", "nova"} <= speech_voices
+
+    @pytest.mark.asyncio
+    async def test_list_supported_voices_realtime_models_on_other_servers(self):
+        """Test a proxy in front of OpenAI, classed as the OPENAI backend, gets the Realtime voice set too."""
+        custom_client = CustomAsyncOpenAI(
+            api_key="test-key", base_url="http://localhost:8000/v1", backend=OpenAIBackend.OPENAI
+        )
+
+        voices = await custom_client.list_supported_voices(
+            ["gpt-realtime-2.1-mini"], [], ["en"], realtime_model_names=["gpt-realtime-2.1-mini"]
+        )
+
+        voice_names = {v.backend_voice_name for v in voices}
+        assert not {"fable", "onyx", "nova"} & voice_names
+        assert {"marin", "cedar"} <= voice_names
+
+    def test_only_the_openai_backend_uses_openai_realtime_voices(self):
+        """Test the rule configured and listed voices share: Realtime models get OpenAI's voices on OPENAI only."""
+        assert uses_openai_realtime_voices(OpenAIBackend.OPENAI)
+        for backend in (OpenAIBackend.SPEACHES, OpenAIBackend.KOKORO_FASTAPI, OpenAIBackend.LOCALAI, None):
+            assert not uses_openai_realtime_voices(backend)
+
+    def test_speech_only_voices_are_derived_from_the_voice_lists(self):
+        """Test the voices skipped for Realtime models are the speech voices the Realtime API lacks."""
+        from wyoming_openai.const import (
+            OPENAI_REALTIME_TTS_VOICES,
+            OPENAI_SPEECH_ONLY_TTS_VOICES,
+            OPENAI_SPEECH_TTS_VOICES,
+        )
+
+        assert OPENAI_SPEECH_ONLY_TTS_VOICES == ("fable", "onyx", "nova")
+        assert set(OPENAI_SPEECH_ONLY_TTS_VOICES) == set(OPENAI_SPEECH_TTS_VOICES) - set(OPENAI_REALTIME_TTS_VOICES)
+
+    def test_create_tts_voices_limits_realtime_models_to_realtime_voices(self, caplog):
+        """Test configured voices the Realtime API does not offer are not advertised for Realtime models."""
+        with caplog.at_level("WARNING", logger="wyoming_openai.compatibility"):
+            voices = create_tts_voices(
+                ["gpt-4o-mini-tts", "gpt-realtime-2.1-mini"],
+                [],
+                ["alloy", "fable", "marin", "brand-new-voice"],
+                "https://api.openai.com/v1",
+                ["en"],
+                openai_realtime_models=["gpt-realtime-2.1-mini"],
+            )
+
+        realtime_voices = [v.backend_voice_name for v in voices if v.model_name == "gpt-realtime-2.1-mini"]
+        speech_voices = [v.backend_voice_name for v in voices if v.model_name == "gpt-4o-mini-tts"]
+        # Only voices known to be speech-only are skipped, so a voice this project has not heard of passes through
+        assert realtime_voices == ["alloy", "marin", "brand-new-voice"]
+        assert speech_voices == ["alloy", "fable", "marin", "brand-new-voice"]
+        assert "fable" in caplog.text
+
+    def test_create_tts_voices_rejects_realtime_models_left_without_voices(self):
+        """Test a Realtime model is not silently dropped when none of the configured voices fit it."""
+        with pytest.raises(ValueError, match="onyx"):
+            create_tts_voices(
+                ["gpt-realtime-2.1-mini"],
+                [],
+                ["onyx", "nova"],
+                "https://api.openai.com/v1",
+                ["en"],
+                openai_realtime_models=["gpt-realtime-2.1-mini"],
+            )
+
+    @pytest.mark.parametrize("configured", [["onyx", "nova"], ["alloy", "fable", "custom"]])
+    def test_create_tts_voices_keeps_speech_only_voices_off_the_official_api(self, caplog, configured):
+        """Test another server classed as OPENAI is not blocked over voices it may offer under those names."""
+        with caplog.at_level("WARNING", logger="wyoming_openai.compatibility"):
+            voices = create_tts_voices(
+                ["gpt-realtime-2.1-mini"],
+                [],
+                configured,
+                "http://localhost:8000/v1",
+                ["en"],
+                openai_realtime_models=["gpt-realtime-2.1-mini"],
+                official_openai=False,
+            )
+
+        assert [v.backend_voice_name for v in voices] == configured
+        assert "http://localhost:8000/v1 is not the official OpenAI API" in caplog.text
+        assert len(caplog.records) == 1
+
+    @pytest.mark.parametrize(
+        ("base_url", "backend", "expected"),
+        [
+            ("https://api.openai.com/v1", OpenAIBackend.OPENAI, True),
+            # Regional hosts are the official API too; a lookalike domain is not
+            ("https://eu.api.openai.com/v1", OpenAIBackend.OPENAI, True),
+            ("https://api.openai.com.example.test/v1", OpenAIBackend.OPENAI, False),
+            ("http://localhost:8000/v1", OpenAIBackend.OPENAI, False),
+            ("https://api.openai.com/v1", OpenAIBackend.SPEACHES, False),
+        ],
+    )
+    def test_is_official_openai(self, base_url, backend, expected):
+        """Test the OPENAI backend only counts as the official API on OpenAI's own domain."""
+        custom_client = CustomAsyncOpenAI(api_key="test-key", base_url=base_url, backend=backend)
+
+        assert custom_client.is_official_openai is expected
+
+    def test_tts_voice_name_round_trip(self):
+        """Test the public name of a shared voice parses back into its voice and model."""
+        name = format_tts_voice_name("alloy", "gpt-4o-mini-tts")
+
+        assert name == "alloy (gpt-4o-mini-tts)"
+        assert parse_tts_voice_name(name) == ("alloy", "gpt-4o-mini-tts")
+        assert parse_tts_voice_name(f"{name} [2]") == ("alloy", "gpt-4o-mini-tts")
+        assert parse_tts_voice_name("alloy") is None
 
     @pytest.mark.asyncio
     async def test_list_supported_voices_speaches(self):

@@ -1,9 +1,13 @@
 import argparse
 import html.entities
 import json
+import math
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
+from typing import TypeGuard
+
+from .const import REALTIME_AUDIO_FORMAT, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED
 
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
@@ -410,7 +414,11 @@ def validate_extra_body_boolean_field(
 
 
 def validate_extra_body_disallowed_fields(
-    extra_body: dict[str, object] | None, *, field_names: set[str], body_name: str
+    extra_body: dict[str, object] | None,
+    *,
+    field_names: set[str] | frozenset[str],
+    body_name: str,
+    reason: str = "Wyoming expects raw audio bytes",
 ) -> None:
     """Reject extra_body fields that would change the response transport."""
     if not extra_body:
@@ -421,10 +429,7 @@ def validate_extra_body_disallowed_fields(
         return
 
     formatted_fields = ", ".join(repr(field_name) for field_name in disallowed_fields)
-    raise ValueError(
-        f"{body_name} extra_body does not support overriding {formatted_fields}; "
-        "Wyoming expects raw audio bytes"
-    )
+    raise ValueError(f"{body_name} extra_body does not support overriding {formatted_fields}; {reason}")
 
 
 def get_extra_body_boolean_field(
@@ -455,6 +460,110 @@ def validate_tts_extra_body(extra_body: dict[str, object] | None) -> None:
         field_names={"stream", "stream_format"},
         body_name="TTS",
     )
+
+
+def validate_realtime_stt_extra_body(extra_body: dict[str, object] | None) -> None:
+    """Validate Realtime STT extra_body fields; the model is the one the Wyoming client selected."""
+    validate_extra_body_disallowed_fields(
+        extra_body, field_names={"model"}, body_name="STT Realtime", reason="use STT_REALTIME_MODELS"
+    )
+
+
+# Session fields Realtime TTS sets itself: the ones it relies on to get speech, and only speech, back,
+# the model the Wyoming client selected, and the read-aloud instructions
+REALTIME_TTS_FIXED_SESSION_FIELDS = frozenset(
+    ("type", "output_modalities", "tool_choice", "tools", "model", "instructions")
+)
+
+
+def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> None:
+    """Validate Realtime TTS extra_body fields that affect the audio Wyoming is told to expect."""
+    if not extra_body:
+        return
+
+    validate_extra_body_disallowed_fields(
+        extra_body,
+        field_names=REALTIME_TTS_FIXED_SESSION_FIELDS,
+        body_name="TTS Realtime",
+        reason=(
+            "the session has to stay audio-only speech, the model comes from TTS_REALTIME_MODELS "
+            "and the delivery style from TTS_INSTRUCTIONS"
+        ),
+    )
+
+    # These pre-GA top-level voice and speed fields conflict with the supported audio.output settings.
+    validate_extra_body_disallowed_fields(
+        extra_body,
+        field_names={"voice", "speed"},
+        body_name="TTS Realtime",
+        reason="the voice is chosen per request by the Wyoming client and the speed is set with audio.output.speed",
+    )
+
+    audio = extra_body.get("audio", {})
+    if not isinstance(audio, dict) or not isinstance(audio.get("output", {}), dict):
+        raise ValueError("TTS Realtime extra_body audio must be an object whose output, if set, is an object")
+
+    output = get_realtime_tts_audio_output(extra_body)
+    if "voice" in output:
+        raise ValueError(
+            "TTS Realtime extra_body audio.output.voice is not supported; "
+            "the voice is chosen per request by the Wyoming client"
+        )
+
+    speed = output.get("speed")
+    if speed is not None and not _is_finite_number(speed):
+        raise ValueError(f"TTS Realtime extra_body audio.output.speed must be a finite number; got {speed!r}")
+
+    if "format" not in output:
+        return
+
+    audio_format = output["format"]
+    if isinstance(audio_format, dict) and {"rate": REALTIME_AUDIO_FORMAT["rate"], **audio_format} == (
+        REALTIME_AUDIO_FORMAT
+    ):
+        return
+
+    raise ValueError(
+        f"TTS Realtime extra_body audio.output.format must be {REALTIME_AUDIO_FORMAT!r}; got {audio_format!r}"
+    )
+
+
+def get_realtime_tts_audio_output(extra_body: dict[str, object] | None) -> dict[str, object]:
+    """Return a copy of the audio.output object of a Realtime TTS extra_body, or an empty dict when unset."""
+    audio = (extra_body or {}).get("audio")
+    output = audio.get("output") if isinstance(audio, dict) else None
+    return dict(output) if isinstance(output, dict) else {}
+
+
+def get_realtime_tts_speed(tts_speed: float | None, extra_body: dict[str, object] | None) -> float | None:
+    """
+    Return the speed requested for Realtime TTS, or None for the default.
+    An audio.output.speed in the extra body overrides the TTS speed.
+    """
+    speed = get_realtime_tts_audio_output(extra_body).get("speed")
+    if speed is None:
+        # A null override is the same as no override
+        speed = tts_speed
+    if not _is_finite_number(speed):
+        # A speed that is not a finite number cannot be clamped or serialized, so the default is used
+        return None
+    return speed
+
+
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    """Check for a finite int or float; booleans are not numbers here."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # An int too large for a float is not a usable number either
+        return False
+
+
+def clamp_realtime_tts_speed(speed: float) -> float:
+    """Clamp a speed to the range the Realtime API accepts."""
+    return min(max(speed, REALTIME_TTS_MIN_SPEED), REALTIME_TTS_MAX_SPEED)
 
 
 class NamedBytesIO(BytesIO):

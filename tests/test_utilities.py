@@ -7,10 +7,15 @@ import pytest
 from wyoming_openai.utilities import (
     NamedBytesIO,
     SsmlTextTransformer,
+    clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
     get_extra_body_boolean_field,
+    get_realtime_tts_audio_output,
+    get_realtime_tts_speed,
     strip_ssml,
+    validate_realtime_stt_extra_body,
+    validate_realtime_tts_extra_body,
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
@@ -288,3 +293,89 @@ def test_get_extra_body_boolean_field_returns_default_or_override():
         get_extra_body_boolean_field({"stream": True}, field_name="stream", default=False, body_name="STT")
         is True
     )
+
+
+@pytest.mark.parametrize(
+    "extra_body",
+    [
+        None,
+        {"reasoning": {"effort": "low"}},
+        {"audio": {"output": {"format": {"type": "audio/pcm"}, "speed": 1}}},
+        {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}}},
+    ],
+)
+def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body):
+    """Realtime TTS accepts overrides that keep 24 kHz PCM output."""
+    validate_realtime_tts_extra_body(extra_body)
+
+
+@pytest.mark.parametrize(
+    ("extra_body", "message"),
+    [
+        ({"audio": {"output": {"format": {"type": "audio/pcmu"}}}}, r"audio\.output\.format"),
+        ({"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}}, r"audio\.output\.format"),
+        ({"audio": {"output": {"format": "pcm16"}}}, r"audio\.output\.format"),
+        ({"audio": "pcm"}, "audio must be an object"),
+        ({"audio": {"output": {"speed": "fast"}}}, "speed must be a finite number"),
+        ({"audio": {"output": {"speed": True}}}, "speed must be a finite number"),
+        ({"audio": {"output": {"speed": float("nan")}}}, "speed must be a finite number"),
+        # An int too large for a float is rejected like any other unusable number
+        ({"audio": {"output": {"speed": 10**400}}}, "speed must be a finite number"),
+        ({"audio": {"output": {"voice": "cedar"}}}, r"audio\.output\.voice"),
+        # The pre-GA session shape would be rejected by the API on every request
+        ({"voice": "cedar"}, "'voice'"),
+        ({"speed": 1.2}, r"'speed'.*audio\.output\.speed"),
+        ({"output_modalities": ["text"]}, "'output_modalities'"),
+        ({"type": "transcription", "tools": []}, "'tools', 'type'"),
+        ({"tool_choice": "required"}, "'tool_choice'"),
+        # The Wyoming client selects the model, and the read-aloud instructions are not replaceable
+        ({"model": "gpt-realtime"}, "'model'"),
+        ({"instructions": "Answer the user"}, "'instructions'.*TTS_INSTRUCTIONS"),
+    ],
+)
+def test_validate_realtime_tts_extra_body_rejects_incompatible_overrides(extra_body, message):
+    """Realtime TTS rejects overrides that would change the audio Wyoming is told to expect."""
+    with pytest.raises(ValueError, match=message):
+        validate_realtime_tts_extra_body(extra_body)
+
+
+def test_validate_realtime_stt_extra_body_rejects_model_override():
+    """Realtime STT keeps the model the Wyoming client selected."""
+    validate_realtime_stt_extra_body(None)
+    validate_realtime_stt_extra_body({"keywords": ["Wyoming"], "languages": ["en"]})
+    with pytest.raises(ValueError, match="'model'"):
+        validate_realtime_stt_extra_body({"model": "gpt-live-transcribe"})
+
+
+def test_realtime_tts_speed_prefers_audio_output_override_and_clamps():
+    """The Realtime speed comes from audio.output.speed, then the TTS speed, and is kept in range."""
+    assert get_realtime_tts_speed(None, None) is None
+    assert get_realtime_tts_speed(1.2, None) == 1.2
+    assert get_realtime_tts_speed(1.2, {"audio": {"output": {"speed": 0.5}}}) == 0.5
+    assert get_realtime_tts_speed(1.2, {"audio": {"output": {"voice": "cedar"}}}) == 1.2
+    # A speed that is not a finite number is never sent
+    assert get_realtime_tts_speed(float("nan"), None) is None
+    assert get_realtime_tts_speed(float("inf"), None) is None
+    assert clamp_realtime_tts_speed(3.0) == 1.5
+    assert clamp_realtime_tts_speed(0.1) == 0.25
+    assert clamp_realtime_tts_speed(1.0) == 1.0
+
+
+def test_get_realtime_tts_audio_output_returns_a_copy_or_empty():
+    """The audio.output object is copied, and anything else reads as unset."""
+    configured_output = {"voice": "cedar"}
+    extra_body: dict[str, object] = {"audio": {"output": configured_output}}
+
+    output = get_realtime_tts_audio_output(extra_body)
+    output["voice"] = "marin"
+
+    assert configured_output == {"voice": "cedar"}
+    assert get_realtime_tts_audio_output(None) == {}
+    assert get_realtime_tts_audio_output({"audio": "pcm"}) == {}
+    assert get_realtime_tts_audio_output({"audio": {"output": None}}) == {}
+
+
+def test_realtime_tts_speed_null_override_falls_back_to_tts_speed():
+    """Test a null audio.output.speed is treated as no override instead of dropping TTS_SPEED."""
+    assert get_realtime_tts_speed(1.3, {"audio": {"output": {"speed": None}}}) == 1.3
+    assert get_realtime_tts_speed(None, {"audio": {"output": {"speed": None}}}) is None

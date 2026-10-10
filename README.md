@@ -16,9 +16,10 @@ This project introduces a [Wyoming](https://github.com/OHF-Voice/wyoming) server
 
 This project features a variety of examples for using cutting-edge models in both Speech-to-Text (STT) and Text-to-Speech (TTS) scenarios:
 
-- **`gpt-4o-transcribe`**: OpenAI's latest and most advanced model for highly accurate speech recognition; it can also be used in OpenAI Realtime transcription sessions.
-- **`gpt-realtime-whisper`**: OpenAI's recommended low-latency realtime transcription model for live audio and transcript deltas.
+- **`gpt-transcribe`**: OpenAI's recommended model for accurate transcription of recorded speech, with optional response streaming.
+- **`gpt-live-transcribe`**: OpenAI's recommended low-latency model for Realtime transcription sessions with live transcript deltas.
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
+- **`gpt-realtime-2.1-mini`**: OpenAI's stated replacement for its text-to-speech models, used here for [speech synthesis over the Realtime API](#openai-model-deprecations).
 - **`voxtral-mini-latest`**: Mistral AI's multilingual Voxtral ASR, built for long-form audio (32k token context) and tested on up to ~30 minutes per file, available via [Mistral AI](#5-deploying-with-mistral-ai-voxtral) or self-hosted open weights.
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
@@ -138,14 +139,13 @@ python -m wyoming_openai \
   --languages en \
   --stt-openai-key YOUR_STT_API_KEY_HERE \
   --stt-openai-url https://api.openai.com/v1 \
-  --stt-models whisper-1 \
-  --stt-streaming-models gpt-4o-transcribe gpt-4o-mini-transcribe \
-  --stt-realtime-models gpt-realtime-whisper gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1 \
+  --stt-streaming-models gpt-transcribe \
+  --stt-realtime-models gpt-live-transcribe gpt-realtime-whisper \
   --stt-backend OPENAI \
   --tts-openai-key YOUR_TTS_API_KEY_HERE \
   --tts-openai-url https://api.openai.com/v1 \
-  --tts-models gpt-4o-mini-tts tts-1-hd tts-1 \
-  --tts-streaming-models tts-1 \
+  --tts-models gpt-4o-mini-tts \
+  --tts-streaming-models gpt-4o-mini-tts \
   --tts-voices alloy ash coral echo fable onyx nova sage shimmer \
   --tts-backend OPENAI \
   --tts-speed 1.0
@@ -165,29 +165,60 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--languages`                           | `WYOMING_LANGUAGES`                        | en                                            | Space-separated list of supported languages to advertise.            |
 | `--stt-openai-key`                      | `STT_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible speech-to-text services.      |
 | `--stt-openai-url`                      | `STT_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible speech-to-text API            |
-| `--stt-models`                          | `STT_MODELS`                               | None (required*)                                          | Space-separated list of models to use for the STT service. Example: `gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1` |
-| `--stt-streaming-models`                | `STT_STREAMING_MODELS`                     | None                                          | Space-separated list of STT models that support streaming (e.g. `gpt-4o-transcribe gpt-4o-mini-transcribe`). Only these models will use streaming mode. |
-| `--stt-realtime-models`                 | `STT_REALTIME_MODELS`                      | None                                          | Space-separated list of STT models that use OpenAI Realtime transcription sessions (e.g. `gpt-realtime-whisper gpt-4o-transcribe gpt-4o-mini-transcribe whisper-1`). These models stream audio over `/v1/realtime` and emit Wyoming `TranscriptChunk` deltas before the final transcript. Not commonly supported by community projects. |
+| `--stt-models`                          | `STT_MODELS`                               | None (required*)                                          | Space-separated list of models to use for the STT service. Example: `gpt-transcribe` |
+| `--stt-streaming-models`                | `STT_STREAMING_MODELS`                     | None                                          | Space-separated list of STT models that support streaming (e.g. `gpt-transcribe`). Only these models will use streaming mode. |
+| `--stt-realtime-models`                 | `STT_REALTIME_MODELS`                      | None                                          | Space-separated list of STT models that use OpenAI Realtime transcription sessions (e.g. `gpt-live-transcribe gpt-realtime-whisper`). These models stream audio over `/v1/realtime` and emit Wyoming `TranscriptChunk` deltas before the final transcript. Not commonly supported by community projects. |
 | `--stt-backend`                         | `STT_BACKEND`                              | None (autodetected)                           | Enable unofficial API feature sets.          |
 | `--stt-temperature`                     | `STT_TEMPERATURE`                          | None (autodetected)                           | Sampling temperature for speech-to-text (ranges from 0.0 to 1.0)               |
 | `--stt-prompt`                          | `STT_PROMPT`                               | None                                          | Optional prompt for STT requests (Text to guide the model's style).   |
-| `--stt-extra-body`                      | `STT_EXTRA_BODY`                           | None                                          | JSON object merged into the STT request body via `extra_body` for backend-specific fields. `response_format` must remain `json`, and `stream` may override the model-derived default when set to `true` or `false`. |
+| `--stt-extra-body`                      | `STT_EXTRA_BODY`                           | None                                          | JSON object merged into the `/v1/audio/transcriptions` request body via `extra_body` for backend-specific fields. `response_format` must remain `json`, and `stream` may override the model-derived default when set to `true` or `false`. Not applied to `STT_REALTIME_MODELS`. |
+| `--stt-realtime-extra-body`             | `STT_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the transcription settings of `STT_REALTIME_MODELS` sessions, for example `{"keywords": ["Wyoming"]}`. Sent for every Realtime model, so only set fields all of them accept. A `null` value drops a field the proxy would otherwise send, for example `{"prompt": null}`. |
 | `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
 | `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible text-to-speech API            |
-| `--tts-models`                          | `TTS_MODELS`                               | None (required*)                           | Space-separated list of models to use for the TTS service. Example: `gpt-4o-mini-tts tts-1-hd tts-1` |
+| `--tts-models`                          | `TTS_MODELS`                               | None (required*)                           | Space-separated list of models to use for the TTS service. Example: `gpt-4o-mini-tts` |
 | `--tts-voices`                          | `TTS_VOICES`                               | Empty (autodetected)                          | Space-separated list of voices for TTS.        |
 | `--tts-backend`                         | `TTS_BACKEND`                              | None (autodetected)                           | Enable unofficial API feature sets.          |
-| `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0).               |
+| `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0; capped at 1.5 for `TTS_REALTIME_MODELS`). |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
 | `--tts-extra-body`                      | `TTS_EXTRA_BODY`                           | None                                          | JSON object merged into the TTS request body via `extra_body` for backend-specific fields. Audio settings such as `response_format`, `speed`, and `instructions` may override top-level values, but `stream` and `stream_format` are rejected. |
-| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `tts-1`) with up to three concurrent synthesis requests by default (see `TTS_CONCURRENT_REQUESTS`). |
+| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `gpt-4o-mini-tts`) with up to three concurrent synthesis requests by default (see `TTS_CONCURRENT_REQUESTS`). |
+| `--tts-realtime-models`                 | `TTS_REALTIME_MODELS`                      | None                                          | Space-separated list of TTS models that synthesize over OpenAI's `/v1/realtime` API instead of `/v1/audio/speech` (e.g. `gpt-realtime-2.1-mini`). These are added to the TTS models and can also be listed in `TTS_STREAMING_MODELS`. Experimental; see [OpenAI Model Deprecations](#openai-model-deprecations). |
+| `--tts-realtime-extra-body`             | `TTS_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the Realtime session of `TTS_REALTIME_MODELS`, for example `{"reasoning": {"effort": "low"}}`. `TTS_EXTRA_BODY` is not applied to Realtime models. `audio.output.format` must remain 24 kHz `audio/pcm`, and `audio.output.voice`, a top-level `voice` or `speed`, `model` and `instructions` cannot be set (use `TTS_INSTRUCTIONS` for the delivery style). |
 | `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
 | `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
-| `--tts-concurrent-requests`             | `TTS_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of simultaneous TTS requests per Wyoming connection while streaming TTS synthesizes several sentences at once. Lower it for a backend that cannot serve parallel requests, raise it for one that can. Must be a whole number of at least 1. |
+| `--tts-concurrent-requests`             | `TTS_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of simultaneous TTS requests per Wyoming connection while streaming TTS synthesizes several sentences at once. Lower it for a backend that cannot serve parallel requests, raise it for one that can. Must be a whole number of at least 1. For `TTS_REALTIME_MODELS` the limit counts requests in flight: the websocket of a finished request may still be closing when the next one opens. |
 
 `STT_STREAMING_MODELS` and `STT_REALTIME_MODELS` select different STT transports. `STT_STREAMING_MODELS` still uses `/v1/audio/transcriptions` with response streaming after Wyoming `AudioStop`. `STT_REALTIME_MODELS` opens a `/v1/realtime` transcription session, sends 24 kHz mono PCM16 audio chunks as Wyoming audio arrives, commits on Wyoming `AudioStop`, and emits `TranscriptChunk` deltas plus a final `Transcript`.
 
 Both `STT_EXTRA_BODY` and `TTS_EXTRA_BODY` must be valid JSON objects. The OpenAI client merges these values into the outgoing request body rather than sending a nested `extra_body` field. Supported overlaps still need to match Wyoming's transport expectations: STT continues to require `response_format="json"`, and a boolean `stream` override will update both the request body and the client's response parser for `/v1/audio/transcriptions`. TTS can override raw-audio fields such as `response_format`, `speed`, and `instructions`, but rejects `stream` and `stream_format` because the handler expects audio bytes instead of SSE-style framing.
+
+### OpenAI Model Deprecations
+
+OpenAI has announced shutdown dates for most of its older audio models. This only affects the official OpenAI API; local and third-party backends are unaffected, including ones that reuse names such as `tts-1` for their own models. The old model names keep working until the dates below.
+
+| **Models** | **Shutdown** | **OpenAI's replacement** |
+|------------|--------------|--------------------------|
+| `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe-diarize` | February 26, 2027 | `gpt-transcribe` (`STT_MODELS` / `STT_STREAMING_MODELS`) or `gpt-live-transcribe` (`STT_REALTIME_MODELS`) |
+| `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` snapshots | January 6, 2027 | `gpt-realtime-2.1-mini` (`TTS_REALTIME_MODELS`) |
+
+**Speech-to-text:** `gpt-transcribe` and `gpt-live-transcribe` take a `languages` list instead of the singular `language` field. On the `OPENAI` backend the proxy sends the Wyoming request language as `languages` for these models. A `languages` list in the extra body replaces the request language for every model that uses that body, on any backend, so the two fields are never sent together; only set it when all of those models accept `languages`. It is also how to use a differently named model that needs `languages`. Additional hints such as `{"keywords": ["Wyoming"]}` can be passed with `STT_EXTRA_BODY` for `/v1/audio/transcriptions` and with `STT_REALTIME_EXTRA_BODY` for `STT_REALTIME_MODELS` sessions; the two are kept separate because the Realtime API rejects fields it does not know. Each body is sent for every model on its transport, while the fields are model-specific: `keywords` and `languages` are for `gpt-transcribe` and `gpt-live-transcribe`, and `delay` is for `gpt-realtime-whisper`. Only list the Realtime models that accept the fields you set. `STT_PROMPT` is left out of `gpt-realtime-whisper` Realtime sessions on the `OPENAI` backend, where it is not supported; for any other Realtime model that takes no prompt, set `{"prompt": null}` in `STT_REALTIME_EXTRA_BODY`. A Realtime session that delivers no final transcript within 30 seconds of the end of the audio ends with an empty transcript.
+
+**Text-to-speech:** OpenAI's replacement is not available on `/v1/audio/speech`, so `TTS_REALTIME_MODELS` opens a `/v1/realtime` session per synthesis request instead, or one per sentence chunk when the model is also listed in `TTS_STREAMING_MODELS`. Things to know before switching:
+
+- Realtime models are conversational. The proxy instructs the model to read the text word for word, but this is not guaranteed; a warning is logged when the spoken transcript differs from the requested text (only at debug level when the text contains numbers or symbols, which a transcript spells out). Long text is the most likely to drift, so also list the model in `TTS_STREAMING_MODELS` to have it synthesized sentence by sentence. This applies to both plain `synthesize` requests and `synthesize-start/chunk/stop`, using the configured chunking limits and request concurrency.
+- The voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` and `cedar`. `fable`, `onyx` and `nova` are not available on the official OpenAI Realtime API. Only on the official API are those three skipped for Realtime models when listed in `TTS_VOICES`, with a startup error if none remain. Every other server, including proxies on the `OPENAI` backend, keeps all configured voices and logs a warning if speech-only names are present, because it may offer voices of its own under those names. Any other name in `TTS_VOICES` is passed through, so a voice OpenAI adds later can be used without an update.
+- `TTS_INSTRUCTIONS` is appended to the read-aloud instructions as a delivery style, and `TTS_SPEED` is capped at 1.5.
+- `TTS_EXTRA_BODY` only applies to `/v1/audio/speech`. Use `TTS_REALTIME_EXTRA_BODY` for the Realtime session, for example `{"reasoning": {"effort": "low"}}`. An `audio.output.format` other than 24 kHz `audio/pcm`, an `audio.output.voice`, a top-level `voice` or `speed` (use `audio.output.speed`), or an override of `type`, `output_modalities`, `tool_choice`, `tools`, `model` or `instructions` causes a startup error.
+- A request that names no voice uses the first voice of a `/v1/audio/speech` model when one is configured, and a Realtime voice only when Realtime models are the only ones. A `synthesize-start` without a voice resolves it right away, so its sentences are spoken as they arrive when that voice's model is listed in `TTS_STREAMING_MODELS`, like those of a named voice.
+- Voice names change with the number of TTS models. With one model a voice is advertised as `alloy`; with several, shared voices become `alloy (gpt-4o-mini-tts)` and `alloy (gpt-realtime-2.1-mini)`. A suffixed name that is no longer advertised still resolves to the matching voice with a warning, but re-select the voice in your Wyoming client after adding or removing models.
+- A Realtime request that produces no audio, or stalls for 30 seconds, fails the synthesis. Text with nothing to read aloud, such as punctuation or emoji on their own, is skipped instead of being sent to the model; symbols with a spoken name, such as `+`, `&` or a currency sign, are still read. During sentence playback on `/v1/audio/speech`, a response without audio is skipped, with a warning if the sentence has speakable text. Later sentences continue playing, but the synthesis fails if no sentence produces audio and speakable text was skipped. An unsplit request without audio still fails for speakable text. A WAV that declares samples and delivers none always fails; partially delivered audio plays with a warning. A synthesis with nothing to read aloud at all, including one without any text, still ends as an empty audio stream.
+
+```bash
+python -m wyoming_openai \
+  --tts-openai-key YOUR_TTS_API_KEY_HERE \
+  --tts-realtime-models gpt-realtime-2.1-mini \
+  --tts-streaming-models gpt-realtime-2.1-mini
+```
 
 ## Docker (Recommended) [![Docker Image CI](https://github.com/roryeckel/wyoming_openai/actions/workflows/docker-image.yml/badge.svg)](https://github.com/roryeckel/wyoming_openai/actions/workflows/docker-image.yml)
 
