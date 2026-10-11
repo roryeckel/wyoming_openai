@@ -299,6 +299,26 @@ class TestCustomAsyncOpenAI:
         assert {v.name for v in alloy_voices} == {"alloy (tts-1)", "alloy (tts-1-hd)"}
 
     @pytest.mark.asyncio
+    async def test_list_supported_voices_openai_offers_later_voices_for_later_models(self):
+        """Test models after tts-1 and tts-1-hd get the voices the speech API added since, behind the earlier ones."""
+        custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.OPENAI)
+        earlier = ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"]
+        later = ["ballad", "verse", "marin", "cedar"]
+
+        voices = await custom_client.list_supported_voices(["gpt-4o-mini-tts"], [], ["en"])
+        # On its own the model keeps plain names, and the voice a request without one falls back to
+        assert [v.name for v in voices] == earlier + later
+
+        voices = await custom_client.list_supported_voices(["gpt-4o-mini-tts", "tts-1-hd", "tts-1-1106"], [], ["en"])
+        by_model = {
+            model_name: [v.backend_voice_name for v in voices if v.model_name == model_name]
+            for model_name in ("gpt-4o-mini-tts", "tts-1-hd", "tts-1-1106")
+        }
+        assert by_model == {"gpt-4o-mini-tts": earlier + later, "tts-1-hd": earlier, "tts-1-1106": earlier}
+        # Only the model that has them advertises the later voices, so they need no model in their name
+        assert {v.name for v in voices if v.backend_voice_name in later} == set(later)
+
+    @pytest.mark.asyncio
     async def test_list_supported_voices_openai_realtime_models(self):
         """Test Realtime TTS models get the Realtime voice set on the OpenAI backend."""
         custom_client = CustomAsyncOpenAI(api_key="test-key", backend=OpenAIBackend.OPENAI)
@@ -315,6 +335,11 @@ class TestCustomAsyncOpenAI:
         assert {"marin", "cedar"} <= realtime_voices
         assert not {"fable", "onyx", "nova"} & realtime_voices
         assert {"fable", "onyx", "nova"} <= speech_voices
+        # The speech API serves the voices both transports have too, so they are told apart by model
+        assert {"ballad", "verse", "marin", "cedar"} <= speech_voices
+        names = {v.name for v in voices}
+        assert {"marin (gpt-4o-mini-tts)", "marin (gpt-realtime-2.1-mini)", "fable"} <= names
+        assert "marin" not in names
 
     @pytest.mark.asyncio
     async def test_list_supported_voices_realtime_models_on_other_servers(self):

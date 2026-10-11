@@ -13,6 +13,8 @@ from .const import (
     ATTRIBUTION_NAME_PROGRAM_STREAMING,
     ATTRIBUTION_URL,
     DEFAULT_OPENAI_BASE_URL,
+    OPENAI_LEGACY_SPEECH_TTS_MODEL_PREFIXES,
+    OPENAI_LEGACY_SPEECH_TTS_VOICES,
     OPENAI_REALTIME_TTS_VOICES,
     OPENAI_SPEECH_ONLY_TTS_VOICES,
     OPENAI_SPEECH_TTS_VOICES,
@@ -505,11 +507,13 @@ class CustomAsyncOpenAI(AsyncOpenAI):
 
     # OpenAI
 
-    async def list_openai_voices(self) -> list[str]:
+    async def list_openai_voices(self, model_name: str) -> list[str]:
         """
-        Not official implemented by OpenAI, hard-coded.
+        Not official implemented by OpenAI, hard-coded. tts-1 and tts-1-hd offer fewer voices than later models.
         https://platform.openai.com/docs/guides/text-to-speech/voice-options
         """
+        if model_name.startswith(OPENAI_LEGACY_SPEECH_TTS_MODEL_PREFIXES):
+            return list(OPENAI_LEGACY_SPEECH_TTS_VOICES)
         return list(OPENAI_SPEECH_TTS_VOICES)
 
     async def list_openai_realtime_voices(self) -> list[str]:
@@ -661,7 +665,7 @@ class CustomAsyncOpenAI(AsyncOpenAI):
             if uses_openai_realtime_voices(self.backend) and model_name in realtime_models:
                 tts_voices = await self.list_openai_realtime_voices()
             elif self.backend == OpenAIBackend.OPENAI:
-                tts_voices = await self.list_openai_voices()
+                tts_voices = await self.list_openai_voices(model_name)
             elif self.backend == OpenAIBackend.SPEACHES:
                 tts_voices = await self._list_speaches_voices(model_name)
             elif self.backend == OpenAIBackend.KOKORO_FASTAPI:

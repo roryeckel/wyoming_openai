@@ -42,8 +42,11 @@ REALTIME_TTS_MAX_SPEED = 1.5
 REALTIME_TTS_EVENT_TIMEOUT = 30.0  # Seconds to wait for the next Realtime server event during synthesis
 # https://platform.openai.com/docs/guides/realtime-conversations
 OPENAI_REALTIME_TTS_VOICES = ("alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar")
+# tts-1 and tts-1-hd, and their snapshots, do not offer the voices added after them
+OPENAI_LEGACY_SPEECH_TTS_MODEL_PREFIXES = ("tts-1",)
+OPENAI_LEGACY_SPEECH_TTS_VOICES = ("alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer")
 # https://platform.openai.com/docs/guides/text-to-speech/voice-options
-OPENAI_SPEECH_TTS_VOICES = ("alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer")
+OPENAI_SPEECH_TTS_VOICES = (*OPENAI_LEGACY_SPEECH_TTS_VOICES, "ballad", "verse", "marin", "cedar")
 # Speech API voices the Realtime API does not offer; anything else in TTS_VOICES is passed through
 OPENAI_SPEECH_ONLY_TTS_VOICES = tuple(
     voice_name for voice_name in OPENAI_SPEECH_TTS_VOICES if voice_name not in OPENAI_REALTIME_TTS_VOICES
