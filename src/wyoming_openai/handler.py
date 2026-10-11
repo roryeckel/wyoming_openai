@@ -20,6 +20,7 @@ from wyoming.asr import (
     TranscriptStop,
 )
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import AsrModel, AsrProgram, Describe, Info, SelectProgram, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler
@@ -122,7 +123,11 @@ DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
 TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests per connection when streaming sentences
-TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the audio stop of a failed or cancelled stream
+TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
+SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
+# Sent as a Wyoming error event; the cause is in the log
+TTS_FAILED_ERROR = "Text-to-speech synthesis failed"
+SHUTDOWN_ERROR = "Server is shutting down"
 
 @dataclass(frozen=True)
 class TtsStreamResult:
@@ -137,6 +142,7 @@ class _SynthesisState:
     """What one synthesis keeps between events. Replaced as a whole, so nothing carries over to the next one."""
 
     active: bool = False  # Between synthesize-start and synthesize-stop
+    plain: bool = False  # A synthesize request on its own, which only an audio stop ends successfully
     buffer: list[str] = field(default_factory=list)  # All text of the session, for a voice that is not streamed
     text_accumulator: str = ""  # Text not handed to the backend yet
     voice: TtsVoiceModel | None = None  # Resolved once per streaming synthesis
@@ -146,6 +152,7 @@ class _SynthesisState:
     audio_started: bool = False  # AudioStart was sent and AudioStop was not
     timestamp: float = 0  # End of the audio sent so far, in milliseconds
     skipped_speakable_sentence: bool = False  # A sentence with something to say came back without audio
+    failed: bool = False  # Its failure was reported to the client, or the client is gone; not reported twice
 
 
 class TtsStreamError(Exception):
@@ -331,6 +338,8 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def disconnect(self) -> None:
         """Clean up handler-owned realtime resources when the Wyoming client disconnects."""
         try:
+            # Nobody is left to report a failure to
+            self._synthesis.failed = True
             await self._stop_sentence_playback()
             await self._cleanup_realtime_transcription()
         finally:
@@ -341,12 +350,18 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
         try:
-            # The client is still connected, so an open audio stream is closed before the writer is
-            await self._stop_sentence_playback()
+            # The client is still connected, so it is told about a synthesis cut short before the writer is closed
+            in_flight = (
+                self._synthesis.active
+                or self._synthesis.audio_started
+                or any(not task.done() for task in self._synthesis_tasks)
+            )
+            await self._stop_sentence_playback(SHUTDOWN_ERROR if in_flight else None)
             await self._cleanup_realtime_transcription()
         finally:
             await super().stop()
-            await self._drain_background_tasks()
+            # A websocket whose closing handshake stalls must not hold up the shutdown of the server
+            await self._drain_background_tasks(SHUTDOWN_DRAIN_TIMEOUT)
 
     async def _handle_select_program(self, select_program: SelectProgram) -> bool:
         """Handle select-program request pinning a program for this connection.
@@ -1026,12 +1041,14 @@ class OpenAIEventHandler(AsyncEventHandler):
         segmenter = _get_boundary_detector(language)
         # preserve_whitespace=False strips leading/trailing whitespace from each sentence
 
-        merged, current_chunk = self._merge_sentences(list(segmenter.segment(text)), min_words, max_chars)
+        merged, current_chunk, current_words = self._merge_sentences(
+            list(segmenter.segment(text)), min_words, max_chars
+        )
         chunks = [chunk.strip() for chunk in merged]
 
         # A remainder below the minimum joins the chunk before it rather than being dropped
         if current_chunk:
-            if chunks and min_words and not self._meets_min_criteria(current_chunk, min_words):
+            if chunks and min_words and current_words < min_words:
                 chunks[-1] = f"{chunks[-1]} {current_chunk.strip()}"
             else:
                 chunks.append(current_chunk.strip())
@@ -1040,33 +1057,32 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _merge_sentences(
         self, sentences: list[str], min_words: int | None, max_chars: int | None, joiner: str = " "
-    ) -> tuple[list[str], str]:
+    ) -> tuple[list[str], str, int]:
         """
         Merge sentences into chunks within the configured limits.
 
-        Returns the finished chunks and the chunk still open after the last sentence. Without limits every
-        sentence is its own chunk. A chunk below `min_words` keeps growing, past `max_chars` if need be, so
-        text is never dropped; one that meets the minimum is closed once the next sentence would exceed
-        `max_chars`, or right away when no maximum is set.
+        Returns the finished chunks, the chunk still open after the last sentence, and its word count. Without
+        limits every sentence is its own chunk. A chunk below `min_words` keeps growing, past `max_chars` if
+        need be, so text is never dropped; one that meets the minimum is closed once the next sentence would
+        exceed `max_chars`, or right away when no maximum is set. Words are counted sentence by sentence, so a
+        sentence in a language written without spaces is one word however the sentences are joined.
         """
         chunks: list[str] = []
         current_chunk = ""
+        current_words = 0
 
         for sentence in sentences:
             potential_chunk = current_chunk + joiner + sentence if current_chunk else sentence
-            meets_min = not min_words or self._meets_min_criteria(current_chunk, min_words)
+            meets_min = not min_words or current_words >= min_words
             if current_chunk and meets_min and (not max_chars or len(potential_chunk) > max_chars):
                 chunks.append(current_chunk)
                 current_chunk = sentence
+                current_words = len(sentence.split())
             else:
                 current_chunk = potential_chunk
+                current_words += len(sentence.split())
 
-        return chunks, current_chunk
-
-    def _meets_min_criteria(self, text: str, min_words: int) -> bool:
-        """Check if text chunk meets minimum word requirement."""
-        word_count = len(text.split())
-        return word_count >= min_words
+        return chunks, current_chunk, current_words
 
     async def _process_ready_sentences(self, sentences: list[str]) -> bool:
         """
@@ -1155,9 +1171,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.debug("Sentence %d streamed directly with minimal latency", i + 1)
                 continue
 
-            # Otherwise, task completed and buffered - stream the buffered data now
-            if not await self._stream_audio_to_wyoming(
-                result.audio or b"", self._get_tts_audio_format(voice), sentences[i]
+            # Otherwise, task completed and buffered - stream the buffered data now. Tracked like the requests,
+            # so stop() ends a write the client is slow to take instead of the next sentence following it
+            if not await self._create_synthesis_task(
+                self._stream_audio_to_wyoming(result.audio or b"", self._get_tts_audio_format(voice), sentences[i]),
+                name=f"{task_id}_playback",
             ):
                 _LOGGER.error("Failed to stream sentence %d (%s) to Wyoming", i + 1, sentence_preview)
                 return False
@@ -1190,58 +1208,83 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Its failure is reported by whoever awaits it
         return self._track_task(coro, name=name, tasks=self._synthesis_tasks, log_failure=False)
 
-    async def _cancel_synthesis_tasks(self) -> None:
-        """Cancel synthesis tasks that are still running so they stop holding backend connections."""
-        tasks = [task for task in self._synthesis_tasks if not task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
     def _run_in_background(self, coro: Any, *, name: str) -> None:
         """Run cleanup that should not delay the audio stream; awaited when the client disconnects."""
         self._track_task(coro, name=name, tasks=self._background_tasks, log_failure=True)
 
-    async def _drain_background_tasks(self) -> None:
-        """Wait for pending background cleanup."""
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+    async def _drain_background_tasks(self, timeout: float | None = None) -> None:
+        """Wait for pending background cleanup; what a timeout leaves unfinished is cancelled."""
+        if not self._background_tasks:
+            return
+        _, pending = await asyncio.wait(self._background_tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _write_event_bounded(self, event: Event) -> None:
-        """Write an event of an abort or a shutdown, which a client that stopped reading must not hold up."""
-        with contextlib.suppress(Exception):
+    async def _write_event_bounded(self, event: Event) -> bool:
+        """
+        Write an event of an abort or a shutdown, which a client that stopped reading must not hold up.
+        Returns whether the client took it; one that did not is not offered the events that would follow.
+        """
+        try:
             await asyncio.wait_for(self.write_event(event), TTS_STREAM_STOP_TIMEOUT)
+        except Exception:
+            return False
+        return True
 
-    async def _abort_audio_stream(self) -> None:
-        """
-        Close the audio stream of a synthesis that failed or was cancelled.
-        Playback only reports failure; this is the one place that sends the audio stop for it. It runs when
-        the handler of a synthesis event unwinds, and from stop() while the client is still connected.
-        """
-        if self._synthesis.audio_started:
-            # Closed for good even if the client does not take the stop, so nobody sends it a second time
-            self._synthesis.audio_started = False
-            await self._write_event_bounded(AudioStop(timestamp=int(self._synthesis.timestamp)).event())
-
-    async def _stop_sentence_playback(self) -> None:
+    async def _stop_sentence_playback(self, error: str | None = None) -> bool:
         """
         Cancel pending synthesis requests and close their audio stream without ending the text session.
-        Does nothing after a synthesis that completed, which has no request pending and closed its own stream.
+        Playback only reports failure; this is the one place that tells the client. It runs when the handler
+        of a synthesis event unwinds, and from stop() while the client is still connected. It does nothing
+        after a synthesis that completed, which has no request pending and closed its own stream.
+
+        With an `error` the synthesis failed, and the client gets an error event first. Home Assistant takes
+        an audio stop as the end of a complete plain synthesis and caches the audio, and reads on past it in
+        a streaming one, so a failure is only told apart by that event; it is sent once per synthesis. A
+        failed plain synthesis then gets no audio stop: clients that do not know the error event see the
+        connection close instead, which the caller does by returning False.
+
+        Returns whether the client took what was written.
         """
-        await self._cancel_synthesis_tasks()
-        await self._abort_audio_stream()
+        # Kept across the awaits: stop() runs beside the handler of the synthesis, which unwinds once its
+        # requests are cancelled, ends the synthesis itself and leaves the state of the next one behind
+        state = self._synthesis
+        tasks = [task for task in self._synthesis_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        taken = True
+        if error is not None and not state.failed:
+            state.failed = True
+            # Written before the requests are awaited, so that handler closes the stream after it, not before
+            taken = await self._write_event_bounded(Error(text=error).event())
+        if tasks:
+            # Awaited so they no longer hold backend connections
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if state.audio_started:
+            # Closed for good even if the client does not take the stop, so nobody sends it a second time
+            state.audio_started = False
+            if taken and not (state.plain and state.failed):
+                taken = await self._write_event_bounded(AudioStop(timestamp=int(state.timestamp)).event())
+        return taken
 
     async def _abort_synthesis(self) -> bool:
-        """Abort the current synthesis session, emitting stop events and resetting state."""
-        await self._end_synthesis()
-        await self._write_event_bounded(SynthesizeStopped().event())
+        """Abort the current synthesis session, emitting error and stop events and resetting state."""
+        # The error comes first: a client stops reading at synthesize-stopped
+        if await self._end_synthesis(TTS_FAILED_ERROR):
+            await self._write_event_bounded(SynthesizeStopped().event())
         return False
 
-    async def _end_synthesis(self) -> None:
-        """Leave nothing of the current synthesis behind: no pending request, no open stream, no state."""
-        await self._stop_sentence_playback()
+    async def _end_synthesis(self, error: str | None = None) -> bool:
+        """
+        Leave nothing of the current synthesis behind: no pending request, no open stream, no state.
+        `error` and the result are those of `_stop_sentence_playback`.
+        """
+        taken = await self._stop_sentence_playback(error)
         self._synthesis = _SynthesisState()
         self._allow_streaming_task_id = None
+        return taken
 
     def _log_unsupported_asr_model(self, model_name: str | None = None):
         """Log an unsupported ASR model"""
@@ -1401,7 +1444,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.debug("Ignoring standalone synthesize event - streaming synthesis is already active")
             return True
 
-        self._synthesis = _SynthesisState()
+        self._synthesis = _SynthesisState(plain=True)
+        succeeded = False
         try:
             if synthesize.voice:
                 requested_voice = synthesize.voice.name
@@ -1424,15 +1468,17 @@ class OpenAIEventHandler(AsyncEventHandler):
                 chunks = self._chunk_text_for_streaming(
                     text, self._tts_streaming_min_words, self._tts_streaming_max_chars, requested_language
                 )
-                return await self._play_sentences(chunks, voice) and await self._finish_tts_audio_stream(voice)
-
-            return await self._synthesize_non_streaming(text, voice)
+                succeeded = await self._play_sentences(chunks, voice) and await self._finish_tts_audio_stream(voice)
+            else:
+                succeeded = await self._synthesize_non_streaming(text, voice)
+            return succeeded
 
         except Exception as e:
             _LOGGER.exception("Error during synthesis: %s", e)
             return False
         finally:
-            await self._end_synthesis()
+            # Also when cancelled by a shutdown, which has then reported it already
+            await self._end_synthesis(None if succeeded else TTS_FAILED_ERROR)
 
     async def _handle_synthesize_start(self, synthesize_start: SynthesizeStart) -> bool:
         """Handle start of streaming synthesis"""
@@ -1450,6 +1496,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         # instead of resolving, and warning about, the name again
         voice = self._validate_tts_voice_and_language(requested_voice, requested_language)
         if not voice:
+            # Without it a client that reads until the connection closes takes this for a synthesis without audio
+            await self._write_event_bounded(Error(text=TTS_FAILED_ERROR).event())
             return False
 
         self._synthesis = _SynthesisState(
@@ -1497,11 +1545,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         if len(sentences) > 1:
             unfinished_sentence = sentences.pop()
             # The same limits as for a text that is split as a whole. The whitespace is already in the sentences
-            ready_sentences, open_chunk = self._merge_sentences(
+            ready_sentences, open_chunk, open_words = self._merge_sentences(
                 sentences, self._tts_streaming_min_words, self._tts_streaming_max_chars, joiner=""
             )
             min_words = self._tts_streaming_min_words
-            if open_chunk and (not min_words or self._meets_min_criteria(open_chunk, min_words)):
+            if open_chunk and (not min_words or open_words >= min_words):
                 # Spoken now rather than held for later text to fill it up to the maximum
                 ready_sentences.append(open_chunk)
                 open_chunk = ""
@@ -1709,7 +1757,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             # A conversational model handed only punctuation or emoji may improvise a reply instead of
             # staying silent, so it is never sent; playback accepts no audio for such text
             return
-        connection_manager = self._tts_client.realtime.connect(model=voice.model_name)
+        # Playback takes the audio only as fast as the Wyoming client does. With the default receive queue the
+        # socket is no longer read behind 16 unread frames, which holds back keepalive pongs and the reply to
+        # a close as well, so the queue is unbounded: at most it holds one response, as a buffered sentence does
+        connection_manager = self._tts_client.realtime.connect(
+            model=voice.model_name, websocket_connection_options={"max_queue": None}
+        )
         connection = await self._enter_realtime_connection(connection_manager)
         try:
             await connection.session.update(session=self._get_realtime_tts_session(voice))
@@ -1789,8 +1842,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Symbol-only text ("+") has nothing to compare against its spoken name
         if not requested or not spoken_text.strip() or _normalize_for_comparison(spoken_text) == requested:
             return
-        # A transcript spells out numbers and symbols ("72%" as "seventy-two percent"), which is not drift
-        log = _LOGGER.debug if any(char.isnumeric() or _is_spoken_symbol(char) for char in text) else _LOGGER.warning
+        # A transcript spells out numbers and symbols ("72%" as "seventy-two percent"), which is not drift. Numbers
+        # by category, not by numeric value: ideographs such as 一 and 十 have one and are part of ordinary words
+        spelled_out = any(unicodedata.category(char).startswith("N") or _is_spoken_symbol(char) for char in text)
+        log = _LOGGER.debug if spelled_out else _LOGGER.warning
         log(
             "Realtime TTS spoke text that differs from the request. Requested: %s | Spoken: %s",
             _truncate_for_log(text),
@@ -1937,7 +1992,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         Returns:
             bool: True if the audio was played or skipped, False on error. A stream left open by a failure
-                or a cancellation is closed by `_abort_audio_stream`, not here.
+                or a cancellation is closed by `_stop_sentence_playback`, not here.
         """
         try:
             framer = WavFramer(audio_format)
