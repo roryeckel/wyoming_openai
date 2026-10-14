@@ -13,6 +13,7 @@ That means contributions are generally in scope when they improve or fix:
 - OpenAI-compatible `/v1/audio/transcriptions`
 - OpenAI-compatible `/v1/audio/speech`
 - OpenAI Realtime transcription sessions used through `/v1/realtime`
+- OpenAI Realtime speech synthesis used through `/v1/realtime` (experimental)
 - Wyoming protocol handling and event flow
 - configuration, docs, tests, and packaging around those surfaces
 
