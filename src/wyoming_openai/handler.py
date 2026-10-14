@@ -156,6 +156,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._is_recording: bool = False
         self._current_asr_model: AsrModel | None = None
         self._current_language: str | None = None
+        self._audio_realtime: bool | None = None
+        self._asr_request_invalid = False
         self._audio_sample_rate: int = DEFAULT_ASR_AUDIO_RATE
         self._audio_width: int = DEFAULT_AUDIO_WIDTH
         self._audio_channels: int = DEFAULT_AUDIO_CHANNELS
@@ -300,13 +302,28 @@ class OpenAIEventHandler(AsyncEventHandler):
         requested_model = self._get_asr_model(transcribe.name)
         requested_language = transcribe.language
 
+        # The transport and model are chosen at audio-start. A late Transcribe
+        # may specify the HTTP recording's language, but cannot replace its model.
+        if self._audio_realtime is not None and self._current_asr_model:
+            if not requested_model:
+                self._log_unsupported_asr_model(transcribe.name)
+                return False
+            if not self._is_asr_language_supported(requested_language, self._current_asr_model):
+                self._log_unsupported_asr_language(transcribe.name, requested_language)
+                return False
+            if not self._audio_realtime:
+                self._current_language = requested_language
+            return True
+
         self._current_asr_model = None
         self._current_language = None
+        self._asr_request_invalid = True
 
         if requested_model:
             if self._is_asr_language_supported(requested_language, requested_model):
                 self._current_asr_model = requested_model
                 self._current_language = requested_language
+                self._asr_request_invalid = False
                 return True
             self._log_unsupported_asr_language(transcribe.name, requested_language)
         else:
@@ -315,12 +332,17 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
         """Handle start of audio stream"""
+        if not self._asr_request_invalid:
+            self._current_asr_model = self._current_asr_model or self._get_asr_model()
+        self._audio_realtime = bool(
+            self._current_asr_model and self._is_asr_model_realtime(self._current_asr_model.name)
+        )
         self._realtime_pcm_tail = b""
         self._audio_sample_rate = sample_rate
         self._audio_width = audio_width
         self._audio_channels = audio_channels
 
-        if self._current_asr_model and self._is_asr_model_realtime(self._current_asr_model.name):
+        if self._audio_realtime:
             await self._handle_realtime_audio_start(sample_rate, audio_width, audio_channels)
             return
 
@@ -654,11 +676,14 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_audio_stop(self) -> None:
         """Handle end of audio stream and perform transcription"""
-        if self._realtime_connection is not None or (
-            self._current_asr_model and self._is_asr_model_realtime(self._current_asr_model.name)
-        ):
-            await self._handle_realtime_audio_stop()
+        if self._audio_realtime:
+            try:
+                await self._handle_realtime_audio_stop()
+            finally:
+                self._audio_realtime = None
             return
+
+        self._audio_realtime = None
 
         if not self._is_recording or not self._wav_buffer:
             _LOGGER.warning("Received audio stop event without recording")
