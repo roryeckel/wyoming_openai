@@ -346,6 +346,33 @@ def create_json_object_parser(option_name: str) -> Callable[[str], dict[str, obj
     return parse_json_object
 
 
+def parse_voice_labels(value: str) -> dict[str, str]:
+    """
+    Parse an argparse value holding a JSON object that maps TTS voice names to display names.
+
+    Example: '{"af_heart": "Heart", "af_bella": "Bella"}'
+
+    Returns:
+        A dictionary of voice name to display name, with surrounding whitespace removed from both.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is not a JSON object whose keys and values are non-empty strings.
+    """
+    parsed = create_json_object_parser("TTS voice labels")(value)
+
+    labels: dict[str, str] = {}
+    for voice_name, label in parsed.items():
+        if not voice_name.strip():
+            raise argparse.ArgumentTypeError("Invalid TTS voice labels: voice names must be non-empty strings")
+        if not isinstance(label, str) or not label.strip():
+            raise argparse.ArgumentTypeError(
+                f"Invalid TTS voice labels: the label for '{voice_name}' must be a non-empty string"
+            )
+        labels[voice_name.strip()] = label.strip()
+
+    return labels
+
+
 def parse_positive_int(value: str) -> int:
     """
     Parse an argparse value that must be a whole number of at least 1.

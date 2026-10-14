@@ -1,5 +1,6 @@
 import logging
 from collections import Counter
+from collections.abc import Mapping
 from enum import Enum
 from urllib.parse import urlparse
 
@@ -240,6 +241,45 @@ def create_tts_voices(
     ordered_models = _get_ordered_unique_models(tts_models, tts_streaming_models)
     model_voice_pairs = [(model_name, voice_name) for model_name in ordered_models for voice_name in tts_voices]
     return _create_tts_voice_models(model_voice_pairs, tts_url, languages)
+
+
+def apply_tts_voice_labels(tts_voices: list[TtsVoiceModel], voice_labels: Mapping[str, str]) -> None:
+    """
+    Set the description of every TTS voice that has a configured display name.
+
+    Wyoming clients such as Home Assistant show a voice's description instead of its name in their voice pickers.
+    Only the description changes; the voice name that clients send back and the backend voice name stay as they are.
+
+    A label is looked up by the public voice name first (for example "alloy (tts-1)") and then by the raw backend
+    voice name (for example "alloy"). One label can therefore cover a voice offered by several models while a
+    more specific label can still tell them apart. A label found by the backend voice name keeps the suffix that
+    tells the public names apart (for example "Allie (tts-1)"), so the voices stay distinguishable. Labels that
+    match no voice are logged and ignored.
+
+    Args:
+        tts_voices (list[TtsVoiceModel]): Voices to update in place.
+        voice_labels (Mapping[str, str]): Display names keyed by voice name.
+    """
+    known_names: set[str] = set()
+    for voice in tts_voices:
+        known_names.update((voice.name, voice.backend_voice_name))
+        if voice.name in voice_labels:
+            voice.description = voice_labels[voice.name]
+        elif voice.backend_voice_name in voice_labels:
+            suffix = (
+                voice.name.removeprefix(voice.backend_voice_name)
+                if voice.name.startswith(voice.backend_voice_name)
+                else ""
+            )
+            voice.description = voice_labels[voice.backend_voice_name] + suffix
+
+    for key in voice_labels:
+        if key not in known_names:
+            _LOGGER.warning(
+                "Ignoring TTS voice label for unknown voice '%s'. Available voices: %s",
+                key,
+                sorted(voice.name for voice in tts_voices),
+            )
 
 
 def create_tts_programs(
