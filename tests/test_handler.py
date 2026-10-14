@@ -763,6 +763,68 @@ class TestOpenAIEventHandlerComprehensive:
         assert transcript_found
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("late_model", [None, "gpt-realtime-whisper"])
+    async def test_http_audio_start_uses_default_model_despite_late_transcribe(
+        self, enhanced_handler, mock_info, mock_clients, late_model
+    ):
+        """An optional/late Transcribe cannot move an HTTP recording to Realtime."""
+        from openai.types.audio.transcription import Transcription
+
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models.append(Mock(name="gpt-realtime-whisper", languages=["en"]))
+        mock_info.asr[0].models[-1].name = "gpt-realtime-whisper"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
+
+        await enhanced_handler.handle_event(Event(type="audio-start"))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
+        )
+        if late_model:
+            assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": late_model}))
+        await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        assert stt_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
+        stt_client.realtime.connect.assert_not_called()
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "transcript-start", "transcript", "transcript-stop"
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("late_model", [None, "whisper-1"])
+    async def test_realtime_audio_start_uses_default_model_despite_late_transcribe(
+        self, enhanced_handler, mock_info, mock_clients, late_model
+    ):
+        """An optional/late Transcribe cannot move a Realtime recording to HTTP."""
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+        mock_info.asr[0].models.append(Mock(name="whisper-1", languages=["en"]))
+        mock_info.asr[0].models[-1].name = "whisper-1"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        connection = _FakeRealtimeConnection(
+            [_FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hello")]
+        )
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+        stt_client.audio.transcriptions.create = AsyncMock()
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
+        )
+        if late_model:
+            assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": late_model}))
+        await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        assert connection.input_audio_buffer.committed is True
+        assert connection.session.update.call_args.kwargs["session"]["audio"]["input"]["transcription"]["model"] == (
+            "gpt-realtime-whisper"
+        )
+        stt_client.audio.transcriptions.create.assert_not_called()
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "transcript-start", "transcript", "transcript-stop"
+        ]
+
+    @pytest.mark.asyncio
     async def test_handle_realtime_transcription_flow(self, enhanced_handler, mock_info, mock_clients):
         """Test realtime STT emits deltas, final transcript, and cleanup without audio transcriptions API."""
         stt_client, _ = mock_clients

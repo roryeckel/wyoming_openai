@@ -445,6 +445,8 @@ When you make changes to your configuration such as updating models, voices, or 
 
 Home Assistant uses the Wyoming Protocol integration to communicate with the Wyoming OpenAI proxy server. The proxy server then communicates with the OpenAI API to perform the requested ASR or TTS tasks. The results are then sent back to Home Assistant.
 
+For STT, `transcribe` is optional: if it has not arrived by `audio-start`, the default model (or the selected ASR program's default) is used. The model and HTTP/Realtime transport are fixed for that recording; a later `transcribe` cannot switch them. Send `transcribe` before `audio-start` to select a different model or a Realtime transport.
+
 ```mermaid
 sequenceDiagram
   participant HA as Home Assistant
