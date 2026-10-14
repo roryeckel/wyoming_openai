@@ -69,21 +69,10 @@ async def main():
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
-    stt_extra_body_env = os.getenv("STT_EXTRA_BODY")
-    stt_extra_body_default = None
-    if stt_extra_body_env:
-        try:
-            stt_extra_body_default = stt_extra_body_parser(stt_extra_body_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
-
-    tts_extra_body_env = os.getenv("TTS_EXTRA_BODY")
-    tts_extra_body_default = None
-    if tts_extra_body_env:
-        try:
-            tts_extra_body_default = tts_extra_body_parser(tts_extra_body_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
+    # argparse parses string defaults only when the option is absent. Keep JSON env
+    # values raw so explicit CLI options and --help do not parse an invalid env value.
+    stt_extra_body_default = (os.getenv("STT_EXTRA_BODY") or "").strip() or None
+    tts_extra_body_default = (os.getenv("TTS_EXTRA_BODY") or "").strip() or None
 
     # General configuration
     parser.add_argument(

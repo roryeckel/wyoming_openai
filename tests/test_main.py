@@ -9,6 +9,51 @@ from wyoming_openai.compatibility import create_tts_voices
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "env_var,option", [("STT_EXTRA_BODY", "--stt-extra-body"), ("TTS_EXTRA_BODY", "--tts-extra-body")]
+)
+async def test_main_cli_extra_body_overrides_invalid_env(monkeypatch, env_var, option):
+    monkeypatch.setenv(env_var, "{bad")
+    kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, option, '{"custom":true}')
+    assert kwargs[env_var.lower()] == {"custom": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "env_var,option", [("STT_EXTRA_BODY", "--stt-extra-body"), ("TTS_EXTRA_BODY", "--tts-extra-body")]
+)
+async def test_main_invalid_extra_body_env_reports_option_and_full_usage(monkeypatch, capsys, env_var, option):
+    monkeypatch.setenv(env_var, "{bad")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert option in err
+    assert "--stt-models" in err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_var", ["STT_EXTRA_BODY", "TTS_EXTRA_BODY"])
+async def test_main_help_ignores_invalid_extra_body_env(monkeypatch, capsys, env_var):
+    monkeypatch.setenv(env_var, "{bad")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 0
+    assert "--stt-extra-body" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_var", ["STT_EXTRA_BODY", "TTS_EXTRA_BODY"])
+@pytest.mark.parametrize("value", ["", " ", "\n"])
+async def test_main_whitespace_extra_body_env_is_unset(monkeypatch, env_var, value):
+    monkeypatch.setenv(env_var, value)
+    kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+    assert kwargs[env_var.lower()] is None
+
+
+@pytest.mark.asyncio
 async def test_main_rejects_non_object_stt_extra_body_env(monkeypatch, capsys):
     monkeypatch.setenv("STT_EXTRA_BODY", '["not-an-object"]')
     monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
