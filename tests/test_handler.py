@@ -937,6 +937,61 @@ class TestOpenAIEventHandlerComprehensive:
         assert len(converted) == 6
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("width,channels", [(1, 1), (2, 1), (3, 1), (4, 1), (1, 2), (2, 2), (3, 2), (4, 2)])
+    async def test_realtime_pcm_keeps_partial_frames_between_chunks(self, enhanced_handler, width, channels):
+        """Chunk boundaries must not shift PCM samples or discard stereo frames."""
+        audio = bytes(range(width * channels * 5))
+        connection = Mock()
+        connection.input_audio_buffer.append = AsyncMock()
+        enhanced_handler._realtime_connection = connection
+        enhanced_handler._is_recording = True
+        enhanced_handler._audio_sample_rate = 24000
+        enhanced_handler._audio_width = width
+        enhanced_handler._audio_channels = channels
+        for part in (audio[:1], audio[1:width * channels + 1], audio[width * channels + 1:]):
+            await enhanced_handler.handle_event(
+                Event(type="audio-chunk", data={"rate": 24000, "width": width, "channels": channels}, payload=part)
+            )
+        sent = b"".join(
+            base64.b64decode(call.kwargs["audio"]) for call in connection.input_audio_buffer.append.call_args_list
+        )
+        expected = enhanced_handler._convert_audio_to_realtime_pcm(
+            audio, sample_rate=24000, audio_width=width, audio_channels=channels
+        )
+        assert sent == expected
+        assert all(
+            len(base64.b64decode(call.kwargs["audio"])) % 2 == 0
+            for call in connection.input_audio_buffer.append.call_args_list
+        )
+        assert enhanced_handler._realtime_pcm_tail == b""
+
+    def test_realtime_pcm_decodes_signed_24_bit_samples(self, enhanced_handler):
+        assert enhanced_handler._decode_pcm_samples(b"\x00\x00\x80\xff\xff\x7f", 3) == [-32768, 32767]
+
+    @pytest.mark.asyncio
+    async def test_realtime_pcm_partial_frame_is_cleared_on_cleanup(self, enhanced_handler):
+        connection = Mock()
+        connection.input_audio_buffer.append = AsyncMock()
+        connection.close = AsyncMock()
+        enhanced_handler._realtime_connection = connection
+        enhanced_handler._is_recording = True
+        enhanced_handler._audio_sample_rate = 24000
+        enhanced_handler._audio_width = 2
+        enhanced_handler._audio_channels = 1
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\xff")
+        )
+        await enhanced_handler._cleanup_realtime_transcription()
+        enhanced_handler._realtime_connection = connection
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x01\x02")
+        )
+        sent = b"".join(
+            base64.b64decode(call.kwargs["audio"]) for call in connection.input_audio_buffer.append.call_args_list
+        )
+        assert sent == b"\x01\x02"
+
+    @pytest.mark.asyncio
     async def test_realtime_transcription_session_includes_configured_prompt(self, enhanced_handler, mock_info):
         """Test realtime STT preserves configured prompt in the session payload."""
         mock_info.asr[0].models[0].name = "gpt-4o-transcribe"

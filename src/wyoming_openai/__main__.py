@@ -10,6 +10,7 @@ from wyoming.server import AsyncServer
 from .compatibility import (
     CustomAsyncOpenAI,
     OpenAIBackend,
+    apply_tts_voice_labels,
     asr_model_to_string,
     create_asr_programs,
     create_info,
@@ -26,6 +27,7 @@ from .utilities import (
     create_json_object_parser,
     get_realtime_tts_speed,
     parse_positive_int,
+    parse_voice_labels,
     validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
@@ -74,20 +76,12 @@ async def main():
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
 
-    def json_env_default(env_name: str, json_parser):
-        """Parse a JSON object from an environment variable, or None when it is unset."""
-        value = os.getenv(env_name)
-        if not value:
-            return None
-        try:
-            return json_parser(value)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
-
-    stt_extra_body_default = json_env_default("STT_EXTRA_BODY", stt_extra_body_parser)
-    stt_realtime_extra_body_default = json_env_default("STT_REALTIME_EXTRA_BODY", stt_realtime_extra_body_parser)
-    tts_extra_body_default = json_env_default("TTS_EXTRA_BODY", tts_extra_body_parser)
-    tts_realtime_extra_body_default = json_env_default("TTS_REALTIME_EXTRA_BODY", tts_realtime_extra_body_parser)
+    # argparse parses string defaults only when the option is absent. Keep JSON env
+    # values raw so explicit CLI options and --help do not parse an invalid env value.
+    stt_extra_body_default = (os.getenv("STT_EXTRA_BODY") or "").strip() or None
+    stt_realtime_extra_body_default = (os.getenv("STT_REALTIME_EXTRA_BODY") or "").strip() or None
+    tts_extra_body_default = (os.getenv("TTS_EXTRA_BODY") or "").strip() or None
+    tts_realtime_extra_body_default = (os.getenv("TTS_REALTIME_EXTRA_BODY") or "").strip() or None
 
     # General configuration
     parser.add_argument(
@@ -197,6 +191,15 @@ async def main():
         default=os.getenv("TTS_VOICES", "").split(),
         required=False,
         help="List of available TTS voices",
+    )
+    parser.add_argument(
+        "--tts-voice-labels",
+        type=parse_voice_labels,
+        default=os.getenv("TTS_VOICE_LABELS") or None,
+        help=(
+            "Optional JSON object mapping a TTS voice name to the display name shown by Wyoming clients such as "
+            'Home Assistant, for example \'{"af_heart": "Heart"}\'. Only the displayed name changes'
+        ),
     )
     parser.add_argument(
         "--tts-backend",
@@ -404,6 +407,12 @@ async def main():
                 args.languages,
                 realtime_model_names=args.tts_realtime_models,
             )
+
+        if args.tts_voice_labels:
+            if tts_requested:
+                apply_tts_voice_labels(tts_voices, args.tts_voice_labels)
+            else:
+                _logger.warning("TTS voice labels are set but TTS is not configured; ignoring them")
 
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 

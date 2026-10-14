@@ -265,6 +265,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_connection: Any | None = None
         self._realtime_receive_task: asyncio.Task[None] | None = None
         self._realtime_transcript_future: asyncio.Future[str] | None = None
+        self._realtime_pcm_tail: bytes = b""
 
         # State for event logging
         self._last_event_type: str | None = None
@@ -424,6 +425,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
         """Handle start of audio stream"""
+        self._realtime_pcm_tail = b""
         self._audio_sample_rate = sample_rate
         self._audio_width = audio_width
         self._audio_channels = audio_channels
@@ -498,8 +500,16 @@ class OpenAIEventHandler(AsyncEventHandler):
             return
 
         try:
+            frame_size = self._audio_width * self._audio_channels
+            if frame_size <= 0:
+                raise ValueError("Realtime PCM frame size must be positive")
+            pending = self._realtime_pcm_tail + chunk.audio
+            complete_size = len(pending) // frame_size * frame_size
+            self._realtime_pcm_tail = pending[complete_size:]
+            if not complete_size:
+                return
             audio = self._convert_audio_to_realtime_pcm(
-                chunk.audio,
+                pending[:complete_size],
                 sample_rate=self._audio_sample_rate,
                 audio_width=self._audio_width,
                 audio_channels=self._audio_channels,
@@ -667,6 +677,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task."""
+        self._realtime_pcm_tail = b""
         receive_task = self._realtime_receive_task
         self._realtime_receive_task = None
         if receive_task and not receive_task.done():
@@ -721,6 +732,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if audio_width == 2:
             return list(struct.unpack(f"<{sample_count}h", audio))
+
+        if audio_width == 3:
+            return [int.from_bytes(audio[i : i + 3], "little", signed=True) >> 8 for i in range(0, len(audio), 3)]
 
         if audio_width == 4:
             return [int.from_bytes(audio[i : i + 4], "little", signed=True) >> 16 for i in range(0, len(audio), 4)]
