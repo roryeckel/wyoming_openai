@@ -79,6 +79,8 @@ class _AudioStreamState:
     model: AsrModel | None  # None when no model can be used, and then nothing is sent to the backend
     language: str | None
     realtime: bool  # Transcribed over a Realtime session rather than /v1/audio/transcriptions
+    streaming: bool  # /v1/audio/transcriptions responds with a stream of transcript deltas
+    transcript_started: bool = False  # TranscriptStart was sent while the audio was still arriving
 
 
 class TtsStreamError(Exception):
@@ -287,6 +289,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._selected_asr_program = program
                 matched = True
                 _LOGGER.debug("Selected ASR program: %s", name)
+                if self._current_asr_model is not None and self._current_asr_model not in program.models:
+                    # A model selected by an earlier transcribe would outlive the program, which no longer offers
+                    # it; streams without a new transcribe use the program's default instead
+                    _LOGGER.debug("Dropping model %s, which %s does not offer", self._current_asr_model.name, name)
+                    self._current_asr_model = None
+                    self._current_language = None
                 break
 
         for program in self._wyoming_info.tts:
@@ -345,6 +353,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not audio_stream.realtime and not self._is_asr_model_realtime(model.name):
             audio_stream.model = model
             audio_stream.language = language
+            audio_stream.streaming = self._is_asr_model_streaming(model.name)
             _LOGGER.debug("Transcribe during the recording selected model %s, language %s", model.name, language)
             return
 
@@ -363,19 +372,28 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
         """Handle start of audio stream"""
-        # A stream the client never stopped must not leave its Realtime session open under this one
+        # A stream the client never stopped must not leave its recording or Realtime session under this one
+        previous_stream = self._audio_stream
+        self._discard_recording()
         await self._cleanup_realtime_transcription()
+        if previous_stream is not None and previous_stream.transcript_started:
+            # Its transcript sequence is closed, but without a Transcript: a client reads the first one it gets
+            # as the result of the request it is waiting for, which is now this stream
+            await self.write_event(TranscriptStop().event())
 
-        # Without a transcribe the default model is used. It is resolved for every stream rather than kept, so a
+        # Without a selection the default model is used. It is resolved for every stream rather than kept, so a
         # program selected since then is honoured
-        model = None if self._transcribe_rejected else self._current_asr_model or self._get_asr_model()
+        if self._transcribe_rejected:
+            model = None
+        else:
+            model = self._current_asr_model or self._get_asr_model()
         audio_stream = _AudioStreamState(
             model=model,
             language=self._current_language,
             realtime=model is not None and self._is_asr_model_realtime(model.name),
+            streaming=model is not None and self._is_asr_model_streaming(model.name),
         )
         self._audio_stream = audio_stream
-        self._realtime_pcm_tail = b""
         self._audio_sample_rate = sample_rate
         self._audio_width = audio_width
         self._audio_channels = audio_channels
@@ -393,6 +411,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         _LOGGER.info(
             "Recording started at %d Hz, %d channels, %d bytes per sample", sample_rate, audio_channels, audio_width
         )
+
+    def _discard_recording(self) -> None:
+        """Drop the /v1/audio/transcriptions recording of a stream that was never stopped."""
+        if self._wav_write_buffer is not None:
+            with contextlib.suppress(Exception):
+                self._wav_write_buffer.close()
+            self._wav_write_buffer = None
+        if self._wav_buffer is not None:
+            self._wav_buffer.close()
+            self._wav_buffer = None
+        self._is_recording = False
 
     async def _handle_audio_chunk(self, chunk: AudioChunk) -> None:
         """Handle audio chunk"""
@@ -425,6 +454,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             await connection.session.update(session=self._get_realtime_transcription_session(audio_stream))
             self._is_recording = True
             await self.write_event(TranscriptStart().event())
+            audio_stream.transcript_started = True
             _LOGGER.info(
                 "Realtime recording started at %d Hz, %d channels, %d bytes per sample",
                 sample_rate,
@@ -617,10 +647,14 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_connection_manager = None
         self._realtime_connection = None
 
-        if connection_manager is not None:
-            await connection_manager.__aexit__(None, None, None)
-        elif connection is not None:
-            await connection.close()
+        # A session that fails to close is gone either way; that must not fail the event that closes it
+        try:
+            if connection_manager is not None:
+                await connection_manager.__aexit__(None, None, None)
+            elif connection is not None:
+                await connection.close()
+        except Exception as err:
+            _LOGGER.warning("Error closing realtime transcription session: %s", err)
 
     def _convert_audio_to_realtime_pcm(
         self, audio: bytes, *, sample_rate: int, audio_width: int, audio_channels: int
@@ -748,7 +782,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             use_streaming = get_extra_body_boolean_field(
                 extra_body,
                 field_name="stream",
-                default=self._is_asr_model_streaming(model.name),
+                default=audio_stream.streaming,
                 body_name="STT",
             )
 

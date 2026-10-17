@@ -930,7 +930,7 @@ class TestOpenAIEventHandlerComprehensive:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("transcribe", [{"name": "unknown-model"}, {"name": "whisper-1", "language": "zh"}])
-    async def test_late_transcribe_that_is_refused_ends_the_connection(
+    async def test_late_transcribe_is_refused_like_one_before_the_recording(
         self, enhanced_handler, mock_clients, transcribe
     ):
         """A transcribe refused during a recording is refused as it would be before one."""
@@ -975,6 +975,69 @@ class TestOpenAIEventHandlerComprehensive:
         assert manager.exited is True
         assert manager.connection.input_audio_buffer.appended_audio == []
         assert stt_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
+        # Closed without a Transcript, which the client would take as the result of the new stream
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "transcript-start",
+            "transcript-stop",
+            "transcript-start",
+            "transcript",
+            "transcript-stop",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_audio_start_survives_a_stale_session_that_fails_to_close(
+        self, enhanced_handler, mock_info, mock_clients, caplog
+    ):
+        """A Realtime session that errors while closing does not fail the stream that replaces it."""
+        from openai.types.audio.transcription import Transcription
+
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models.append(_asr_model("gpt-realtime-whisper", ["en"]))
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([]))
+        manager.__aexit__ = AsyncMock(side_effect=ConnectionResetError("reset while closing"))
+        stt_client.realtime.connect = Mock(return_value=manager)
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
+
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "whisper-1"}))
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+            await self._stream_audio(enhanced_handler)
+
+        assert "Error closing realtime transcription session" in caplog.text
+        assert stt_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
+
+    @pytest.mark.asyncio
+    async def test_chunks_follow_the_stream_whose_realtime_session_failed_to_open(
+        self, enhanced_handler, mock_info, mock_clients, caplog
+    ):
+        """An unstopped recording is dropped, and the next stream's chunks are not written into it."""
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models.append(_asr_model("gpt-realtime-whisper", ["en"]))
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        stt_client.realtime.connect = Mock(side_effect=RuntimeError("invalid api key"))
+        stt_client.audio.transcriptions.create = AsyncMock()
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
+        )
+        # The client abandons that recording and starts a Realtime stream whose session cannot be opened
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+        assert enhanced_handler._wav_buffer is None
+        assert enhanced_handler._is_recording is False
+
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+            await enhanced_handler.handle_event(
+                Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
+            )
+            await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        assert "Received realtime audio chunk without an active recording" in caplog.text
+        assert enhanced_handler._wav_buffer is None
+        stt_client.audio.transcriptions.create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_handle_realtime_transcription_flow(self, enhanced_handler, mock_info, mock_clients):
@@ -1110,7 +1173,7 @@ class TestOpenAIEventHandlerComprehensive:
         connection = Mock()
         connection.input_audio_buffer.append = AsyncMock()
         enhanced_handler._realtime_connection = connection
-        enhanced_handler._audio_stream = _AudioStreamState(model=None, language=None, realtime=True)
+        enhanced_handler._audio_stream = _AudioStreamState(model=None, language=None, realtime=True, streaming=False)
         enhanced_handler._is_recording = True
         enhanced_handler._audio_sample_rate = 24000
         enhanced_handler._audio_width = width
@@ -1141,7 +1204,7 @@ class TestOpenAIEventHandlerComprehensive:
         connection.input_audio_buffer.append = AsyncMock()
         connection.close = AsyncMock()
         enhanced_handler._realtime_connection = connection
-        enhanced_handler._audio_stream = _AudioStreamState(model=None, language=None, realtime=True)
+        enhanced_handler._audio_stream = _AudioStreamState(model=None, language=None, realtime=True, streaming=False)
         enhanced_handler._is_recording = True
         enhanced_handler._audio_sample_rate = 24000
         enhanced_handler._audio_width = 2
@@ -1170,7 +1233,9 @@ class TestOpenAIEventHandlerComprehensive:
         )
 
         session = enhanced_handler._get_realtime_transcription_session(
-            _AudioStreamState(model=enhanced_handler._current_asr_model, language="en", realtime=True)
+            _AudioStreamState(
+                model=enhanced_handler._current_asr_model, language="en", realtime=True, streaming=False
+            )
         )
 
         assert session["audio"]["input"]["transcription"] == {
@@ -2315,6 +2380,56 @@ async def test_default_model_follows_a_program_selected_between_streams(multi_pr
 
     models = [call.kwargs["model"] for call in stt_client.audio.transcriptions.create.call_args_list]
     assert models == ["gpt-4o-transcribe", "whisper-1"]
+
+
+async def _stream_without_transcribe(handler):
+    """Send one audio stream without a transcribe."""
+    await handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+    await handler.handle_event(
+        Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
+    )
+    await handler.handle_event(Event(type="audio-stop"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transcribed_model", "expected_model"),
+    [("gpt-4o-transcribe", "whisper-1"), ("whisper-1", "whisper-1")],
+)
+async def test_select_program_drops_a_transcribe_selection_it_does_not_offer(
+    multi_program_handler, transcribed_model, expected_model
+):
+    """A model selected by an earlier transcribe only outlives a select-program whose program offers it."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client = multi_program_handler._stt_client
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
+
+    assert await multi_program_handler.handle_event(Event(type="transcribe", data={"name": transcribed_model}))
+    assert await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+    await _stream_without_transcribe(multi_program_handler)
+
+    kwargs = stt_client.audio.transcriptions.create.call_args.kwargs
+    assert kwargs["model"] == expected_model
+    # whisper-1 is not a streaming model, so its response is not requested as a stream
+    assert kwargs["stream"] is omit
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_is_decided_at_audio_start(multi_program_handler):
+    """A program selected during a recording does not change how its response is requested."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client = multi_program_handler._stt_client
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
+
+    assert await multi_program_handler.handle_event(Event(type="transcribe", data={"name": "gpt-4o-transcribe"}))
+    await multi_program_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+    assert await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+    await multi_program_handler.handle_event(Event(type="audio-stop"))
+
+    kwargs = stt_client.audio.transcriptions.create.call_args.kwargs
+    assert (kwargs["model"], kwargs["stream"]) == ("gpt-4o-transcribe", True)
 
 
 @pytest.mark.asyncio
