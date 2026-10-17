@@ -127,6 +127,17 @@ def _asr_model(name: str, languages: list[str]) -> Mock:
     return model
 
 
+async def _stream_audio(handler, rate=16000, transcribe=None):
+    """Send one audio stream, with a transcribe in the middle of it when given."""
+    await handler.handle_event(Event(type="audio-start", data={"rate": rate, "width": 2, "channels": 1}))
+    await handler.handle_event(
+        Event(type="audio-chunk", data={"rate": rate, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
+    )
+    if transcribe is not None:
+        assert await handler.handle_event(Event(type="transcribe", data=transcribe))
+    await handler.handle_event(Event(type="audio-stop"))
+
+
 class _FakeRealtimeServerEvent:
     def __init__(self, event_type, **kwargs):
         self.type = event_type
@@ -830,16 +841,6 @@ class TestOpenAIEventHandlerComprehensive:
             "transcript-start", "transcript", "transcript-stop"
         ]
 
-    async def _stream_audio(self, handler, rate=16000, transcribe=None):
-        """Send one audio stream, with a transcribe in the middle of it when given."""
-        await handler.handle_event(Event(type="audio-start", data={"rate": rate, "width": 2, "channels": 1}))
-        await handler.handle_event(
-            Event(type="audio-chunk", data={"rate": rate, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
-        )
-        if transcribe is not None:
-            assert await handler.handle_event(Event(type="transcribe", data=transcribe))
-        await handler.handle_event(Event(type="audio-stop"))
-
     @pytest.mark.asyncio
     async def test_late_transcribe_switches_an_http_recording_to_another_http_model(
         self, enhanced_handler, mock_info, mock_clients
@@ -851,7 +852,7 @@ class TestOpenAIEventHandlerComprehensive:
         mock_info.asr[0].models.append(_asr_model("gpt-transcribe", ["en", "fr"]))
         stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Bonjour"))
 
-        await self._stream_audio(enhanced_handler, transcribe={"name": "gpt-transcribe", "language": "fr"})
+        await _stream_audio(enhanced_handler, transcribe={"name": "gpt-transcribe", "language": "fr"})
 
         kwargs = stt_client.audio.transcriptions.create.call_args.kwargs
         assert (kwargs["model"], kwargs["language"]) == ("gpt-transcribe", "fr")
@@ -873,13 +874,13 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
 
         with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
-            await self._stream_audio(enhanced_handler, transcribe={"name": "gpt-realtime-whisper"})
+            await _stream_audio(enhanced_handler, transcribe={"name": "gpt-realtime-whisper"})
 
         assert stt_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
         assert "keeps model whisper-1" in caplog.text
         stt_client.realtime.connect.assert_not_called()
 
-        await self._stream_audio(enhanced_handler, rate=24000)
+        await _stream_audio(enhanced_handler, rate=24000)
 
         session = connection.session.update.call_args.kwargs["session"]
         assert session["audio"]["input"]["transcription"]["model"] == "gpt-realtime-whisper"
@@ -902,7 +903,7 @@ class TestOpenAIEventHandlerComprehensive:
             Event(type="transcribe", data={"name": "gpt-realtime-whisper", "language": "en"})
         )
         with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
-            await self._stream_audio(
+            await _stream_audio(
                 enhanced_handler, rate=24000, transcribe={"name": "gpt-realtime-whisper", "language": "fr"}
             )
 
@@ -924,7 +925,7 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
 
         with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
-            await self._stream_audio(enhanced_handler, rate=24000, transcribe={"name": "gpt-realtime-whisper"})
+            await _stream_audio(enhanced_handler, rate=24000, transcribe={"name": "gpt-realtime-whisper"})
 
         assert "arrived during" not in caplog.text
 
@@ -970,7 +971,7 @@ class TestOpenAIEventHandlerComprehensive:
         await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
         # The client gives up on that stream without an audio stop and selects an HTTP model
         assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "whisper-1"}))
-        await self._stream_audio(enhanced_handler)
+        await _stream_audio(enhanced_handler)
 
         assert manager.exited is True
         assert manager.connection.input_audio_buffer.appended_audio == []
@@ -1007,7 +1008,7 @@ class TestOpenAIEventHandlerComprehensive:
         await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
         assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "whisper-1"}))
         with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
-            await self._stream_audio(enhanced_handler)
+            await _stream_audio(enhanced_handler)
 
         assert "Error closing realtime transcription session" in caplog.text
         assert stt_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
@@ -2369,30 +2370,12 @@ async def test_default_model_follows_a_program_selected_between_streams(multi_pr
     stt_client = multi_program_handler._stt_client
     stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
 
-    async def stream_audio():
-        await multi_program_handler.handle_event(
-            Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1})
-        )
-        await multi_program_handler.handle_event(
-            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
-        )
-        await multi_program_handler.handle_event(Event(type="audio-stop"))
-
-    await stream_audio()
+    await _stream_audio(multi_program_handler)
     assert await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
-    await stream_audio()
+    await _stream_audio(multi_program_handler)
 
     models = [call.kwargs["model"] for call in stt_client.audio.transcriptions.create.call_args_list]
     assert models == ["gpt-4o-transcribe", "whisper-1"]
-
-
-async def _stream_without_transcribe(handler):
-    """Send one audio stream without a transcribe."""
-    await handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
-    await handler.handle_event(
-        Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
-    )
-    await handler.handle_event(Event(type="audio-stop"))
 
 
 @pytest.mark.asyncio
@@ -2413,7 +2396,7 @@ async def test_select_program_drops_a_transcribe_selection_it_does_not_offer(
         Event(type="transcribe", data={"name": transcribed_model, "language": "en"})
     )
     assert await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
-    await _stream_without_transcribe(multi_program_handler)
+    await _stream_audio(multi_program_handler)
 
     kwargs = stt_client.audio.transcriptions.create.call_args.kwargs
     assert (kwargs["model"], kwargs["language"]) == (expected_model, expected_language)

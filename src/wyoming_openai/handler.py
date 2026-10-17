@@ -415,7 +415,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         )
 
     def _discard_recording(self) -> None:
-        """Drop the /v1/audio/transcriptions recording of a stream that was never stopped."""
+        """Drop the /v1/audio/transcriptions recording, once sent or when its stream was never stopped."""
         if self._wav_write_buffer is not None:
             with contextlib.suppress(Exception):
                 self._wav_write_buffer.close()
@@ -840,9 +840,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error during transcription: %s", e)
         finally:
-            if self._wav_buffer:
-                self._wav_buffer.close()
-                self._wav_buffer = None
+            self._discard_recording()
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
         """Get an ASR model by name or None.
