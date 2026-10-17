@@ -279,7 +279,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         selections in other domains remain active for the lifetime of the
         connection (per the Wyoming protocol), so clients can pick a distinct
         program per domain before sending request events. Unrecognized names
-        are dropped per the Wyoming protocol.
+        are dropped per the Wyoming protocol. Selecting an ASR program that does
+        not offer the model chosen by an earlier transcribe drops that model, so
+        audio streams without a new transcribe use the program's default.
         """
         name = select_program.name
         matched = False

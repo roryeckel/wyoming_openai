@@ -994,8 +994,12 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client, _ = mock_clients
         mock_info.asr[0].models.append(_asr_model("gpt-realtime-whisper", ["en"]))
         enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
-        manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([]))
-        manager.__aexit__ = AsyncMock(side_effect=ConnectionResetError("reset while closing"))
+        class _FailingCloseManager(_FakeRealtimeConnectionManager):
+            # On the class, so the failure holds however the handler exits the manager
+            async def __aexit__(self, exc_type, exc, tb):
+                raise ConnectionResetError("reset while closing")
+
+        manager = _FailingCloseManager(_FakeRealtimeConnection([]))
         stt_client.realtime.connect = Mock(return_value=manager)
         stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
 
@@ -2393,24 +2397,26 @@ async def _stream_without_transcribe(handler):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("transcribed_model", "expected_model"),
-    [("gpt-4o-transcribe", "whisper-1"), ("whisper-1", "whisper-1")],
+    ("transcribed_model", "expected_model", "expected_language"),
+    [("gpt-4o-transcribe", "whisper-1", omit), ("whisper-1", "whisper-1", "en")],
 )
 async def test_select_program_drops_a_transcribe_selection_it_does_not_offer(
-    multi_program_handler, transcribed_model, expected_model
+    multi_program_handler, transcribed_model, expected_model, expected_language
 ):
-    """A model selected by an earlier transcribe only outlives a select-program whose program offers it."""
+    """A model selected by an earlier transcribe, with its language, only outlives a program that offers it."""
     from openai.types.audio.transcription import Transcription
 
     stt_client = multi_program_handler._stt_client
     stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hello"))
 
-    assert await multi_program_handler.handle_event(Event(type="transcribe", data={"name": transcribed_model}))
+    assert await multi_program_handler.handle_event(
+        Event(type="transcribe", data={"name": transcribed_model, "language": "en"})
+    )
     assert await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
     await _stream_without_transcribe(multi_program_handler)
 
     kwargs = stt_client.audio.transcriptions.create.call_args.kwargs
-    assert kwargs["model"] == expected_model
+    assert (kwargs["model"], kwargs["language"]) == (expected_model, expected_language)
     # whisper-1 is not a streaming model, so its response is not requested as a stream
     assert kwargs["stream"] is omit
 
