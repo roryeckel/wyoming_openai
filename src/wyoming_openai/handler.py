@@ -127,6 +127,7 @@ TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
 # Sent as a Wyoming error event; the cause is in the log
 TTS_FAILED_ERROR = "Text-to-speech synthesis failed"
+STT_FAILED_ERROR = "Speech-to-text transcription failed"
 SHUTDOWN_ERROR = "Server is shutting down"
 
 @dataclass(frozen=True)
@@ -266,6 +267,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_receive_task: asyncio.Task[None] | None = None
         self._realtime_transcript_future: asyncio.Future[str] | None = None
         self._realtime_pcm_tail: bytes = b""
+        self._realtime_start_failed: bool = False  # The session of the current audio stream could not be opened
 
         # State for event logging
         self._last_event_type: str | None = None
@@ -426,6 +428,7 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
         """Handle start of audio stream"""
         self._realtime_pcm_tail = b""
+        self._realtime_start_failed = False
         self._audio_sample_rate = sample_rate
         self._audio_width = audio_width
         self._audio_channels = audio_channels
@@ -459,10 +462,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Open an OpenAI Realtime transcription session."""
         if not self._current_asr_model:
             _LOGGER.warning("No ASR model set for realtime transcription")
+            await self._fail_realtime_audio_start()
             return
 
         if self._stt_client is None:
             _LOGGER.error("No STT client configured for realtime transcription")
+            await self._fail_realtime_audio_start()
             return
 
         await self._cleanup_realtime_transcription()
@@ -487,8 +492,32 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
         except Exception as err:
             _LOGGER.exception("Error starting realtime transcription: %s", err)
-            self._is_recording = False
             await self._cleanup_realtime_transcription()
+            await self._fail_realtime_audio_start()
+
+    async def _fail_realtime_audio_start(self) -> None:
+        """
+        Report a Realtime session that could not be opened as soon as it fails: a client that reads while it
+        streams audio, such as Home Assistant 2026.10 and later, ends the request instead of recording on.
+        Clients that do not know the error event get the empty transcript at audio stop.
+        """
+        self._is_recording = False
+        self._realtime_start_failed = True
+        await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event())
+
+    async def _report_stt_failure(self, *, transcript_started: bool, error_sent: bool = False) -> None:
+        """
+        Tell the client a transcription failed. The error event comes first, since Home Assistant 2026.8.2 and
+        later stop reading at the first error or transcript; older clients skip it and take the empty transcript.
+        Home Assistant closes the connection once it has a result, so the writes after the error are bounded and
+        stop at the first one the client does not take.
+        """
+        if not error_sent and not await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event()):
+            return
+        if not await self._write_event_bounded(Transcript(text="").event()):
+            return
+        if transcript_started:
+            await self._write_event_bounded(TranscriptStop().event())
 
     async def _handle_realtime_audio_chunk(self, chunk: AudioChunk) -> None:
         """Append a Wyoming audio chunk to the OpenAI Realtime input buffer."""
@@ -528,6 +557,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not self._is_recording or self._realtime_connection is None:
             _LOGGER.warning("Received realtime audio stop event without recording")
             await self._cleanup_realtime_transcription()
+            if self._realtime_start_failed:
+                # The error was reported when the session failed to open; clients that do not know it still wait
+                # for a transcript. No TranscriptStart was sent, so no TranscriptStop either
+                self._realtime_start_failed = False
+                await self._report_stt_failure(transcript_started=False, error_sent=True)
             return
 
         self._is_recording = False
@@ -554,14 +588,15 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.warning("Received empty realtime transcription result")
             await self.write_event(Transcript(text=transcript).event())
             transcript_sent = True
+            await self.write_event(TranscriptStop().event())
         except Exception as err:
             _LOGGER.exception("Error during realtime transcription: %s", err)
             if not transcript_sent:
                 # The receiver is stopped first, so no late delta follows the final transcript
                 await self._cleanup_realtime_transcription()
-                await self.write_event(Transcript(text="").event())
+                # TranscriptStart was sent when the session opened
+                await self._report_stt_failure(transcript_started=True)
         finally:
-            await self.write_event(TranscriptStop().event())
             await self._cleanup_realtime_transcription()
 
     async def _enter_realtime_connection(self, connection_manager: Any) -> Any:
@@ -801,6 +836,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._is_recording = False
 
+        transcript_started = False
+        transcript_sent = False
         try:
             # Close the WAV file
             if self._wav_write_buffer:
@@ -811,12 +848,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             self._wav_buffer.seek(0)
 
             if not self._current_asr_model:
-                _LOGGER.warning("No ASR model set for transcription")
-                return
+                raise RuntimeError("No ASR model set for transcription")
 
             if self._stt_client is None:
-                _LOGGER.error("No STT client configured for transcription")
-                return
+                raise RuntimeError("No STT client configured for transcription")
 
             # Send to OpenAI for transcription
             extra_body = self._get_stt_extra_body()
@@ -847,6 +882,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             transcription = await self._stt_client.audio.transcriptions.create(**transcription_kwargs)
 
             await self.write_event(TranscriptStart().event())
+            transcript_started = True
 
             if isinstance(transcription, AsyncStream):
                 _LOGGER.debug("Handling streaming transcription response")
@@ -877,12 +913,16 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await self.write_event(Transcript(text=transcription.text).event())
 
             else:
-                _LOGGER.error("Unexpected transcription response type: %s", type(transcription))
+                raise TypeError(f"Unexpected transcription response type: {type(transcription)}")
 
+            transcript_sent = True
             await self.write_event(TranscriptStop().event())
 
         except Exception as e:
             _LOGGER.exception("Error during transcription: %s", e)
+            # As on the Realtime path, the client is told instead of waiting for a transcript
+            if not transcript_sent:
+                await self._report_stt_failure(transcript_started=transcript_started)
         finally:
             if self._wav_buffer:
                 self._wav_buffer.close()

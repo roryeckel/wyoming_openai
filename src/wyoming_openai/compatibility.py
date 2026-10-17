@@ -293,7 +293,8 @@ def create_tts_voices(
             # Advertising nothing would silently drop these models
             raise ValueError(
                 f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
-                f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}"
+                f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}, "
+                "or remove those models from TTS_REALTIME_MODELS"
             )
 
     model_voice_pairs = [

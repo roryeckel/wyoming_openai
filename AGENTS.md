@@ -38,6 +38,8 @@ ruff check . --fix
 pyright
 ```
 
+If the virtual environment can't stay activated between commands (common in agent shells), point Pyright at it explicitly: `pyright --pythonpath <venv>/Scripts/python.exe` (`<venv>/bin/python` on Linux/macOS).
+
 ### Local Development Setup
 ```bash
 # Install in editable mode

@@ -526,8 +526,12 @@ def validate_realtime_tts_extra_body(extra_body: dict[str, object] | None) -> No
         reason="the voice is chosen per request by the Wyoming client and the speed is set with audio.output.speed",
     )
 
-    audio = extra_body.get("audio", {})
-    if not isinstance(audio, dict) or not isinstance(audio.get("output", {}), dict):
+    # A null audio or audio.output is the same as leaving it out, as get_realtime_tts_audio_output reads it
+    audio = extra_body.get("audio")
+    if audio is None:
+        audio = {}
+    audio_output = audio.get("output") if isinstance(audio, dict) else None
+    if not isinstance(audio, dict) or not (audio_output is None or isinstance(audio_output, dict)):
         raise ValueError("TTS Realtime extra_body audio must be an object whose output, if set, is an object")
 
     output = get_realtime_tts_audio_output(extra_body)

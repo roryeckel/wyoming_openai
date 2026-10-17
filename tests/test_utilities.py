@@ -330,6 +330,9 @@ def test_get_extra_body_boolean_field_returns_default_or_override():
         {"reasoning": {"effort": "low"}},
         {"audio": {"output": {"format": {"type": "audio/pcm"}, "speed": 1}}},
         {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}}},
+        # A null is the same as leaving the object out
+        {"audio": None, "reasoning": {"effort": "low"}},
+        {"audio": {"output": None}},
     ],
 )
 def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body):
@@ -344,6 +347,8 @@ def test_validate_realtime_tts_extra_body_allows_compatible_overrides(extra_body
         ({"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}}, r"audio\.output\.format"),
         ({"audio": {"output": {"format": "pcm16"}}}, r"audio\.output\.format"),
         ({"audio": "pcm"}, "audio must be an object"),
+        ({"audio": False}, "audio must be an object"),
+        ({"audio": {"output": 0}}, "audio must be an object"),
         ({"audio": {"output": {"speed": "fast"}}}, "speed must be a finite number"),
         ({"audio": {"output": {"speed": True}}}, "speed must be a finite number"),
         ({"audio": {"output": {"speed": float("nan")}}}, "speed must be a finite number"),

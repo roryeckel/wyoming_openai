@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from openai import omit
 from wyoming.asr import Transcript, TranscriptChunk
+from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
 from wyoming.server import AsyncTcpServer
@@ -27,6 +28,7 @@ from wyoming_openai.compatibility import (
     create_tts_voices,
 )
 from wyoming_openai.handler import (
+    STT_FAILED_ERROR,
     OpenAIEventHandler,
     TtsStreamError,
     _has_speakable_content,
@@ -896,7 +898,7 @@ class TestOpenAIEventHandlerComprehensive:
         stt_client.realtime.connect.assert_called_once_with(extra_query={"intent": "transcription"})
         stt_client.audio.transcriptions.create.assert_not_called()
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-        assert event_types == ["transcript-start", "transcript", "transcript-stop"]
+        assert event_types == ["transcript-start", "error", "transcript", "transcript-stop"]
         transcript_event = next(
             call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
         )
@@ -921,10 +923,150 @@ class TestOpenAIEventHandlerComprehensive:
         await enhanced_handler._handle_realtime_audio_stop()
 
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-        assert event_types == ["transcript", "transcript-stop"]
-        transcript_event = enhanced_handler.write_event.call_args_list[0].args[0]
+        assert event_types == ["error", "transcript", "transcript-stop"]
+        transcript_event = enhanced_handler.write_event.call_args_list[1].args[0]
         assert Transcript.from_event(transcript_event).text == ""
         connection.input_audio_buffer.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_realtime_session_start_reports_the_error_at_once(
+        self, enhanced_handler, mock_info, mock_clients
+    ):
+        """A Realtime session that cannot be opened is reported right away, and the audio stop gets an empty
+        transcript for clients that do not know the error event."""
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        stt_client.realtime.connect = Mock(side_effect=RuntimeError("invalid api key"))
+
+        assert await enhanced_handler.handle_event(
+            Event(type="transcribe", data={"language": "en", "name": "gpt-realtime-whisper"})
+        )
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+
+        # Before the audio stop, so a client that reads while it streams audio can end the request
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["error"]
+        error = Error.from_event(enhanced_handler.write_event.call_args_list[0].args[0])
+        assert error.text == STT_FAILED_ERROR
+        # The cause stays in the log
+        assert "invalid api key" not in error.text
+
+        await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["error", "transcript"]
+        assert Transcript.from_event(enhanced_handler.write_event.call_args_list[1].args[0]).text == ""
+
+        # A second audio stop without a new audio stream is not answered again
+        enhanced_handler.write_event.reset_mock()
+        await enhanced_handler.handle_event(Event(type="audio-stop"))
+        enhanced_handler.write_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_realtime_audio_stop_without_audio_start_emits_nothing(self, enhanced_handler, mock_info):
+        """A stray Realtime audio stop does not produce a transcript."""
+        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+
+        assert await enhanced_handler.handle_event(
+            Event(type="transcribe", data={"language": "en", "name": "gpt-realtime-whisper"})
+        )
+        await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        enhanced_handler.write_event.assert_not_called()
+
+    async def _record_and_stop(self, handler, model_name="whisper-1"):
+        """Send a transcribe request and a short audio stream to the handler."""
+        assert await handler.handle_event(Event(type="transcribe", data={"language": "en", "name": model_name}))
+        await handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 100)
+        )
+        await handler.handle_event(Event(type="audio-stop"))
+
+    @pytest.mark.asyncio
+    async def test_transcription_request_error_reports_the_failure(self, enhanced_handler, mock_clients):
+        """A failed /v1/audio/transcriptions request is reported as an error, then an empty transcript."""
+        stt_client, _ = mock_clients
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=RuntimeError("400 unknown parameter"))
+
+        await self._record_and_stop(enhanced_handler)
+
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["error", "transcript"]
+        assert Error.from_event(enhanced_handler.write_event.call_args_list[0].args[0]).text == STT_FAILED_ERROR
+        assert Transcript.from_event(enhanced_handler.write_event.call_args_list[1].args[0]).text == ""
+        assert enhanced_handler._wav_buffer is None
+
+    @pytest.mark.asyncio
+    async def test_transcription_failure_stops_writing_to_a_closed_connection(self, enhanced_handler, mock_clients):
+        """A client that closes the connection after the error event does not make the handler raise."""
+        stt_client, _ = mock_clients
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=RuntimeError("503 service unavailable"))
+        written: list[str] = []
+
+        async def write(event):
+            written.append(event.type)
+            if event.type != "error":
+                # Home Assistant closes the connection once it has read the error
+                raise ConnectionResetError("connection closed by the client")
+
+        enhanced_handler.write_event = AsyncMock(side_effect=write)
+
+        await self._record_and_stop(enhanced_handler)
+
+        # The transcript write failed, so nothing more is offered
+        assert written == ["error", "transcript"]
+        assert enhanced_handler._wav_buffer is None
+
+    @pytest.mark.asyncio
+    async def test_transcription_stream_error_closes_the_transcript(self, enhanced_handler, mock_clients):
+        """A transcription stream that fails midway ends with an error, an empty transcript and a transcript stop."""
+        stt_client, _ = mock_clients
+
+        class _FailingStream:
+            def __aiter__(self):
+                return self._events()
+
+            async def _events(self):
+                yield Mock(type="transcript.text.delta", delta="Hel")
+                raise RuntimeError("stream reset")
+
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=_FailingStream())
+
+        with patch("wyoming_openai.handler.AsyncStream", _FailingStream):
+            await self._record_and_stop(enhanced_handler)
+
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["transcript-start", "transcript-chunk", "error", "transcript", "transcript-stop"]
+        transcript_event = enhanced_handler.write_event.call_args_list[3].args[0]
+        assert Transcript.from_event(transcript_event).text == ""
+
+    @pytest.mark.asyncio
+    async def test_transcription_without_asr_model_reports_the_failure(self, enhanced_handler, mock_clients):
+        """Audio recorded without a transcribe request is reported as a failed transcription."""
+        stt_client, _ = mock_clients
+        stt_client.audio.transcriptions.create = AsyncMock()
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        stt_client.audio.transcriptions.create.assert_not_called()
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["error", "transcript"]
+
+    @pytest.mark.asyncio
+    async def test_unexpected_transcription_response_reports_the_failure(self, enhanced_handler, mock_clients):
+        """A response of an unknown type is reported to the client as a failed transcription."""
+        stt_client, _ = mock_clients
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=object())
+
+        await self._record_and_stop(enhanced_handler)
+
+        event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+        assert event_types == ["transcript-start", "error", "transcript", "transcript-stop"]
+        assert Transcript.from_event(enhanced_handler.write_event.call_args_list[2].args[0]).text == ""
 
     def test_convert_audio_to_realtime_pcm_resamples_to_24khz(self, enhanced_handler):
         """Test Wyoming PCM is converted to OpenAI Realtime's 24 kHz PCM16 format."""
@@ -3194,6 +3336,17 @@ def test_realtime_tts_session_merges_audio_overrides_without_changing_format(enh
     }
 
 
+@pytest.mark.parametrize("extra_body", [{"audio": None}, {"audio": {"output": None}}])
+def test_realtime_tts_session_treats_null_audio_as_unset(enhanced_handler, mock_info, extra_body):
+    """Test a null audio or audio.output in the Realtime extra body leaves the session audio as without one."""
+    enhanced_handler._tts_speed = None
+    enhanced_handler._tts_realtime_extra_body = extra_body
+
+    session = enhanced_handler._get_realtime_tts_session(mock_info.tts[0].voices[0])
+
+    assert session["audio"] == {"output": {"voice": "alloy", "format": {"type": "audio/pcm", "rate": 24000}}}
+
+
 def test_handler_rejects_incompatible_realtime_audio_format(mock_info, mock_clients, dummy_reader_writer):
     """Test a Realtime output format Wyoming cannot play is rejected at construction."""
     stt_client, tts_client = mock_clients
@@ -5275,8 +5428,14 @@ async def test_realtime_transcription_times_out_when_no_transcript_arrives(
 
     assert "No Realtime transcript received" in caplog.text
     events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
-    assert [event.type for event in events] == ["transcript-start", "transcript-chunk", "transcript", "transcript-stop"]
-    assert Transcript.from_event(events[2]).text == ""
+    assert [event.type for event in events] == [
+        "transcript-start",
+        "transcript-chunk",
+        "error",
+        "transcript",
+        "transcript-stop",
+    ]
+    assert Transcript.from_event(events[3]).text == ""
     await enhanced_handler._drain_background_tasks()
     assert manager.exited is True
 
@@ -5407,7 +5566,7 @@ async def test_realtime_transcription_failure_sends_no_delta_after_the_final_tra
     async with asyncio.timeout(1):
         await enhanced_handler.handle_event(Event(type="audio-stop"))
 
-    assert written == ["transcript-start", "transcript", "transcript-stop"]
+    assert written == ["transcript-start", "error", "transcript", "transcript-stop"]
     await enhanced_handler._drain_background_tasks()
 
 
@@ -5429,5 +5588,5 @@ async def test_realtime_transcription_times_out_when_the_commit_stalls(
     async with asyncio.timeout(1):
         await enhanced_handler.handle_event(Event(type="audio-stop"))
 
-    assert _event_types(enhanced_handler) == ["transcript-start", "transcript", "transcript-stop"]
+    assert _event_types(enhanced_handler) == ["transcript-start", "error", "transcript", "transcript-stop"]
     await enhanced_handler._drain_background_tasks()
