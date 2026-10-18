@@ -1,15 +1,21 @@
 import argparse
+import math
 from enum import Enum
 from io import BytesIO
 
 import pytest
+from pcm_reference import assert_samples_close, reference_resample, sine_samples
 
 from wyoming_openai.utilities import (
     NamedBytesIO,
+    RealtimeAudioConverter,
+    RealtimePcmResampler,
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
+    decode_pcm_samples,
+    downmix_pcm_samples,
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
@@ -17,6 +23,7 @@ from wyoming_openai.utilities import (
     parse_non_negative_int,
     parse_voice_labels,
     strip_ssml,
+    validate_audio_format,
     validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
@@ -447,3 +454,145 @@ def test_realtime_tts_speed_null_override_falls_back_to_tts_speed():
     """Test a null audio.output.speed is treated as no override instead of dropping TTS_SPEED."""
     assert get_realtime_tts_speed(1.3, {"audio": {"output": {"speed": None}}}) == 1.3
     assert get_realtime_tts_speed(None, {"audio": {"output": {"speed": None}}}) is None
+
+
+def test_audio_format_validation_coerces_whole_numbers():
+    """JSON numbers without a fraction are accepted as integers, not passed on as floats."""
+    assert validate_audio_format(16000.0, 2.0, 1.0) == (16000, 2, 1)
+
+
+def test_audio_format_validation_rejects_a_wav_byte_rate_overflow():
+    with pytest.raises(ValueError, match="byte rate"):
+        validate_audio_format(384000, 4, 16000)
+
+
+def test_audio_format_validation_rejects_an_excessive_rate():
+    with pytest.raises(ValueError, match="384000"):
+        validate_audio_format(1_600_000, 2, 1)
+
+
+def test_audio_format_validation_reports_a_fractional_rate():
+    with pytest.raises(ValueError, match="16000.5"):
+        validate_audio_format(16000.5, 2, 1)
+
+
+def test_realtime_converter_flush_drops_a_partial_frame_and_starts_clean():
+    converter = RealtimeAudioConverter(24000, 2, 1)
+    assert converter.convert_chunk(b"\x00") == b""
+    assert converter.flush() == b""
+
+    assert converter.convert_chunk(b"\x00\x01") == b"\x00\x01"
+
+
+@pytest.mark.parametrize("value", [10**300, 10**400])
+def test_audio_format_validation_bounds_large_client_values_in_errors(value):
+    with pytest.raises(ValueError) as error:
+        validate_audio_format(value, 2, 1)
+
+    assert len(str(error.value)) < 120
+
+
+def test_realtime_pcm_resampler_rejects_non_positive_rates():
+    with pytest.raises(ValueError, match="positive"):
+        RealtimePcmResampler(0, 24000)
+
+
+def test_realtime_pcm_resampler_flush_resets_the_stream_state():
+    resampler = RealtimePcmResampler(16000, 24000)
+    resampler.process([0, 1000, 2000])
+
+    assert resampler.flush()
+    assert resampler.flush() == []
+
+
+@pytest.mark.parametrize("width", [0, 5])
+def test_decode_pcm_samples_rejects_an_unsupported_width(width):
+    with pytest.raises(ValueError, match="sample width"):
+        decode_pcm_samples(b"\x00\x00", width)
+
+
+def test_downmix_pcm_samples_rejects_zero_channels():
+    with pytest.raises(ValueError, match="channel count"):
+        downmix_pcm_samples([1, 2], 0)
+
+
+def test_realtime_pcm_resampler_interpolates_known_samples():
+    """A small input pins the interpolation position, fraction, and final-sample clamp."""
+    resampler = RealtimePcmResampler(16000, 24000)
+
+    converted = resampler.process([0, 3000, 6000]) + resampler.flush()
+
+    assert converted == [0, 2000, 4000, 6000, 6000]
+
+
+def test_realtime_pcm_resampler_interpolates_across_chunks():
+    """The carried sample is the left neighbour of the chunk's first interpolation."""
+    resampler = RealtimePcmResampler(16000, 24000)
+
+    converted = resampler.process([0, 3000]) + resampler.process([6000]) + resampler.flush()
+
+    assert converted == [0, 2000, 4000, 6000, 6000]
+
+
+@pytest.mark.parametrize("rate", [8000, 16000, 44100, 48000])
+def test_realtime_pcm_resampler_carries_state_across_single_sample_chunks(rate):
+    """A stream of one-sample chunks is resampled, rather than passed through at the source rate."""
+    samples = sine_samples(rate, 0.25)
+    expected = reference_resample(samples, rate)
+
+    resampler = RealtimePcmResampler(rate, 24000)
+    streamed: list[int] = []
+    for sample in samples:
+        streamed += resampler.process([sample])
+    streamed += resampler.flush()
+
+    assert_samples_close(streamed, expected)
+    assert len(streamed) == math.ceil(len(samples) * 24000 / rate)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 160, 161])
+def test_realtime_pcm_resampler_output_length_does_not_drift(chunk_size):
+    """One second of 16 kHz audio is one second of 24 kHz audio however it is chunked."""
+    samples = sine_samples(16000, 1)
+    resampler = RealtimePcmResampler(16000, 24000)
+    converted: list[int] = []
+    for start in range(0, len(samples), chunk_size):
+        converted += resampler.process(samples[start : start + chunk_size])
+    converted += resampler.flush()
+
+    assert len(converted) == 24000
+    assert_samples_close(converted, reference_resample(samples, 16000))
+
+
+@pytest.mark.parametrize("rate,expected_count", [(96000, 3), (192000, 2)])
+def test_realtime_pcm_resampler_length_follows_the_position_walk_at_high_rates(rate, expected_count):
+    """A short high-rate stream ends at its last output position instead of overshooting a rounded count."""
+    samples = list(range(100, 110))
+
+    one_piece = RealtimePcmResampler(rate, 24000)
+    expected = one_piece.process(samples) + one_piece.flush()
+
+    resampler = RealtimePcmResampler(rate, 24000)
+    streamed: list[int] = []
+    for sample in samples:
+        streamed += resampler.process([sample])
+    streamed += resampler.flush()
+
+    assert expected == reference_resample(samples, rate)
+    assert len(expected) == expected_count
+    assert streamed == expected
+
+
+def test_realtime_pcm_decodes_signed_24_bit_samples():
+    assert decode_pcm_samples(b"\x00\x00\x80\xff\xff\x7f", 3) == [-32768, 32767]
+
+
+def test_realtime_converter_rejects_a_rate_below_the_minimum():
+    with pytest.raises(ValueError, match="realtime transcription requires"):
+        RealtimeAudioConverter(7999, 2, 1)
+
+
+@pytest.mark.parametrize("width,channels", [(5, 1), (0, 1), (1, 0)])
+def test_realtime_converter_rejects_an_unsupported_pcm_format(width, channels):
+    with pytest.raises(ValueError):
+        RealtimeAudioConverter(24000, width, channels)

@@ -35,6 +35,8 @@ REALTIME_TTS_INSTRUCTIONS = (
 DEFAULT_AUDIO_WIDTH = 2  # 16-bit audio
 DEFAULT_AUDIO_CHANNELS = 1  # Mono audio
 REALTIME_AUDIO_RATE = 24000  # Hz (OpenAI Realtime audio/pcm requirement)
+# Below this, converting a client-declared rate to 24 kHz would expand each input sample many times over
+REALTIME_MIN_AUDIO_RATE = 8000  # Hz
 REALTIME_AUDIO_WIDTH = 2  # 16-bit audio
 REALTIME_AUDIO_CHANNELS = 1  # Mono audio
 # The only encoding used with the Realtime API, for the audio sent to it and the audio forwarded to Wyoming
