@@ -1078,6 +1078,12 @@ def _capture_basic_config(monkeypatch):
     return configured
 
 
+def _close_captured_handlers(configured):
+    """Release the file handles of handlers that never reached the real root logger."""
+    for handler in configured.get("handlers", []):
+        handler.close()
+
+
 def test_configure_logging_rotates_the_log_file(tmp_path, monkeypatch):
     configured = _capture_basic_config(monkeypatch)
     log_path = tmp_path / "logs" / "wyoming_openai.log"
@@ -1098,7 +1104,7 @@ def test_configure_logging_rotates_the_log_file(tmp_path, monkeypatch):
             logger.info("entry %02d %s", index, "x" * 40)
     finally:
         logger.removeHandler(file_handler)
-        file_handler.close()
+        _close_captured_handlers(configured)
 
     assert (tmp_path / "logs" / "wyoming_openai.log.1").exists()
     assert log_path.stat().st_size <= 256
@@ -1107,11 +1113,49 @@ def test_configure_logging_rotates_the_log_file(tmp_path, monkeypatch):
 def test_configure_logging_defaults_to_rotating_the_log_file(tmp_path, monkeypatch):
     configured = _capture_basic_config(monkeypatch)
 
-    main_module.configure_logging("INFO", str(tmp_path / "wyoming_openai.log"))
+    try:
+        main_module.configure_logging("INFO", str(tmp_path / "wyoming_openai.log"))
 
-    file_handler = next(handler for handler in configured["handlers"] if isinstance(handler, RotatingFileHandler))
-    assert file_handler.maxBytes == DEFAULT_LOG_MAX_BYTES
-    assert file_handler.backupCount == DEFAULT_LOG_BACKUP_COUNT
+        file_handler = next(handler for handler in configured["handlers"] if isinstance(handler, RotatingFileHandler))
+        assert file_handler.maxBytes == DEFAULT_LOG_MAX_BYTES
+        assert file_handler.backupCount == DEFAULT_LOG_BACKUP_COUNT
+    finally:
+        _close_captured_handlers(configured)
+
+
+def test_configure_logging_prunes_backups_above_the_configured_count(tmp_path, monkeypatch):
+    configured = _capture_basic_config(monkeypatch)
+    log_path = tmp_path / "wyoming_openai.log"
+    for index in range(1, 6):
+        log_path.with_name(f"{log_path.name}.{index}").write_text("stale", encoding="utf-8")
+    unrelated = log_path.with_name(f"{log_path.name}.keep")
+    unrelated.write_text("not a numbered backup", encoding="utf-8")
+
+    try:
+        main_module.configure_logging("INFO", str(log_path), max_bytes=1024, backup_count=2)
+    finally:
+        _close_captured_handlers(configured)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "wyoming_openai.log",
+        "wyoming_openai.log.1",
+        "wyoming_openai.log.2",
+        "wyoming_openai.log.keep",
+    ]
+
+
+def test_configure_logging_keeps_old_backups_when_rotation_is_disabled(tmp_path, monkeypatch):
+    configured = _capture_basic_config(monkeypatch)
+    log_path = tmp_path / "wyoming_openai.log"
+    stale = log_path.with_name(f"{log_path.name}.3")
+    stale.write_text("kept", encoding="utf-8")
+
+    try:
+        main_module.configure_logging("INFO", str(log_path), max_bytes=0, backup_count=1)
+    finally:
+        _close_captured_handlers(configured)
+
+    assert stale.exists()
 
 
 def test_configure_logging_without_log_file_only_logs_to_the_stream(monkeypatch):

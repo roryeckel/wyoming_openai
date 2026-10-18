@@ -45,6 +45,21 @@ from .utilities import (
 )
 
 
+def _prune_stale_log_backups(log_file, backup_count):
+    """Remove numbered backups left behind by a previously larger backup count."""
+    directory = os.path.dirname(log_file) or "."
+    prefix = os.path.basename(log_file) + "."
+    for entry in os.listdir(directory):
+        suffix = entry.removeprefix(prefix)
+        if suffix == entry or not suffix.isdigit() or int(suffix) <= backup_count:
+            continue
+        try:
+            os.remove(os.path.join(directory, entry))
+        except OSError:
+            # Best effort: an undeletable stale backup must not stop the server from logging
+            pass
+
+
 def configure_logging(
     level,
     log_file=None,
@@ -59,6 +74,9 @@ def configure_logging(
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file:
         os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+        # RotatingFileHandler only manages the backups within its own count, so lower a leftover larger count here
+        if max_bytes > 0:
+            _prune_stale_log_backups(log_file, backup_count)
         handlers.append(
             RotatingFileHandler(
                 log_file,
