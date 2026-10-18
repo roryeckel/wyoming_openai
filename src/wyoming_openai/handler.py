@@ -170,6 +170,7 @@ class _AudioStreamState:
     realtime: bool  # Transcribed over a Realtime session rather than /v1/audio/transcriptions
     streaming: bool  # /v1/audio/transcriptions responds with a stream of transcript deltas; follows the model
     transcript_started: bool = False  # TranscriptStart was sent while the audio was still arriving
+    failed: bool = False  # Reported with an error event; its audio is dropped and its audio-stop closes the connection
 
 
 class TtsStreamError(Exception):
@@ -288,7 +289,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_receive_task: asyncio.Task[None] | None = None
         self._realtime_transcript_future: asyncio.Future[str] | None = None
         self._realtime_pcm_tail: bytes = b""
-        self._realtime_start_failed: bool = False  # The session of the current audio stream could not be opened
 
         # State for event logging
         self._last_event_type: str | None = None
@@ -334,8 +334,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             return True
 
         if AudioStop.is_type(event.type):
-            await self._handle_audio_stop()
-            return True
+            return await self._handle_audio_stop()
 
         if Synthesize.is_type(event.type):
             return await self._handle_synthesize(Synthesize.from_event(event))
@@ -504,7 +503,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Handle start of audio stream"""
         # A stream the client never stopped must not leave its recording or Realtime session under this one
         await self._abandon_audio_stream("audio-start arrived before its audio-stop")
-        self._realtime_start_failed = False
 
         # Without a selection the default model is used. It is resolved for every stream rather than kept, so a
         # program selected since then is honoured
@@ -568,6 +566,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_audio_chunk(self, chunk: AudioChunk) -> None:
         """Handle audio chunk"""
+        if self._audio_stream is not None and self._audio_stream.failed:
+            # Its failure was reported once; the audio has nowhere to go
+            return
         if self._audio_stream is not None and self._audio_stream.realtime:
             await self._handle_realtime_audio_chunk(chunk)
             return
@@ -583,7 +584,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Open an OpenAI Realtime transcription session."""
         if self._stt_client is None:
             _LOGGER.error("No STT client configured for realtime transcription")
-            await self._fail_realtime_audio_start()
+            await self._fail_realtime_audio_start(audio_stream)
             return
 
         try:
@@ -608,31 +609,26 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as err:
             _LOGGER.exception("Error starting realtime transcription: %s", err)
             await self._cleanup_realtime_transcription()
-            await self._fail_realtime_audio_start()
+            await self._fail_realtime_audio_start(audio_stream)
 
-    async def _fail_realtime_audio_start(self) -> None:
+    async def _fail_realtime_audio_start(self, audio_stream: _AudioStreamState) -> None:
         """
         Report a Realtime session that could not be opened as soon as it fails: a client that reads while it
-        streams audio, such as Home Assistant 2026.10 and later, ends the request instead of recording on.
-        Clients that do not know the error event get the empty transcript at audio stop.
+        streams audio, such as Home Assistant 2026.10 and later, ends the request instead of recording on. The rest
+        of the stream's audio is dropped, and its audio-stop closes the connection.
         """
         self._is_recording = False
-        self._realtime_start_failed = True
-        await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event())
+        audio_stream.failed = True
+        await self._report_stt_failure()
 
-    async def _report_stt_failure(self, *, transcript_started: bool, error_sent: bool = False) -> None:
+    async def _report_stt_failure(self) -> None:
         """
-        Tell the client a transcription failed. The error event comes first, since Home Assistant 2026.8.2 and
-        later stop reading at the first error or transcript; older clients skip it and take the empty transcript.
-        Home Assistant closes the connection once it has a result, so the writes after the error are bounded and
-        stop at the first one the client does not take.
+        Tell the client a transcription failed with an error event, after which the connection is closed. Home
+        Assistant 2026.8.2 and later report the error and every version reports the closed connection as a failed
+        transcription, while an empty transcript would count as nothing said. The write is bounded, since a client
+        that has stopped reading must not hold up the close.
         """
-        if not error_sent and not await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event()):
-            return
-        if not await self._write_event_bounded(Transcript(text="").event()):
-            return
-        if transcript_started:
-            await self._write_event_bounded(TranscriptStop().event())
+        await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event())
 
     async def _handle_realtime_audio_chunk(self, chunk: AudioChunk) -> None:
         """Append a Wyoming audio chunk to the OpenAI Realtime input buffer."""
@@ -667,17 +663,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.exception("Error sending realtime audio chunk: %s", err)
             self._set_realtime_transcription_exception(err)
 
-    async def _handle_realtime_audio_stop(self) -> None:
-        """Commit realtime audio and emit the final transcription."""
+    async def _handle_realtime_audio_stop(self) -> bool:
+        """Commit realtime audio and emit the final transcription. Returns False to close a connection it failed on."""
         if not self._is_recording or self._realtime_connection is None:
             _LOGGER.warning("Received realtime audio stop event without recording")
             await self._cleanup_realtime_transcription()
-            if self._realtime_start_failed:
-                # The error was reported when the session failed to open; clients that do not know it still wait
-                # for a transcript. No TranscriptStart was sent, so no TranscriptStop either
-                self._realtime_start_failed = False
-                await self._report_stt_failure(transcript_started=False, error_sent=True)
-            return
+            return True
 
         self._is_recording = False
 
@@ -707,12 +698,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as err:
             _LOGGER.exception("Error during realtime transcription: %s", err)
             if not transcript_sent:
-                # The receiver is stopped first, so no late delta follows the final transcript
+                # The receiver is stopped first, so no late delta follows the error
                 await self._cleanup_realtime_transcription()
-                # TranscriptStart was sent when the session opened
-                await self._report_stt_failure(transcript_started=True)
+                await self._report_stt_failure()
+                return False
         finally:
             await self._cleanup_realtime_transcription()
+        return True
 
     async def _enter_realtime_connection(self, connection_manager: Any) -> Any:
         """Enter an SDK realtime connection manager."""
@@ -938,24 +930,26 @@ class OpenAIEventHandler(AsyncEventHandler):
         clamped_samples = (max(-32768, min(32767, int(sample))) for sample in samples)
         return struct.pack(f"<{len(samples)}h", *clamped_samples)
 
-    async def _handle_audio_stop(self) -> None:
-        """Handle end of audio stream and perform transcription"""
+    async def _handle_audio_stop(self) -> bool:
+        """Handle end of audio stream and perform transcription. Returns False to close a connection it failed on."""
         audio_stream, self._audio_stream = self._audio_stream, None
         if audio_stream is None:
             _LOGGER.warning("Received audio stop event without recording")
-            return
+            return True
+
+        if audio_stream.failed:
+            # Its error was sent when it failed; closing the connection ends the request for clients that ignore it
+            return False
 
         if audio_stream.realtime:
-            await self._handle_realtime_audio_stop()
-            return
+            return await self._handle_realtime_audio_stop()
 
         if not self._is_recording or not self._wav_buffer:
             _LOGGER.warning("Received audio stop event without recording")
-            return
+            return True
 
         self._is_recording = False
 
-        transcript_started = False
         transcript_sent = False
         try:
             # Close the WAV file
@@ -1002,7 +996,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             transcription = await self._stt_client.audio.transcriptions.create(**transcription_kwargs)
 
             await self.write_event(TranscriptStart().event())
-            transcript_started = True
 
             if isinstance(transcription, AsyncStream):
                 _LOGGER.debug("Handling streaming transcription response")
@@ -1042,9 +1035,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.exception("Error during transcription: %s", e)
             # As on the Realtime path, the client is told instead of waiting for a transcript
             if not transcript_sent:
-                await self._report_stt_failure(transcript_started=transcript_started)
+                await self._report_stt_failure()
+                return False
         finally:
             self._discard_recording()
+        return True
 
     def _get_asr_model(self, model_name: str | None = None) -> AsrModel | None:
         """Get an ASR model by name or None.
