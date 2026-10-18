@@ -377,6 +377,24 @@ def parse_voice_labels(value: str) -> dict[str, str]:
     return labels
 
 
+def parse_finite_float(value: str) -> float:
+    """
+    Parse an argparse value that must be a finite number, since a request cannot carry inf or nan as JSON.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is not a number or is not finite.
+    """
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got '{value}'") from None
+
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError(f"expected a finite number, got {number}")
+
+    return number
+
+
 def parse_positive_int(value: str) -> int:
     """
     Parse an argparse value that must be a whole number of at least 1.

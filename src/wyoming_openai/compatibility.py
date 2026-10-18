@@ -295,7 +295,7 @@ def create_tts_voices(
             raise ValueError(
                 f"None of the configured TTS voices {skipped_voices} are offered by the OpenAI Realtime API "
                 f"for {sorted(realtime_models)}; choose from {list(OPENAI_REALTIME_TTS_VOICES)}, "
-                "or remove those models from TTS_REALTIME_MODELS"
+                "or remove those models from TTS_REALTIME_MODELS, TTS_STREAMING_MODELS and TTS_MODELS"
             )
 
     # tts-1 and tts-1-hd predate the later speech voices, which they reject; as for Realtime, only voices known

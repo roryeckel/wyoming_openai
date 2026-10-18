@@ -279,6 +279,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # events must not have the default model transcribe what the client asked for and was refused
         self._transcribe_rejected = False
         self._audio_stream: _AudioStreamState | None = None  # Between audio-start and audio-stop
+        self._shutdown_reported = False  # stop() told the client its transcription was cut short
         self._audio_sample_rate: int = DEFAULT_ASR_AUDIO_RATE
         self._audio_width: int = DEFAULT_AUDIO_WIDTH
         self._audio_channels: int = DEFAULT_AUDIO_CHANNELS
@@ -361,9 +362,15 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def disconnect(self) -> None:
         """Drop the audio stream in progress and other handler-owned resources when the Wyoming client disconnects."""
         try:
-            # Nobody is left to report a failure to
-            self._synthesis.failed = True
-            await self._stop_sentence_playback()
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                # Cancelled rather than disconnected, as when Ctrl+C stops a server that has no SIGTERM handler to call
+                # stop(): the client may still be reading, and takes a streaming synthesis without an error as complete
+                await self._stop_sentence_playback(SHUTDOWN_ERROR if self._is_synthesis_in_flight() else None)
+            else:
+                # Nobody is left to report a failure to
+                self._synthesis.failed = True
+                await self._stop_sentence_playback()
             await self._drop_audio_stream()
         finally:
             # Closed before the drain so the client is not kept waiting on websocket closing handshakes
@@ -373,13 +380,17 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
         try:
-            # The client is still connected, so it is told about a synthesis cut short before the writer is closed
-            in_flight = (
-                self._synthesis.active
-                or self._synthesis.audio_started
-                or any(not task.done() for task in self._synthesis_tasks)
+            # The client is still connected, so it is told about a synthesis or a transcription cut short before the
+            # writer is closed: a stream being recorded, or an audio-stop waiting for its transcript
+            transcribing = (
+                self._audio_stream is not None
+                or self._realtime_transcript_future is not None
+                or self._wav_buffer is not None
             )
-            await self._stop_sentence_playback(SHUTDOWN_ERROR if in_flight else None)
+            await self._stop_sentence_playback(SHUTDOWN_ERROR if self._is_synthesis_in_flight() else None)
+            if transcribing:
+                self._shutdown_reported = True
+                await self._write_event_bounded(Error(text=SHUTDOWN_ERROR).event())
             # The server stops handlers while an audio-stop may still be sending their recording, so that is left
             # for disconnect(), which runs once the event in progress has finished
             await self._cleanup_realtime_transcription()
@@ -387,6 +398,14 @@ class OpenAIEventHandler(AsyncEventHandler):
             await super().stop()
             # A websocket whose closing handshake stalls must not hold up the shutdown of the server
             await self._drain_background_tasks(SHUTDOWN_DRAIN_TIMEOUT)
+
+    def _is_synthesis_in_flight(self) -> bool:
+        """Whether a synthesis has started and not ended, so a client cut off from it is owed an error."""
+        return (
+            self._synthesis.active
+            or self._synthesis.audio_started
+            or any(not task.done() for task in self._synthesis_tasks)
+        )
 
     async def _handle_select_program(self, select_program: SelectProgram) -> bool:
         """Handle select-program request pinning a program for this connection.
@@ -632,6 +651,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         transcription, while an empty transcript would count as nothing said. The write is bounded, since a client
         that has stopped reading must not hold up the close.
         """
+        if self._shutdown_reported:
+            # stop() has told the client already and closed the writer
+            return
         await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event())
 
     async def _handle_realtime_audio_chunk(self, audio_stream: _AudioStreamState, chunk: AudioChunk) -> None:
@@ -850,7 +872,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if transcript_future is not None:
             if not transcript_future.done():
                 # Failed rather than cancelled, so an audio-stop waiting on it, as when stop() interrupts one, ends
-                # through the failure path, with a log entry and an error event, instead of as a cancelled task
+                # through the failure path and is logged, instead of ending as a cancelled task
                 transcript_future.set_exception(RealtimeTranscriptionError("Realtime transcription session was closed"))
             if not transcript_future.cancelled():
                 # Read, so the failure of a stream that is dropped is not logged later as never retrieved
@@ -1533,6 +1555,16 @@ class OpenAIEventHandler(AsyncEventHandler):
             return None
 
         voice_name, model_name = parsed
+        if self._selected_tts_program and any(
+            voice.name == requested_voice for program in self._wyoming_info.tts for voice in program.voices
+        ):
+            # Still advertised, by another program than the one the client selected: refused, not moved to a model
+            _LOGGER.warning(
+                "Voice %s is offered by another program than the selected %s",
+                requested_voice,
+                self._selected_tts_program.name,
+            )
+            return None
         matches = self._get_voices_by_backend_name(voice_name)
         if not matches:
             return None

@@ -26,6 +26,7 @@ from .utilities import (
     create_enum_parser,
     create_json_object_parser,
     get_realtime_tts_speed,
+    parse_finite_float,
     parse_positive_int,
     parse_voice_labels,
     validate_realtime_stt_extra_body,
@@ -60,28 +61,10 @@ async def main():
     stt_realtime_extra_body_parser = create_json_object_parser("STT Realtime extra body")
     tts_realtime_extra_body_parser = create_json_object_parser("TTS Realtime extra body")
 
-    stt_backend_env = os.getenv("STT_BACKEND")
-    stt_backend_default = None
-    if stt_backend_env:
-        try:
-            stt_backend_default = backend_parser(stt_backend_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
-
-    tts_backend_env = os.getenv("TTS_BACKEND")
-    tts_backend_default = None
-    if tts_backend_env:
-        try:
-            tts_backend_default = backend_parser(tts_backend_env)
-        except argparse.ArgumentTypeError as exc:
-            parser.error(str(exc))
-
-    # argparse parses string defaults only when the option is absent. Keep JSON env
-    # values raw so explicit CLI options and --help do not parse an invalid env value.
-    stt_extra_body_default = (os.getenv("STT_EXTRA_BODY") or "").strip() or None
-    stt_realtime_extra_body_default = (os.getenv("STT_REALTIME_EXTRA_BODY") or "").strip() or None
-    tts_extra_body_default = (os.getenv("TTS_EXTRA_BODY") or "").strip() or None
-    tts_realtime_extra_body_default = (os.getenv("TTS_REALTIME_EXTRA_BODY") or "").strip() or None
+    def env_default(name: str) -> str | None:
+        """An environment value left raw: argparse converts a string default with the option's type only when the
+        option is absent, so an explicit CLI option and --help never parse an invalid environment value."""
+        return (os.getenv(name) or "").strip() or None
 
     # General configuration
     parser.add_argument(
@@ -127,20 +110,20 @@ async def main():
         type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=stt_backend_default,
+        default=env_default("STT_BACKEND"),
         help="Backend for speech-to-text (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)",
     )
     parser.add_argument(
         "--stt-temperature",
-        type=float,
-        default=float(_v) if (_v := os.getenv("STT_TEMPERATURE")) else None,
+        type=parse_finite_float,
+        default=env_default("STT_TEMPERATURE"),
         help="Sampling temperature for speech-to-text (0.0 to 1.0, default is None for OpenAI default)",
     )
     parser.add_argument("--stt-prompt", default=os.getenv("STT_PROMPT", None), help="Optional prompt for STT requests")
     parser.add_argument(
         "--stt-extra-body",
         type=stt_extra_body_parser,
-        default=stt_extra_body_default,
+        default=env_default("STT_EXTRA_BODY"),
         help=(
             "Optional JSON object merged into the STT request body via extra_body; "
             "overlapping keys override top-level request fields. "
@@ -163,10 +146,10 @@ async def main():
     parser.add_argument(
         "--stt-realtime-extra-body",
         type=stt_realtime_extra_body_parser,
-        default=stt_realtime_extra_body_default,
+        default=env_default("STT_REALTIME_EXTRA_BODY"),
         help=(
-            "Optional JSON object merged into the transcription settings of --stt-realtime-models sessions "
-            "(--stt-extra-body only applies to /v1/audio/transcriptions)"
+            "Optional JSON object merged into the transcription settings of --stt-realtime-models sessions; "
+            "it cannot set the model (--stt-extra-body only applies to /v1/audio/transcriptions)"
         ),
     )
 
@@ -206,13 +189,13 @@ async def main():
         type=backend_parser,
         required=False,
         choices=list(OpenAIBackend),
-        default=tts_backend_default,
+        default=env_default("TTS_BACKEND"),
         help="Backend for text-to-speech (OPENAI, SPEACHES, KOKORO_FASTAPI, LOCALAI, or None)",
     )
     parser.add_argument(
         "--tts-speed",
-        type=float,
-        default=float(_v) if (_v := os.getenv("TTS_SPEED")) else None,
+        type=parse_finite_float,
+        default=env_default("TTS_SPEED"),
         help=(
             "Speed of the TTS output (0.25 to 4.0, capped at 1.5 for Realtime models; "
             "default is None for OpenAI default)"
@@ -224,7 +207,7 @@ async def main():
     parser.add_argument(
         "--tts-extra-body",
         type=tts_extra_body_parser,
-        default=tts_extra_body_default,
+        default=env_default("TTS_EXTRA_BODY"),
         help=(
             "Optional JSON object merged into the TTS request body via extra_body; "
             "overlapping keys override top-level request fields. "
@@ -251,7 +234,7 @@ async def main():
     parser.add_argument(
         "--tts-realtime-extra-body",
         type=tts_realtime_extra_body_parser,
-        default=tts_realtime_extra_body_default,
+        default=env_default("TTS_REALTIME_EXTRA_BODY"),
         help=(
             "Optional JSON object merged into the Realtime session of --tts-realtime-models "
             "(--tts-extra-body only applies to /v1/audio/speech). "
@@ -261,13 +244,13 @@ async def main():
     parser.add_argument(
         "--tts-streaming-min-words",
         type=int,
-        default=int(_v) if (_v := os.getenv("TTS_STREAMING_MIN_WORDS")) else None,
+        default=env_default("TTS_STREAMING_MIN_WORDS"),
         help="Minimum words per chunk for streaming TTS (optional)",
     )
     parser.add_argument(
         "--tts-streaming-max-chars",
         type=int,
-        default=int(_v) if (_v := os.getenv("TTS_STREAMING_MAX_CHARS")) else None,
+        default=env_default("TTS_STREAMING_MAX_CHARS"),
         help="Maximum characters per chunk for streaming TTS (optional)",
     )
     parser.add_argument(

@@ -13,6 +13,7 @@ from wyoming_openai.utilities import (
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
+    parse_finite_float,
     parse_voice_labels,
     strip_ssml,
     validate_realtime_stt_extra_body,
@@ -295,6 +296,13 @@ def test_parse_voice_labels_rejects_invalid_values(value, message):
         parse_voice_labels(value)
 
     assert message in str(exc_info.value)
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "fast"])
+def test_parse_finite_float_rejects_values_a_request_cannot_carry(value):
+    assert parse_finite_float("1.5") == 1.5
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_finite_float(value)
 
 
 def test_validate_stt_extra_body_allows_boolean_stream_override():

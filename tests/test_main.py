@@ -60,6 +60,77 @@ async def test_main_help_ignores_invalid_extra_body_env(monkeypatch, capsys, env
     assert "--stt-extra-body" in capsys.readouterr().out
 
 
+INVALID_ENV_VALUES = [
+    ("STT_BACKEND", "bogus", "--stt-backend"),
+    ("TTS_BACKEND", "bogus", "--tts-backend"),
+    ("STT_TEMPERATURE", "hot", "--stt-temperature"),
+    ("TTS_SPEED", "fast", "--tts-speed"),
+    ("TTS_SPEED", "inf", "--tts-speed"),
+    ("TTS_STREAMING_MIN_WORDS", "two", "--tts-streaming-min-words"),
+    ("TTS_STREAMING_MAX_CHARS", "many", "--tts-streaming-max-chars"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("env_var", "value", "option"), INVALID_ENV_VALUES)
+async def test_main_help_ignores_invalid_env(monkeypatch, capsys, env_var, value, option):
+    """Test --help works whatever the environment holds."""
+    monkeypatch.setenv(env_var, value)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 0
+    assert option in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("env_var", "value", "option"), INVALID_ENV_VALUES)
+async def test_main_reports_invalid_env_as_a_usage_error(monkeypatch, capsys, env_var, value, option):
+    """Test an invalid environment value names its option instead of ending in a traceback."""
+    monkeypatch.setenv(env_var, value)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1"])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 2
+    assert option in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_main_cli_overrides_invalid_env(monkeypatch):
+    """Test an explicit option wins over an invalid environment value for the same setting."""
+    monkeypatch.setenv("TTS_SPEED", "fast")
+    monkeypatch.setenv("TTS_STREAMING_MIN_WORDS", "two")
+
+    kwargs = await _run_main_and_capture_handler_kwargs(
+        monkeypatch, "--tts-speed", "1.25", "--tts-streaming-min-words", "3"
+    )
+
+    assert kwargs["tts_speed"] == 1.25
+    assert kwargs["tts_streaming_min_words"] == 3
+
+
+@pytest.mark.asyncio
+async def test_main_reads_numeric_settings_from_env(monkeypatch):
+    """Test numeric environment values still reach the handler, converted like their options."""
+    monkeypatch.setenv("TTS_SPEED", "1.25")
+    monkeypatch.setenv("STT_TEMPERATURE", "0.5")
+    monkeypatch.setenv("TTS_STREAMING_MAX_CHARS", "120")
+
+    kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert (kwargs["tts_speed"], kwargs["stt_temperature"], kwargs["tts_streaming_max_chars"]) == (1.25, 0.5, 120)
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_a_non_finite_speed_option(monkeypatch, capsys):
+    """Test a speed no request can carry fails at startup rather than at every synthesis."""
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-models", "gpt-4o-mini-tts", "--tts-speed", "nan"])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 2
+    assert "expected a finite number" in capsys.readouterr().err
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "env_var", ["STT_EXTRA_BODY", "TTS_EXTRA_BODY", "STT_REALTIME_EXTRA_BODY", "TTS_REALTIME_EXTRA_BODY"]

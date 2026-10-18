@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import builtins
+import contextlib
 import io
 import json
 import logging
@@ -28,6 +29,7 @@ from wyoming_openai.compatibility import (
     create_tts_voices,
 )
 from wyoming_openai.handler import (
+    SHUTDOWN_ERROR,
     STT_FAILED_ERROR,
     OpenAIEventHandler,
     TtsStreamError,
@@ -682,6 +684,40 @@ async def test_stop_while_the_last_audio_stop_is_written_closes_the_stream_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [True, False])
+async def test_disconnect_of_a_cancelled_handler_reports_the_synthesis_it_cuts_short(
+    enhanced_handler, mock_info, mock_clients, cancelled
+):
+    """Test a streaming synthesis ended by cancellation, as on Ctrl+C, gets an error the client can still read."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    _mock_speech_response(tts_client, [REALTIME_TTS_PCM])
+    assert await enhanced_handler.handle_event(SynthesizeStart().event())
+    assert await enhanced_handler.handle_event(SynthesizeChunk(text="First sentence. Second").event())
+    enhanced_handler.write_event.reset_mock()
+
+    async def handler_task():
+        if cancelled:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(1)
+        # run() calls disconnect() as it unwinds, still marked as cancelled
+        await enhanced_handler.disconnect()
+
+    await asyncio.create_task(handler_task())
+
+    written = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    if cancelled:
+        assert [event.type for event in written] == ["error", "audio-stop"]
+        assert Error.from_event(written[0]).text == SHUTDOWN_ERROR
+    else:
+        assert [event.type for event in written] == ["audio-stop"]
+
+
+@pytest.mark.asyncio
 async def test_empty_audio_data_aborts(handler):
     """Test that empty audio data from synthesis properly aborts the session."""
     handler._wyoming_info.tts[0].supports_synthesize_streaming = True
@@ -1152,7 +1188,7 @@ class TestOpenAIEventHandlerComprehensive:
     async def test_teardown_closes_the_realtime_session_without_writing(
         self, enhanced_handler, mock_info, mock_clients, teardown
     ):
-        """A connection that ends during a Realtime stream closes the session and writes nothing more."""
+        """A connection that ends during a Realtime stream closes the session; only a server stop tells the client."""
         stt_client, _ = mock_clients
         mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
         enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
@@ -1164,7 +1200,8 @@ class TestOpenAIEventHandlerComprehensive:
         await getattr(enhanced_handler, teardown)()
 
         assert manager.exited is True
-        enhanced_handler.write_event.assert_not_called()
+        written = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert [Error.from_event(event).text for event in written] == ([SHUTDOWN_ERROR] if teardown == "stop" else [])
 
     @pytest.mark.asyncio
     async def test_stop_leaves_the_recording_to_an_audio_stop_in_progress(self, enhanced_handler, mock_clients):
@@ -1183,11 +1220,9 @@ class TestOpenAIEventHandlerComprehensive:
         await _stream_audio(enhanced_handler)
 
         stt_client.audio.transcriptions.create.assert_awaited_once()
-        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
-            "transcript-start",
-            "transcript",
-            "transcript-stop",
-        ]
+        # The client was told before the writer closed; what the upload writes after it no longer reaches it
+        first = enhanced_handler.write_event.call_args_list[0].args[0]
+        assert Error.from_event(first).text == SHUTDOWN_ERROR
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1592,6 +1627,14 @@ class TestOpenAIEventHandlerComprehensive:
         connection = _FakeRealtimeConnection([])
         stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
 
+        written = []
+
+        async def write(event):
+            written.append(Error.from_event(event).text if event.type == "error" else event.type)
+
+        enhanced_handler.write_event = AsyncMock(side_effect=write)
+        enhanced_handler.writer.close = Mock(side_effect=lambda: written.append("<closed>"))
+
         await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
         with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
             stopping = asyncio.create_task(enhanced_handler.handle_event(Event(type="audio-stop")))
@@ -1602,10 +1645,8 @@ class TestOpenAIEventHandlerComprehensive:
             assert await stopping is False
 
         assert "Realtime transcription session was closed" in caplog.text
-        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
-            "transcript-start",
-            "error",
-        ]
+        # Told before the writer closes, and only once: the failed audio stop does not write after the close
+        assert written == ["transcript-start", SHUTDOWN_ERROR, "<closed>"]
         await enhanced_handler._drain_background_tasks()
 
     @pytest.mark.asyncio
@@ -4746,6 +4787,26 @@ async def test_nameless_voice_request_uses_the_program_a_client_shows(
     assert handler._synthesis.voice is not None
     assert handler._synthesis.voice.name == expected_voice
     assert handler._synthesis.streamed is expected_streamed
+
+
+@pytest.mark.asyncio
+async def test_voice_of_another_program_is_not_moved_to_the_selected_one(dummy_reader_writer, caplog):
+    """Test a suffixed voice name the selected program lacks, but another offers, is refused, not remapped."""
+    voices = create_tts_voices(
+        ["tts-1", "gpt-4o-mini-tts"], ["gpt-4o-mini-tts"], ["alloy"], "https://api.openai.com/v1", ["en"]
+    )
+    info = create_info([], create_tts_programs(voices, tts_streaming_models=["gpt-4o-mini-tts"]))
+    handler = OpenAIEventHandler(*dummy_reader_writer, info=info, stt_client=None, tts_client=MagicMock())
+    handler.write_event = AsyncMock()
+    assert await handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        assert handler._validate_tts_voice_and_language("alloy (gpt-4o-mini-tts)", None) is None
+
+    assert "offered by another program than the selected openai" in caplog.text
+    # A name no program offers any more still falls back
+    fallback = handler._validate_tts_voice_and_language("alloy (tts-1-hd)", None)
+    assert fallback is not None and fallback.name == "alloy (tts-1)"
 
 
 def test_nameless_voice_request_prefers_the_speech_api(enhanced_handler, mock_info):
