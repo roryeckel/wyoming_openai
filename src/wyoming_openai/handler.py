@@ -125,6 +125,7 @@ TTS_CHUNK_SIZE = 2048  # Bytes read from the TTS response at a time; WavFramer b
 TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests per connection when streaming sentences
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
+SHUTDOWN_CLOSE_TIMEOUT = 2.0  # Seconds stop() waits for a client connection to finish closing before aborting it
 # Sent as a Wyoming error event; the cause is in the log
 TTS_FAILED_ERROR = "Text-to-speech synthesis failed"
 STT_FAILED_ERROR = "Speech-to-text transcription failed"
@@ -398,6 +399,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             await super().stop()
             # A websocket whose closing handshake stalls must not hold up the shutdown of the server
             await self._drain_background_tasks(SHUTDOWN_DRAIN_TIMEOUT)
+            # A client that stopped reading leaves the transport open on unsent audio, which Python 3.12 and
+            # later wait for at server shutdown
+            await self._close_writer()
 
     def _is_synthesis_in_flight(self) -> bool:
         """Whether a synthesis has started and not ended, so a client cut off from it is owed an error."""
@@ -1440,6 +1444,35 @@ class OpenAIEventHandler(AsyncEventHandler):
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _close_writer(self) -> None:
+        """
+        Wait for the writer closed by stop() to finish flushing, then abort a connection a client that stopped
+        reading left open. Python 3.12 and later wait for every client transport at server shutdown, so one that
+        never takes its remaining audio would hold the process up until it is forced shut.
+        """
+        wait_closed = asyncio.create_task(self.writer.wait_closed(), name="wyoming_writer_close")
+        try:
+            async with asyncio.timeout(SHUTDOWN_CLOSE_TIMEOUT):
+                # Shielded, so a timeout does not cancel the close waiter of the stream protocol, which a repeated
+                # stop() would then find cancelled
+                await asyncio.shield(wait_closed)
+        except TimeoutError:
+            _LOGGER.warning(
+                "Client did not take its remaining audio within %g seconds; aborting its connection to shut down",
+                SHUTDOWN_CLOSE_TIMEOUT,
+            )
+            self.writer.transport.abort()
+            # The abort completes the waiter; its result is not needed
+            with contextlib.suppress(Exception):
+                await wait_closed
+        except Exception as err:
+            _LOGGER.debug("Waiting for the client connection to close failed: %s", err)
+        finally:
+            if not wait_closed.done():
+                wait_closed.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait_closed
 
     async def _write_event_bounded(self, event: Event) -> bool:
         """

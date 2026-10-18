@@ -5,7 +5,9 @@ import contextlib
 import io
 import json
 import logging
+import socket
 import struct
+import sys
 import wave
 from collections.abc import AsyncIterator, Callable
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -14,6 +16,7 @@ import pytest
 import pytest_asyncio
 from openai import omit
 from wyoming.asr import Transcript, TranscriptChunk
+from wyoming.audio import AudioChunk
 from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
@@ -139,7 +142,11 @@ def dummy_clients():
 
 @pytest.fixture
 def dummy_reader_writer():
-    return MagicMock(name="reader"), MagicMock(name="writer")
+    reader = MagicMock(name="reader")
+    writer = MagicMock(name="writer")
+    writer.wait_closed = AsyncMock()
+    writer.transport = Mock()
+    return reader, writer
 
 
 @pytest.fixture
@@ -5437,6 +5444,80 @@ async def test_server_stop_cancels_unsplit_realtime_tts(enhanced_handler, mock_i
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows event loops treat a full socket differently")
+async def test_server_stop_aborts_a_client_that_stopped_reading(mock_info, monkeypatch):
+    """Test a client that leaves audio unread cannot hold up shutdown of the real server."""
+    monkeypatch.setattr("wyoming_openai.handler.SHUTDOWN_CLOSE_TIMEOUT", 0.05)
+    handlers: list[OpenAIEventHandler] = []
+
+    def handler_factory(reader, writer):
+        handler = OpenAIEventHandler(reader, writer, info=mock_info, stt_client=None, tts_client=None)
+        handlers.append(handler)
+        return handler
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    server = AsyncTcpServer("127.0.0.1", port)
+    server_task = asyncio.create_task(server.run(handler_factory), name="wyoming-test-server")
+    flood_task: asyncio.Task[None] | None = None
+    client_writer: asyncio.StreamWriter | None = None
+    client_socket: socket.socket | None = None
+    try:
+        async with asyncio.timeout(2):
+            while server._server is None:
+                await asyncio.sleep(0)
+
+        # A small receive buffer leaves the server's audio queued as soon as the test client stops reading
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client_socket.setblocking(False)
+        await asyncio.get_running_loop().sock_connect(client_socket, ("127.0.0.1", port))
+        _, client_writer = await asyncio.open_connection(sock=client_socket, limit=1024)
+
+        async with asyncio.timeout(2):
+            while not handlers:
+                await asyncio.sleep(0)
+        handler = handlers[0]
+
+        payload = b"\x00\x01" * (128 * 1024)
+
+        async def flood() -> None:
+            while True:
+                await handler.write_event(AudioChunk(audio=payload, rate=24000, width=2, channels=1).event())
+
+        flood_task = asyncio.create_task(flood(), name="wyoming-test-flood")
+        async with asyncio.timeout(2):
+            while handler.writer.transport.get_write_buffer_size() == 0:
+                await asyncio.sleep(0.01)
+        assert not flood_task.done()
+
+        # The SIGTERM path: stop the handlers and the listener, then wait for run() to return
+        server._stop_requested = True
+        async with asyncio.timeout(2):
+            await server.stop()
+            # The stalled transport is aborted after SHUTDOWN_CLOSE_TIMEOUT, so run() returns well within this
+            # bound instead of waiting for the client to take the rest of the audio
+            await asyncio.wait_for(asyncio.shield(server_task), 0.5)
+    finally:
+        if flood_task is not None:
+            flood_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await flood_task
+        if client_writer is not None:
+            client_writer.close()
+            with contextlib.suppress(Exception):
+                await client_writer.wait_closed()
+        elif client_socket is not None:
+            client_socket.close()
+        if not server_task.done():
+            server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await server_task
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("incremental_input", [False, True])
 async def test_unsplit_http_tts_shutdown_cancels_request(enhanced_handler, mock_info, mock_clients, incremental_input):
     """The shared unsplit path also cancels HTTP responses and reports the synthesis that was cut short."""
@@ -5982,6 +6063,36 @@ async def test_stop_without_a_synthesis_writes_nothing(enhanced_handler):
         await enhanced_handler.stop()
 
     enhanced_handler.write_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_aborts_a_connection_a_client_stopped_reading(enhanced_handler, monkeypatch):
+    """Test a writer that never finishes closing is aborted, so server shutdown does not wait on it forever."""
+    monkeypatch.setattr("wyoming_openai.handler.SHUTDOWN_CLOSE_TIMEOUT", 0.01)
+    wait_closed = asyncio.Event()
+
+    async def close_never_finishes():
+        await wait_closed.wait()
+
+    def abort():
+        wait_closed.set()
+
+    enhanced_handler.writer.wait_closed.side_effect = close_never_finishes
+    enhanced_handler.writer.transport.abort.side_effect = abort
+
+    async with asyncio.timeout(1):
+        await enhanced_handler.stop()
+
+    enhanced_handler.writer.transport.abort.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_abort_a_connection_that_closes(enhanced_handler):
+    """Test a writer that takes what was written while closing is left to close normally."""
+    async with asyncio.timeout(1):
+        await enhanced_handler.stop()
+
+    enhanced_handler.writer.transport.abort.assert_not_called()
 
 
 @pytest.mark.asyncio
