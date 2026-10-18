@@ -20,6 +20,7 @@ from wyoming_openai.utilities import (
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     parse_finite_float,
+    parse_non_negative_int,
     parse_voice_labels,
     strip_ssml,
     validate_audio_format,
@@ -310,6 +311,17 @@ def test_parse_finite_float_rejects_values_a_request_cannot_carry(value):
     assert parse_finite_float("1.5") == 1.5
     with pytest.raises(argparse.ArgumentTypeError):
         parse_finite_float(value)
+
+
+@pytest.mark.parametrize(("value", "expected"), [("0", 0), ("1", 1), ("2048", 2048)])
+def test_parse_non_negative_int_accepts_whole_numbers(value, expected):
+    assert parse_non_negative_int(value) == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "1.5", "two", ""])
+def test_parse_non_negative_int_rejects_invalid_values(value):
+    with pytest.raises(argparse.ArgumentTypeError, match="at least 0"):
+        parse_non_negative_int(value)
 
 
 def test_validate_stt_extra_body_allows_boolean_stream_override():
