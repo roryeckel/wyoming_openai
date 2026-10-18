@@ -23,6 +23,8 @@ classifiers = [
 ]
 dependencies = [
     "openai[realtime]==3.22.1",
+    # Realtime TTS reads its websocket without a receive-queue limit (max_queue=None), which needs 14.1 or later
+    "websockets>=14.1",
     "wyoming==1.10.2",
     "yasbd-lib>=1.0.1,<2.0"
 ]
