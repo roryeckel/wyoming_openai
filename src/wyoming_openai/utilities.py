@@ -1,13 +1,27 @@
 import argparse
 import html.entities
 import json
+import logging
 import math
+import struct
 from collections.abc import Callable
 from enum import Enum
 from io import BytesIO
 from typing import TypeGuard
 
-from .const import REALTIME_AUDIO_FORMAT, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED
+from .const import (
+    REALTIME_AUDIO_CHANNELS,
+    REALTIME_AUDIO_FORMAT,
+    REALTIME_AUDIO_RATE,
+    REALTIME_AUDIO_WIDTH,
+    REALTIME_MIN_AUDIO_RATE,
+    REALTIME_TTS_MAX_SPEED,
+    REALTIME_TTS_MIN_SPEED,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+MAX_AUDIO_RATE = 384_000  # Hz, above the highest consumer audio rate
 
 # Pause/block elements separate words even without surrounding whitespace;
 # inline elements (emphasis, prosody, say-as, ...) wrap text and must not.
@@ -29,6 +43,13 @@ SSML_MAX_TOKEN_LENGTH = 4096
 
 _TAG_NAME_CHARS = frozenset("._:-")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def truncate_for_log(text: str, max_length: int = 100) -> str:
+    """Truncate text for logging, adding ellipsis only if truncated."""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "..."
 
 
 def _decode_entity_reference(body: str) -> str | None:
@@ -625,6 +646,220 @@ def _is_finite_number(value: object) -> TypeGuard[int | float]:
     except OverflowError:
         # An int too large for a float is not a usable number either
         return False
+
+
+def _coerce_audio_format_int(value: object, name: str) -> int:
+    """Coerce one client-declared audio-start field to an integer, rejecting fractions and non-numbers."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        # An int can be arbitrarily large; the range checks below reject it without a float conversion
+        return value
+    if isinstance(value, float):
+        if not _is_finite_number(value):
+            raise ValueError(f"audio-start {name} must be finite, got {truncate_for_log(repr(value), 40)}")
+        if not value.is_integer():
+            raise ValueError(f"audio-start {name} must be a whole number, got {truncate_for_log(repr(value), 40)}")
+        return int(value)
+    raise ValueError(f"audio-start {name} must be a finite number, got {type(value).__name__}")
+
+
+def validate_audio_format(sample_rate: object, audio_width: object, audio_channels: object) -> tuple[int, int, int]:
+    """
+    Coerce and validate the audio format of an audio-start once, before either transport uses it.
+
+    The limits are those of a WAV header: rate and byte rate fit in 32 bits, channel count and frame size in 16.
+    """
+    rate = _coerce_audio_format_int(sample_rate, "rate")
+    width = _coerce_audio_format_int(audio_width, "width")
+    channels = _coerce_audio_format_int(audio_channels, "channels")
+
+    if not 1 <= rate <= MAX_AUDIO_RATE:
+        raise ValueError(
+            f"audio-start rate must be between 1 and {MAX_AUDIO_RATE} Hz, "
+            f"got {truncate_for_log(repr(rate), 40)}"
+        )
+    if width not in (1, 2, 3, 4):
+        raise ValueError(f"audio-start width must be 1, 2, 3 or 4 bytes, got {truncate_for_log(repr(width), 40)}")
+    if not 1 <= channels <= 0xFFFF:
+        raise ValueError(
+            f"audio-start channels must be between 1 and 65535, got {truncate_for_log(repr(channels), 40)}"
+        )
+    if width * channels > 0xFFFF:
+        raise ValueError("audio-start width and channels give a frame larger than 65535 bytes")
+    if rate * width * channels > 0xFFFFFFFF:
+        raise ValueError("audio-start rate, width and channels give a byte rate above 4294967295 B/s")
+    return rate, width, channels
+
+
+def decode_pcm_samples(audio: bytes, audio_width: int) -> list[int]:
+    """Decode validated PCM bytes into signed 16-bit sample values."""
+    if audio_width not in (1, 2, 3, 4):
+        raise ValueError(f"Unsupported audio sample width for realtime transcription: {audio_width}")
+
+    sample_count = len(audio) // audio_width
+    if sample_count == 0:
+        return []
+
+    audio = audio[: sample_count * audio_width]
+    if audio_width == 1:
+        return [(sample - 128) << 8 for sample in audio]
+
+    if audio_width == 2:
+        return list(struct.unpack(f"<{sample_count}h", audio))
+
+    # 24-bit and 32-bit samples, shifted to 16-bit
+    shift = 8 * (audio_width - 2)
+    return [
+        int.from_bytes(audio[index : index + audio_width], "little", signed=True) >> shift
+        for index in range(0, len(audio), audio_width)
+    ]
+
+
+def downmix_pcm_samples(samples: list[int], audio_channels: int) -> list[int]:
+    """Downmix validated PCM samples to mono."""
+    if audio_channels <= 0:
+        raise ValueError(f"Unsupported audio channel count for realtime transcription: {audio_channels}")
+
+    if audio_channels == REALTIME_AUDIO_CHANNELS:
+        return samples
+
+    frame_count = len(samples) // audio_channels
+    mono_samples = []
+    for frame_index in range(frame_count):
+        start = frame_index * audio_channels
+        mono_samples.append(round(sum(samples[start : start + audio_channels]) / audio_channels))
+    return mono_samples
+
+
+def take_whole_frames(*, partial: bytes, audio: bytes, frame_size: int) -> tuple[bytes, bytes]:
+    """
+    Take the whole frames of partial and audio, holding back the start of one that continues in the next bytes.
+
+    A frame can be split wherever a stream is, for one by a header of odd length.
+    """
+    if frame_size <= 1:
+        return partial + audio, b""
+    audio = partial + audio
+    whole = len(audio) - len(audio) % frame_size
+    return audio[:whole], audio[whole:]
+
+
+def encode_pcm16_samples(samples: list[int]) -> bytes:
+    """Encode signed sample values as little-endian PCM16."""
+    if not samples:
+        return b""
+
+    clamped_samples = (max(-32768, min(32767, int(sample))) for sample in samples)
+    return struct.pack(f"<{len(samples)}h", *clamped_samples)
+
+
+class RealtimePcmResampler:
+    """
+    Linear resampler whose phase and last sample span the chunks of a Realtime stream.
+
+    Output sample k sits at input position k * source_rate / target_rate from the start of the stream. The position is
+    kept in whole target-rate units from the carried sample, so a long stream does not drift, and the last sample of
+    a chunk is carried so the next output interpolates towards the next chunk's first sample.
+    """
+
+    def __init__(self, source_rate: int, target_rate: int) -> None:
+        if source_rate <= 0 or target_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        self._source_rate = source_rate
+        self._target_rate = target_rate
+        self._position = 0  # The next output sample, in 1/target_rate input samples, after the carried sample
+        self._last_sample: int | None = None  # The last input sample of the previous chunk
+
+    def process(self, samples: list[int]) -> list[int]:
+        """Resample one chunk, carrying the position and last sample to the next one."""
+        if not samples:
+            return []
+        source_rate = self._source_rate
+        target_rate = self._target_rate
+        if source_rate == target_rate:
+            return samples
+
+        carried = self._last_sample
+        offset = 0 if carried is None else 1
+        length = len(samples) + offset
+        end_position = (length - 1) * target_rate
+        resampled: list[int] = []
+        position = self._position
+        while position < end_position:
+            left_index, remainder = divmod(position, target_rate)
+            # A carried sample takes virtual index 0, and the chunk's samples follow it
+            left_sample = carried if carried is not None and left_index < offset else samples[left_index - offset]
+            right_sample = samples[left_index + 1 - offset]
+            if remainder:
+                fraction = remainder / target_rate
+                resampled.append(round(left_sample + (right_sample - left_sample) * fraction))
+            else:
+                resampled.append(left_sample)
+            position += source_rate
+
+        # The next position is relative to the last sample, which the next chunk carries
+        self._position = position - end_position
+        self._last_sample = samples[-1]
+        return resampled
+
+    def flush(self) -> list[int]:
+        """
+        Emit the outputs held for the end of the stream: each starts at or after its last input sample, so all are
+        repeats of it. This follows the position walk rather than a rounded sample count, so nothing emitted by
+        process() is ever beyond the stream's own length.
+        """
+        last_sample = self._last_sample
+        if last_sample is None or self._source_rate == self._target_rate:
+            return []
+
+        # Ceiling division of the distance to one input sample past the carried sample
+        remaining = max(0, -(-(self._target_rate - self._position) // self._source_rate))
+        self._position = 0
+        self._last_sample = None
+        return [last_sample] * remaining
+
+
+class RealtimeAudioConverter:
+    """Converts one Realtime stream's Wyoming PCM to 24 kHz mono PCM16, carrying frame and resampling state."""
+
+    def __init__(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
+        sample_rate, audio_width, audio_channels = validate_audio_format(sample_rate, audio_width, audio_channels)
+        if sample_rate < REALTIME_MIN_AUDIO_RATE:
+            raise ValueError(
+                f"realtime transcription requires at least {REALTIME_MIN_AUDIO_RATE} Hz, got {sample_rate}"
+            )
+        self._audio_width = audio_width
+        self._audio_channels = audio_channels
+        self._frame_size = audio_width * audio_channels
+        self._passthrough = (
+            sample_rate == REALTIME_AUDIO_RATE
+            and audio_width == REALTIME_AUDIO_WIDTH
+            and audio_channels == REALTIME_AUDIO_CHANNELS
+        )
+        self._pcm_tail = b""
+        self._resampler = RealtimePcmResampler(sample_rate, REALTIME_AUDIO_RATE)
+
+    def convert_chunk(self, audio: bytes) -> bytes:
+        """Convert the complete frames of one chunk, carrying a partial frame to the next chunk."""
+        audio, self._pcm_tail = take_whole_frames(
+            partial=self._pcm_tail, audio=audio, frame_size=self._frame_size
+        )
+        if not audio:
+            return b""
+
+        if self._passthrough:
+            return audio
+
+        samples = decode_pcm_samples(audio, self._audio_width)
+        samples = downmix_pcm_samples(samples, self._audio_channels)
+        return encode_pcm16_samples(self._resampler.process(samples))
+
+    def flush(self) -> bytes:
+        """Encode the resampler's held samples and drop a final partial frame."""
+        audio = encode_pcm16_samples(self._resampler.flush())
+        if self._pcm_tail:
+            _LOGGER.debug("Dropping %d bytes that end the Realtime audio in the middle of a frame", len(self._pcm_tail))
+            self._pcm_tail = b""
+        return audio
 
 
 def clamp_realtime_tts_speed(speed: float) -> float:

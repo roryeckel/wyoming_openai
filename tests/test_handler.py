@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 import pytest_asyncio
 from openai import omit
+from pcm_reference import assert_samples_close, interleave_pcm, reference_resample, sine_samples
 from wyoming.asr import Transcript, TranscriptChunk
 from wyoming.audio import AudioChunk
 from wyoming.error import Error
@@ -38,6 +39,12 @@ from wyoming_openai.handler import (
     TtsStreamError,
     _AudioStreamState,
     _has_speakable_content,
+)
+from wyoming_openai.utilities import (
+    RealtimeAudioConverter,
+    decode_pcm_samples,
+    downmix_pcm_samples,
+    encode_pcm16_samples,
 )
 from wyoming_openai.wav import TtsAudioFormat, WavFramer, parse_wav_header
 
@@ -185,6 +192,21 @@ def _selected_realtime_stream(handler):
     return _AudioStreamState(
         model=handler._current_asr_model, language=handler._current_language, realtime=True, streaming=False
     )
+
+
+def _realtime_stream(rate=24000, width=2, channels=1):
+    """A Realtime audio stream with its converter, as audio-start creates it."""
+    audio_stream = _AudioStreamState(model=None, language=None, realtime=True, streaming=False)
+    audio_stream.converter = RealtimeAudioConverter(rate, width, channels)
+    return audio_stream
+
+
+def _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name="gpt-realtime-whisper"):
+    """Select a Realtime STT model and return the handler's mocked STT client."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = name
+    enhanced_handler._stt_realtime_models = {name}
+    return stt_client
 
 
 class _FakeRealtimeServerEvent:
@@ -1472,12 +1494,143 @@ class TestOpenAIEventHandlerComprehensive:
         enhanced_handler._realtime_connection = connection
         enhanced_handler._realtime_transcript_future = None
         enhanced_handler.write_event = AsyncMock()
+        audio_stream = _realtime_stream()
 
-        assert await enhanced_handler._handle_realtime_audio_stop() is False
+        assert await enhanced_handler._handle_realtime_audio_stop(audio_stream) is False
 
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
         assert event_types == ["error"]
         connection.input_audio_buffer.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_realtime_audio_stop_keeps_its_connection_when_cleanup_runs_during_flush(
+        self, enhanced_handler
+    ):
+        """A stop() during the awaited flush skips the commit instead of using a closing session."""
+        connection = Mock()
+        append_started = asyncio.Event()
+        release_append = asyncio.Event()
+        append_count = 0
+
+        async def append(*, audio):
+            nonlocal append_count
+            append_count += 1
+            if append_count == 2:
+                append_started.set()
+                await release_append.wait()
+
+        connection.input_audio_buffer.append = AsyncMock(side_effect=append)
+        connection.input_audio_buffer.commit = AsyncMock()
+        connection.close = AsyncMock()
+        audio_stream = _realtime_stream(16000)
+        enhanced_handler._audio_stream = audio_stream
+        enhanced_handler._is_recording = True
+        enhanced_handler._realtime_connection = connection
+        enhanced_handler._realtime_transcript_future = asyncio.get_running_loop().create_future()
+        await enhanced_handler._handle_realtime_audio_chunk(
+            audio_stream, AudioChunk(audio=b"\x00\x00" * 10, rate=16000, width=2, channels=1)
+        )
+
+        stop_task = asyncio.create_task(enhanced_handler._handle_realtime_audio_stop(audio_stream))
+        try:
+            await asyncio.wait_for(append_started.wait(), 1)
+            await enhanced_handler._cleanup_realtime_transcription()
+            release_append.set()
+
+            assert await stop_task is False
+            connection.input_audio_buffer.commit.assert_not_called()
+        finally:
+            release_append.set()
+            if not stop_task.done():
+                stop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stop_task
+            await enhanced_handler._drain_background_tasks()
+
+    @pytest.mark.asyncio
+    async def test_realtime_audio_start_rejects_a_tiny_sample_rate(
+        self, enhanced_handler, mock_info, mock_clients, caplog
+    ):
+        """A rate below the speech minimum must not make the resampler expand a sample into seconds of output."""
+        stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+        stt_client.realtime.connect = Mock()
+
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+            await enhanced_handler.handle_event(
+                Event(type="audio-start", data={"rate": 1, "width": 2, "channels": 1})
+            )
+
+        assert "Rejecting audio-start: realtime transcription requires" in caplog.text
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["error"]
+        assert enhanced_handler._is_recording is False
+        stt_client.realtime.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_realtime_audio_start_coerces_whole_float_format(
+        self, enhanced_handler, mock_info, mock_clients
+    ):
+        """A whole float rate reaches the resampler as an integer, so chunk conversion does not raise."""
+        stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+        connection = _FakeRealtimeConnection([])
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+        try:
+            await enhanced_handler.handle_event(
+                Event(type="audio-start", data={"rate": 16000.0, "width": 2.0, "channels": 1.0})
+            )
+            await enhanced_handler.handle_event(
+                Event(
+                    type="audio-chunk",
+                    data={"rate": 16000.0, "width": 2.0, "channels": 1.0},
+                    payload=b"\x00\x01" * 10,
+                )
+            )
+
+            assert enhanced_handler._is_recording is True
+            assert len(connection.input_audio_buffer.appended_audio) == 1
+        finally:
+            await enhanced_handler._cleanup_realtime_transcription()
+            await enhanced_handler._drain_background_tasks()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("realtime", [False, True], ids=["http", "realtime"])
+    @pytest.mark.parametrize(
+        "audio_format",
+        [
+            pytest.param({"rate": 0, "width": 2, "channels": 1}, id="zero-rate"),
+            pytest.param({"rate": 16000.5, "width": 2, "channels": 1}, id="fractional-rate"),
+            pytest.param({"rate": "16000", "width": 2, "channels": 1}, id="string-rate"),
+            pytest.param({"rate": True, "width": 2, "channels": 1}, id="boolean-rate"),
+            pytest.param({"rate": 16000, "width": 5, "channels": 1}, id="unsupported-width"),
+            pytest.param({"rate": 16000, "width": 2, "channels": 0}, id="zero-channels"),
+            pytest.param({"rate": 16000, "width": 4, "channels": 32768}, id="oversized-frame"),
+            pytest.param({"rate": 4294967295, "width": 2, "channels": 1}, id="byte-rate-overflow"),
+        ],
+    )
+    async def test_invalid_audio_start_reports_the_failure_instead_of_raising(
+        self, enhanced_handler, mock_info, mock_clients, audio_format, realtime
+    ):
+        """Both transports reject an unusable audio format with an error event before wave.open() can raise."""
+        stt_client, _ = mock_clients
+        if realtime:
+            _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data=audio_format))
+        await enhanced_handler.handle_event(
+            Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01")
+        )
+
+        assert enhanced_handler._is_recording is False
+        assert enhanced_handler._wav_buffer is None
+        assert enhanced_handler._audio_stream is not None
+        assert enhanced_handler._audio_stream.realtime is realtime
+        assert enhanced_handler._audio_stream.failed is True
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == ["error"]
+        assert await enhanced_handler.handle_event(Event(type="audio-stop")) is False
+        if realtime:
+            stt_client.realtime.connect.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failing_step", ["connect", "session.update send"])
@@ -1755,16 +1908,6 @@ class TestOpenAIEventHandlerComprehensive:
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
         assert event_types == ["transcript-start", "error"]
 
-    def test_convert_audio_to_realtime_pcm_resamples_to_24khz(self, enhanced_handler):
-        """Test Wyoming PCM is converted to OpenAI Realtime's 24 kHz PCM16 format."""
-        source_audio = b"\x00\x00\xe8\x03"
-
-        converted = enhanced_handler._convert_audio_to_realtime_pcm(
-            source_audio, sample_rate=16000, audio_width=2, audio_channels=1
-        )
-
-        assert len(converted) == 6
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize("width,channels", [(1, 1), (2, 1), (3, 1), (4, 1), (1, 2), (2, 2), (3, 2), (4, 2)])
     async def test_realtime_pcm_keeps_partial_frames_between_chunks(self, enhanced_handler, width, channels):
@@ -1773,11 +1916,8 @@ class TestOpenAIEventHandlerComprehensive:
         connection = Mock()
         connection.input_audio_buffer.append = AsyncMock()
         enhanced_handler._realtime_connection = connection
-        enhanced_handler._audio_stream = _AudioStreamState(model=None, language=None, realtime=True, streaming=False)
+        enhanced_handler._audio_stream = _realtime_stream(width=width, channels=channels)
         enhanced_handler._is_recording = True
-        enhanced_handler._audio_sample_rate = 24000
-        enhanced_handler._audio_width = width
-        enhanced_handler._audio_channels = channels
         for part in (audio[:1], audio[1:width * channels + 1], audio[width * channels + 1:]):
             await enhanced_handler.handle_event(
                 Event(type="audio-chunk", data={"rate": 24000, "width": width, "channels": channels}, payload=part)
@@ -1785,42 +1925,95 @@ class TestOpenAIEventHandlerComprehensive:
         sent = b"".join(
             base64.b64decode(call.kwargs["audio"]) for call in connection.input_audio_buffer.append.call_args_list
         )
-        expected = enhanced_handler._convert_audio_to_realtime_pcm(
-            audio, sample_rate=24000, audio_width=width, audio_channels=channels
-        )
-        assert sent == expected
+        expected = downmix_pcm_samples(decode_pcm_samples(audio, width), channels)
+        assert sent == encode_pcm16_samples(expected)
         assert all(
             len(base64.b64decode(call.kwargs["audio"])) % 2 == 0
             for call in connection.input_audio_buffer.append.call_args_list
         )
-        assert enhanced_handler._realtime_pcm_tail == b""
-
-    def test_realtime_pcm_decodes_signed_24_bit_samples(self, enhanced_handler):
-        assert enhanced_handler._decode_pcm_samples(b"\x00\x00\x80\xff\xff\x7f", 3) == [-32768, 32767]
 
     @pytest.mark.asyncio
-    async def test_realtime_pcm_partial_frame_is_cleared_on_cleanup(self, enhanced_handler):
-        connection = Mock()
-        connection.input_audio_buffer.append = AsyncMock()
-        connection.close = AsyncMock()
-        enhanced_handler._realtime_connection = connection
-        enhanced_handler._audio_stream = _AudioStreamState(model=None, language=None, realtime=True, streaming=False)
-        enhanced_handler._is_recording = True
-        enhanced_handler._audio_sample_rate = 24000
-        enhanced_handler._audio_width = 2
-        enhanced_handler._audio_channels = 1
-        await enhanced_handler.handle_event(
-            Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\xff")
+    @pytest.mark.parametrize("rate", [8000, 16000, 44100, 48000])
+    @pytest.mark.parametrize("chunk_frames", [160, 161])
+    @pytest.mark.parametrize("channels", [1, 2])
+    async def test_realtime_resampling_matches_a_whole_buffer_reference(
+        self, enhanced_handler, mock_info, mock_clients, rate, chunk_frames, channels
+    ):
+        """Resampling carries its phase across chunks, so a stream matches a whole-buffer reference."""
+        stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+        connection = _FakeRealtimeConnection(
+            [
+                _FakeRealtimeServerEvent(
+                    "conversation.item.input_audio_transcription.completed", transcript="Hello"
+                )
+            ]
         )
-        await enhanced_handler._cleanup_realtime_transcription()
-        enhanced_handler._realtime_connection = connection
-        await enhanced_handler.handle_event(
-            Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x01\x02")
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+        mono_samples = sine_samples(rate, 0.25)
+        audio = interleave_pcm(mono_samples, channels)
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+        try:
+            await enhanced_handler.handle_event(
+                Event(type="audio-start", data={"rate": rate, "width": 2, "channels": channels})
+            )
+            chunk_size = chunk_frames * channels * 2
+            for start in range(0, len(audio), chunk_size):
+                await enhanced_handler.handle_event(
+                    Event(
+                        type="audio-chunk",
+                        data={"rate": rate, "width": 2, "channels": channels},
+                        payload=audio[start : start + chunk_size],
+                    )
+                )
+            assert await enhanced_handler.handle_event(Event(type="audio-stop")) is True
+
+            sent = b"".join(base64.b64decode(payload) for payload in connection.input_audio_buffer.appended_audio)
+            assert_samples_close(decode_pcm_samples(sent, 2), reference_resample(mono_samples, rate))
+            assert connection.input_audio_buffer.committed is True
+        finally:
+            await enhanced_handler._cleanup_realtime_transcription()
+            await enhanced_handler._drain_background_tasks()
+
+    @pytest.mark.asyncio
+    async def test_realtime_pcm_partial_frame_does_not_carry_to_the_next_stream(
+        self, enhanced_handler, mock_info, mock_clients
+    ):
+        """A new audio-start gets a new converter, so the previous stream's partial frame cannot leak into it."""
+        stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+        connections = [_FakeRealtimeConnection([]), _FakeRealtimeConnection([])]
+        connections[1].commit_events.append(
+            _FakeRealtimeServerEvent(
+                "conversation.item.input_audio_transcription.completed", transcript="Hello"
+            )
         )
-        sent = b"".join(
-            base64.b64decode(call.kwargs["audio"]) for call in connection.input_audio_buffer.append.call_args_list
+        stt_client.realtime.connect = Mock(
+            side_effect=[_FakeRealtimeConnectionManager(connection) for connection in connections]
         )
-        assert sent == b"\x01\x02"
+
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+        try:
+            await enhanced_handler.handle_event(
+                Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+            )
+            await enhanced_handler.handle_event(
+                Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\xff")
+            )
+            # The client starts a new stream without stopping the first
+            await enhanced_handler.handle_event(
+                Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+            )
+            await enhanced_handler.handle_event(
+                Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x01\x02")
+            )
+            assert await enhanced_handler.handle_event(Event(type="audio-stop")) is True
+
+            assert connections[0].input_audio_buffer.appended_audio == []
+            sent = b"".join(base64.b64decode(audio) for audio in connections[1].input_audio_buffer.appended_audio)
+            assert sent == b"\x01\x02"
+        finally:
+            await enhanced_handler._cleanup_realtime_transcription()
+            await enhanced_handler._drain_background_tasks()
 
     @pytest.mark.asyncio
     async def test_realtime_transcription_session_includes_configured_prompt(self, enhanced_handler, mock_info):
@@ -6059,6 +6252,20 @@ async def test_stop_reports_a_streaming_synthesis_that_waits_for_more_text(enhan
 @pytest.mark.asyncio
 async def test_stop_without_a_synthesis_writes_nothing(enhanced_handler):
     """Test a connection that is idle at shutdown is only closed."""
+    with patch("wyoming.server.AsyncEventHandler.stop", new=AsyncMock()):
+        await enhanced_handler.stop()
+
+    enhanced_handler.write_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_repeat_the_error_of_a_rejected_audio_start(enhanced_handler):
+    """A stream rejected at audio-start already sent its error, so shutdown does not send another."""
+    await enhanced_handler.handle_event(
+        Event(type="audio-start", data={"rate": 0, "width": 2, "channels": 1})
+    )
+    enhanced_handler.write_event.reset_mock()
+
     with patch("wyoming.server.AsyncEventHandler.stop", new=AsyncMock()):
         await enhanced_handler.stop()
 
