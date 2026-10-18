@@ -6,16 +6,18 @@ import logging
 import math
 import struct
 import wave
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai import omit
 from openai.types.audio import Transcription
 from wyoming.asr import Transcript
 from wyoming.event import Event
 
-from wyoming_openai.compatibility import create_asr_programs, create_info
+from wyoming_openai.compatibility import OpenAIBackend, create_asr_programs, create_info
 from wyoming_openai.early_transcription import PauseDetector, Signal
-from wyoming_openai.handler import OpenAIEventHandler
+from wyoming_openai.handler import SHUTDOWN_ERROR, STT_FAILED_ERROR, OpenAIEventHandler
 
 RATE = 16000
 BYTES_PER_MS = RATE * 2 // 1000  # 16-bit mono
@@ -103,7 +105,7 @@ def test_soft_sound_after_the_pause_makes_it_stale():
     assert [signal for _, signal in signals] == [Signal.PAUSE, Signal.RESUMED]
 
 
-def test_less_than_100_ms_of_sound_after_the_pause_keeps_it_valid():
+def test_resume_signal_waits_for_100_ms_of_sound_after_the_pause():
     short_sound = run_detector(tone(256, HUSH), tone(1024, SPEECH), tone(320, HUSH), tone(96, SPEECH))
     longer_sound = run_detector(tone(256, HUSH), tone(1024, SPEECH), tone(320, HUSH), tone(128, SPEECH))
 
@@ -175,11 +177,11 @@ class FakeStt:
         return Transcription(text=f"{request['frames']} frames")
 
 
-def make_handler(stt: FakeStt, *, streaming_model=False, **handler_kwargs):
-    if streaming_model:
-        programs = create_asr_programs([], ["whisper-1"], "url", ["en"])
-    else:
-        programs = create_asr_programs(["whisper-1"], [], "url", ["en"])
+def make_handler(stt: FakeStt, *, streaming_model=False, model_name="whisper-1", programs=None, **handler_kwargs):
+    if programs is None:
+        programs = create_asr_programs(
+            [] if streaming_model else [model_name], [model_name] if streaming_model else [], "url", ["en", "de"]
+        )
     handler = OpenAIEventHandler(
         MagicMock(),
         MagicMock(),
@@ -212,7 +214,7 @@ async def stop_streaming(handler: OpenAIEventHandler) -> None:
 
 
 def transcripts(handler) -> list[str]:
-    events = [call.args[0] for call in handler.write_event.await_args_list]
+    events = [call.args[0] for call in cast(AsyncMock, handler.write_event).await_args_list]
     return [Transcript.from_event(event).text for event in events if Transcript.is_type(event.type)]
 
 
@@ -398,3 +400,216 @@ async def test_audio_stop_waits_for_a_running_early_request_instead_of_sending_a
 
     assert len(stt.requests) == 1
     assert transcripts(handler) == [f"{frames_for(256 + 1024 + 320)} frames"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amplitude", [SPEECH, SOFT])
+@pytest.mark.parametrize("trailing_quiet_ms", [0, 640])
+async def test_even_a_brief_sound_after_the_snapshot_requires_the_whole_recording(amplitude, trailing_quiet_ms):
+    stt = FakeStt()
+    handler = make_handler(stt, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(
+        handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(320, HUSH), tone(64, amplitude), tone(trailing_quiet_ms, HUSH)
+    )
+    await stop_streaming(handler)
+
+    whole_recording = frames_for(256 + 1024 + 320 + 64 + trailing_quiet_ms)
+    assert stt.frames == [frames_for(256 + 1024 + 320), whole_recording]
+    assert transcripts(handler) == [f"{whole_recording} frames"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_body,expected_languages,expected_extra",
+    [
+        (None, ["en"], None),
+        ({"language": "de"}, ["de"], None),
+        ({"languages": ["en", "de"]}, omit, {"languages": ["en", "de"]}),
+    ],
+)
+async def test_early_request_preserves_plural_language_mapping(extra_body, expected_languages, expected_extra):
+    stt = FakeStt()
+    stt.client.backend = OpenAIBackend.OPENAI
+    handler = make_handler(stt, model_name="gpt-transcribe", stt_early_transcribe=True, stt_extra_body=extra_body)
+    assert await handler.handle_event(Event(type="transcribe", data={"name": "gpt-transcribe", "language": "en"}))
+
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+    assert len(stt.requests) == 1  # The request was sent before AudioStop.
+    await stop_streaming(handler)
+
+    request = stt.requests[0]
+    assert request["language"] is omit
+    assert request["languages"] == expected_languages
+    assert request.get("extra_body") == expected_extra
+    assert len(stt.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_model_can_transcribe_early_without_a_transcribe_event():
+    stt = FakeStt()
+    handler = make_handler(stt, stt_early_transcribe=True)
+
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+    assert stt.frames == [frames_for(256 + 1024 + 320)]
+    await stop_streaming(handler)
+
+    assert len(stt.requests) == 1
+    assert stt.requests[0]["model"] == "whisper-1"
+
+
+@pytest.mark.asyncio
+async def test_new_model_and_language_replace_the_early_request():
+    stt = FakeStt(hold_first=True)
+    programs = create_asr_programs(["whisper-1", "gpt-transcribe"], [], "url", ["en", "de"])
+    stt.client.backend = OpenAIBackend.OPENAI
+    handler = make_handler(stt, programs=programs, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+
+    assert await handler.handle_event(Event(type="transcribe", data={"name": "gpt-transcribe", "language": "de"}))
+    await stop_streaming(handler)
+    await asyncio.sleep(0)
+
+    assert stt.first_request_cancelled
+    assert stt.frames == [frames_for(256 + 1024 + 320), frames_for(256 + 1024 + 640)]
+    assert stt.requests[1]["model"] == "gpt-transcribe"
+    assert stt.requests[1]["language"] is omit
+    assert stt.requests[1]["languages"] == ["de"]
+
+
+@pytest.mark.asyncio
+async def test_selecting_a_different_program_keeps_the_recordings_early_model():
+    stt = FakeStt()
+    programs = create_asr_programs(["whisper-1"], ["other-model"], "url", ["en"])
+    handler = make_handler(stt, programs=programs, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+
+    assert await handler.handle_event(Event(type="select-program", data={"name": "openai-streaming"}))
+    await stop_streaming(handler)
+
+    assert len(stt.requests) == 1
+    assert stt.requests[0]["model"] == "whisper-1"
+    assert transcripts(handler) == [f"{frames_for(256 + 1024 + 320)} frames"]
+
+
+@pytest.mark.asyncio
+async def test_stream_false_override_allows_an_early_http_request():
+    stt = FakeStt()
+    handler = make_handler(stt, streaming_model=True, stt_early_transcribe=True, stt_extra_body={"stream": False})
+    await start_transcribing(handler)
+
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+    assert len(stt.requests) == 1
+    await stop_streaming(handler)
+
+    assert len(stt.requests) == 1
+    assert stt.requests[0]["stream"] is omit
+    assert stt.requests[0]["extra_body"] == {"stream": False}
+
+
+@pytest.mark.asyncio
+async def test_realtime_audio_never_starts_an_early_http_request():
+    stt = FakeStt()
+    handler = make_handler(stt, stt_realtime_models=["whisper-1"], stt_early_transcribe=True)
+    handler._handle_realtime_audio_start = AsyncMock()
+    handler._handle_realtime_audio_chunk = AsyncMock()
+    await start_transcribing(handler)
+
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+
+    handler._handle_realtime_audio_start.assert_awaited_once()
+    assert handler._handle_realtime_audio_chunk.await_count > 0
+    assert stt.requests == []
+    assert handler._early_transcription is None
+    await handler.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["audio-start", "refused-transcribe"])
+async def test_abandoning_a_recording_cancels_its_early_request(replacement):
+    stt = FakeStt(hold_first=True)
+    handler = make_handler(stt, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+
+    if replacement == "audio-start":
+        await handler.handle_event(Event(type="audio-start", data=AUDIO_FORMAT))
+    else:
+        assert not await handler.handle_event(Event(type="transcribe", data={"name": "missing-model"}))
+    await asyncio.sleep(0)
+
+    assert stt.first_request_cancelled
+    assert len(stt.requests) == 1
+    assert transcripts(handler) == []
+    await handler.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("awaiting_stop", [False, True])
+@pytest.mark.parametrize("cleanup", ["stop", "disconnect"])
+async def test_cleanup_cancels_an_early_request_even_while_audio_stop_awaits_it(cleanup, awaiting_stop):
+    stt = FakeStt(hold_first=True)
+    handler = make_handler(stt, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+
+    stopping = None
+    if awaiting_stop:
+        stopping = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not stopping.done()
+
+    await getattr(handler, cleanup)()
+    await asyncio.sleep(0)
+    if stopping is not None:
+        assert await stopping is False
+
+    assert stt.first_request_cancelled
+    assert len(stt.requests) == 1  # Cleanup must not trigger a fallback request.
+    assert transcripts(handler) == []
+    events = [call.args[0] for call in cast(AsyncMock, handler.write_event).await_args_list]
+    assert [event.data["text"] for event in events if event.type == "error"] == (
+        [SHUTDOWN_ERROR] if cleanup == "stop" else []
+    )
+    await handler.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_audio_stop_cancels_the_request_and_discards_its_recording():
+    stt = FakeStt(hold_first=True)
+    handler = make_handler(stt, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+    stopping = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    assert stt.first_request_cancelled
+    assert len(stt.requests) == 1
+    assert handler._wav_buffer is None
+    assert handler._early_transcription is None
+    assert transcripts(handler) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_fallback_reports_the_current_stt_error_contract():
+    stt = FakeStt()
+    stt.client.audio.transcriptions.create.side_effect = RuntimeError("backend unavailable")
+    handler = make_handler(stt, stt_early_transcribe=True)
+    await start_transcribing(handler)
+    await stream(handler, QUIET_ROOM, ONE_SECOND_OF_SPEECH, tone(640, HUSH))
+
+    assert not await handler.handle_event(Event(type="audio-stop"))
+
+    assert stt.client.audio.transcriptions.create.await_count == 2
+    events = [call.args[0] for call in cast(AsyncMock, handler.write_event).await_args_list]
+    assert [event.type for event in events] == ["error"]
+    assert events[0].data["text"] == STT_FAILED_ERROR
+    assert handler._wav_buffer is None

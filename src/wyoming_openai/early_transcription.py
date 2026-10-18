@@ -1,8 +1,8 @@
 """
 Early transcription: start the speech-to-text request when the speaker pauses instead of at Wyoming's ``AudioStop``.
 
-Home Assistant only sends ``AudioStop`` after its own end-of-speech detection, which by default waits for 0.7 s of
-silence, and a plain proxy only then sends the recording to the speech-to-text backend. ``EarlyTranscription`` listens
+Home Assistant sends ``AudioStop`` after its own end-of-speech detection, and a plain proxy only then sends the
+recording to the speech-to-text backend. ``EarlyTranscription`` listens
 to the audio while it arrives. After speech followed by a short pause it sends the audio received so far to the backend
 right away. At ``AudioStop`` that answer is used if nothing but silence arrived since the request started. If the
 speaker carried on, the early answer is dropped and the handler sends its normal request with the complete recording.
@@ -28,7 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 
 EARLY_SILENCE_MS = 300  # Quiet time after speech that starts an early request
 EARLY_MIN_SPEECH_MS = 250  # Loud time needed before a pause counts as the end of speech
-EARLY_RESUME_MS = 100  # Sound after an early request started that makes the request stale
+EARLY_RESUME_MS = 100  # Non-quiet sound that cancels the request; any such sound already invalidates its answer
 EARLY_MAX_REQUESTS = 3  # Early requests per recording (every pause after speech can start one)
 REFERENCE_CHUNK_MS = 32  # Chunk length that the background-level adaptation rates below are expressed in
 
@@ -120,6 +120,15 @@ class PauseDetector:
 
         return signal
 
+    @property
+    def covers_recording(self) -> bool:
+        """An early snapshot is reusable only if every chunk since its pause was quiet.
+
+        The resume threshold avoids starting more requests for brief noises, but even a shorter sound can be
+        a word ending. At AudioStop it must be transcribed with the complete recording.
+        """
+        return self._in_pause and self._sound_after_pause_ms == 0
+
 
 def _consume_exception(task: asyncio.Task[Any]) -> None:
     """Mark the error of a finished early request as seen; only requests that are still valid are ever awaited."""
@@ -168,21 +177,32 @@ class EarlyTranscription:
         """
         Return the early answer if it still covers the whole recording, otherwise None.
 
-        Call this when the recording has ended. A request that is still running is awaited: it started before a new
-        request could, so it also finishes before one. None means "send the normal request": nothing was started,
+        Call this when the recording has ended. A valid request that is still running is awaited, retaining its
+        head start over a new request. None means "send the normal request": nothing was started,
         sound came back after the request started, or the early request failed.
         """
         task = self._task
         if task is None:
             return None
+        if not self._detector.covers_recording:
+            self.cancel()
+            return None
 
-        self._task = None
         lead_ms = (time.monotonic() - self._started_at) * 1000
         try:
             transcription = await task
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            # The handler dropped the recording while AudioStop was waiting for this request.
+            return None
         except Exception as exc:
             _LOGGER.warning("Early transcription failed (%s); transcribing the recording normally", exc)
             return None
+        finally:
+            if self._task is task:
+                self._task = None
 
         _LOGGER.info("Using early transcription (its request started %.0f ms before the audio stopped)", lead_ms)
         return transcription
@@ -204,11 +224,11 @@ class EarlyTranscription:
         )
 
     async def _transcribe(self, pcm: bytes) -> Any:
-        wav_buffer = NamedBytesIO(name="recording.wav")
-        with wave.open(wav_buffer, "wb") as wav_writer:
-            wav_writer.setnchannels(self._channels)
-            wav_writer.setsampwidth(self._width)
-            wav_writer.setframerate(self._rate)
-            wav_writer.writeframes(pcm)
-        wav_buffer.seek(0)
-        return await self._request(wav_buffer)
+        with NamedBytesIO(name="recording.wav") as wav_buffer:
+            with wave.open(wav_buffer, "wb") as wav_writer:
+                wav_writer.setnchannels(self._channels)
+                wav_writer.setsampwidth(self._width)
+                wav_writer.setframerate(self._rate)
+                wav_writer.writeframes(pcm)
+            wav_buffer.seek(0)
+            return await self._request(wav_buffer)
