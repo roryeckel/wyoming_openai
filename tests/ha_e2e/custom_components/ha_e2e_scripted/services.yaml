@@ -1,0 +1,21 @@
+set_reply:
+  name: Set scripted reply
+  description: Set the reply the test conversation agent streams on its next turn.
+  fields:
+    reply:
+      name: Reply
+      description: Text to stream through the ChatLog delta API.
+      required: true
+      selector:
+        text:
+          multiline: true
+    delta_delay_ms:
+      name: Delta delay
+      description: Milliseconds to pause between streamed text deltas.
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: ms

@@ -1,0 +1,11 @@
+# Test-only configuration for the headless Home Assistant used by
+# tests/ha_e2e.  It is bind-mounted into the container; runtime state lives in
+# the named ha-config volume.
+
+default_config:
+
+logger:
+  default: info
+  logs:
+    homeassistant.components.wyoming: debug
+    custom_components.ha_e2e_scripted: debug

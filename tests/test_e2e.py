@@ -3,9 +3,9 @@
 Skipped by default. To run:
 
     docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d speaches
-    pytest -m integration
+    pytest -m "integration and not ha_e2e"
 
-Or, if Speaches is already running on localhost:8000, just `pytest -m integration`.
+Or, if Speaches is already running on localhost:8000, just `pytest -m "integration and not ha_e2e"`.
 Tests marked `smoke` additionally run in CI against the containerized proxy
 image (see .github/workflows/integration.yml).
 """

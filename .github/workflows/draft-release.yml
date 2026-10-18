@@ -20,7 +20,22 @@ permissions:
   pull-requests: read
 
 jobs:
+  # Authoritative release gate: this runs automatically when the release-bump
+  # PR is merged, before the draft release exists.  Publishing the draft (and
+  # therefore PyPI/Docker) cannot happen if this job fails.
+  ha-e2e:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       contains(github.event.pull_request.labels.*.name, 'release-bump'))
+    uses: ./.github/workflows/ha-e2e.yml
+    with:
+      ref: main
+      force: true
+      ha_version: ${{ vars.HA_E2E_VERSION || '2026.10.1' }}
+
   draft:
+    needs: ha-e2e
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&

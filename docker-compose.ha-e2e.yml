@@ -1,0 +1,95 @@
+# Home Assistant end-to-end overlay.  Layer it on the existing Speaches CPU
+# stack and the e2e model overrides:
+#
+#   docker build -t wyoming_openai:e2e .
+#   docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml \
+#     -f docker-compose.ha-e2e.yml up -d
+#
+# Pin Home Assistant with HA_VERSION (defaults to the 2026.10 line):
+#
+#   HA_VERSION=2026.9.0 docker compose ... up -d
+#
+# Test-only settings belong in this overlay, never in the general compose
+# files.  The stack includes a deliberately broken second proxy for the
+# invalid-STT failure lane.
+#
+# OpenAI lane hook (not wired): a future overlay/profile can point the proxy
+# at https://api.openai.com/v1 with OPENAI_API_KEY and add gpt-transcribe /
+# gpt-realtime-* to STT_* and TTS_*; the workflow job will only run by
+# workflow_dispatch with a repository secret.  No secret is configured here.
+
+services:
+  wyoming_openai:
+    environment:
+      # Advertise the proxy's streaming TTS path so the Assist pipeline feeds
+      # ChatLog deltas to it; otherwise HA falls back to plain Synthesize.
+      TTS_STREAMING_MODELS: speaches-ai/Kokoro-82M-v1.0-ONNX
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  wyoming_openai_bad_stt:
+    image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:e2e}
+    container_name: wyoming_openai_bad_stt_e2e
+    ports:
+      - "10301:10300"
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: DEBUG
+      WYOMING_LANGUAGES: en
+      STT_OPENAI_URL: http://speaches:8000/v1
+      STT_MODELS: ha-e2e-definitely-not-a-model
+      STT_BACKEND: SPEACHES
+    depends_on:
+      speaches:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-2026.10.1}
+    container_name: homeassistant_ha_e2e
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: UTC
+    volumes:
+      - ha-config:/config
+      - ./tests/ha_e2e/ha_config/configuration.yaml:/config/configuration.yaml:ro
+      - ./tests/ha_e2e/custom_components/ha_e2e_scripted:/config/custom_components/ha_e2e_scripted:ro
+    depends_on:
+      wyoming_openai:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8123/api/onboarding', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  ha-config:

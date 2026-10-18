@@ -18,7 +18,18 @@ permissions:
   pull-requests: write
 
 jobs:
+  # The release preparation is gated on the same suite that must pass before a
+  # draft release is created.  It runs against main, which is what the version
+  # bump PR is based on.
+  ha-e2e:
+    uses: ./.github/workflows/ha-e2e.yml
+    with:
+      ref: main
+      force: true
+      ha_version: ${{ vars.HA_E2E_VERSION || '2026.10.1' }}
+
   bump:
+    needs: ha-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -1,0 +1,184 @@
+name: Home Assistant E2E
+
+# Reusable release gate as well as a manual/PR-label suite.  It is deliberately
+# not run on every push: use workflow_dispatch or add the `ha-e2e` label to a
+# pull request.  The release workflows call it with force=true.
+#
+# OpenAI lane hook (not wired): a future workflow_dispatch-only job can pass
+# OPENAI_API_KEY from a repository secret and run an OpenAI HTTP/Realtime
+# compose profile.  No secret is referenced here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ha_version:
+        description: Home Assistant image tag
+        required: false
+        default: "2026.10.1"
+        type: string
+  pull_request:
+    types: [opened, labeled, synchronize, reopened]
+  workflow_call:
+    inputs:
+      ha_version:
+        description: Home Assistant image tag
+        required: false
+        default: "2026.10.1"
+        type: string
+      ref:
+        description: Git ref to test (release workflows pass main)
+        required: false
+        default: ""
+        type: string
+      force:
+        description: Run even when the caller event has no trigger label
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ha-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ha-e2e:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      inputs.force ||
+      (github.event_name == 'pull_request' &&
+       (contains(github.event.pull_request.labels.*.name, 'ha-e2e') ||
+        contains(github.event.pull_request.labels.*.name, 'release-bump')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: wyoming_openai
+      HA_VERSION: ${{ inputs.ha_version || '2026.10.1' }}
+      HA_E2E_ARTIFACT_DIR: ${{ github.workspace }}/ha-e2e-artifacts
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ensure ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -n1
+
+      - name: Restore Hugging Face model cache
+        id: hf-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: hf-cache
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-e2e.yml') }}
+          restore-keys: hf-
+
+      - name: Seed docker volume from cache
+        run: |
+          mkdir -p hf-cache
+          docker volume create wyoming_openai_huggingface-hub
+          if [ -n "$(ls -A hf-cache 2>/dev/null)" ]; then
+            docker run --rm \
+              -v wyoming_openai_huggingface-hub:/dest \
+              -v "$PWD/hf-cache":/src \
+              alpine sh -c "cp -a /src/. /dest/"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build wyoming_openai image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: wyoming_openai:e2e
+          cache-from: type=gha
+
+      - name: Start the Home Assistant stack
+        run: |
+          docker compose \
+            -f docker-compose.speaches-cpu.yml \
+            -f docker-compose.e2e.yml \
+            -f docker-compose.ha-e2e.yml up -d
+
+      - name: Wait for Home Assistant and both proxies
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8123/api/onboarding > /dev/null \
+              && nc -z 127.0.0.1 10300 \
+              && nc -z 127.0.0.1 10301; then
+              echo "HA E2E stack ready after ${i} polls"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "HA E2E stack did not become ready in time"
+          docker compose \
+            -f docker-compose.speaches-cpu.yml \
+            -f docker-compose.e2e.yml \
+            -f docker-compose.ha-e2e.yml logs
+          exit 1
+
+      - name: Run Home Assistant E2E tests
+        run: pytest -m ha_e2e -v --timeout=600
+
+      - name: Capture logs on failure
+        if: failure()
+        run: |
+          mkdir -p "$HA_E2E_ARTIFACT_DIR"
+          docker compose \
+            -f docker-compose.speaches-cpu.yml \
+            -f docker-compose.e2e.yml \
+            -f docker-compose.ha-e2e.yml logs \
+            > "$HA_E2E_ARTIFACT_DIR/compose.log" 2>&1 || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-e2e-artifacts
+          path: ha-e2e-artifacts/
+          if-no-files-found: ignore
+
+      # always(): keep the models even when tests fail, so a rerun of a failed
+      # cold-cache run does not download them again.
+      - name: Snapshot HF cache for next run
+        if: always() && steps.hf-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf hf-cache
+          mkdir -p hf-cache
+          docker run --rm \
+            -v wyoming_openai_huggingface-hub:/src \
+            -v "$PWD/hf-cache":/dest \
+            alpine sh -c "cp -a /src/. /dest/"
+
+      - name: Save Hugging Face model cache
+        if: always() && steps.hf-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: hf-cache
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-e2e.yml') }}
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose.speaches-cpu.yml \
+            -f docker-compose.e2e.yml \
+            -f docker-compose.ha-e2e.yml down -v

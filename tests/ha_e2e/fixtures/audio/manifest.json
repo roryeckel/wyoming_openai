@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-10-18T23:08:38.137048+00:00",
+  "speaches_url": "http://127.0.0.1:8000/v1",
+  "model": "speaches-ai/Kokoro-82M-v1.0-ONNX",
+  "voice": "af_heart",
+  "sample_rate": 16000,
+  "width": 2,
+  "channels": 1,
+  "trailing_silence_seconds": 1.5,
+  "fixtures": [
+    {
+      "id": "kitchen_lights",
+      "file": "kitchen_lights.wav",
+      "text": "Turn on the kitchen lights.",
+      "sha256": "ffccff7b6c295688dca002fdd1c3b43ec032520cb16e300b6209a3bbdf9d4b19",
+      "duration_seconds": 2.887
+    },
+    {
+      "id": "weather_berlin",
+      "file": "weather_berlin.wav",
+      "text": "What's the weather like tomorrow in Berlin?",
+      "sha256": "ae02e4dc049c2923691be480bfe9d5c20a211c9e08534ea5da5e8868bf314b60",
+      "duration_seconds": 3.569
+    },
+    {
+      "id": "timer_five_minutes",
+      "file": "timer_five_minutes.wav",
+      "text": "Set a timer for five minutes.",
+      "sha256": "7fe3032a5269ec3231538eb262143cc9f7d2f301dc800a29bc45161f12d5f36d",
+      "duration_seconds": 3.228
+    }
+  ]
+}

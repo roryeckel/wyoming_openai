@@ -43,12 +43,14 @@ dev = [
     "pytest-timeout==2.4.0",
     "pyright==1.1.414",
     "rapidfuzz==3.14.6",
+    "httpx==0.28.1",
 ]
 
 [tool.pytest.ini_options]
 markers = [
-    "integration: end-to-end tests that require a running Speaches docker container (opt in with: pytest -m integration)",
+    "integration: end-to-end tests that require Docker (opt in with: pytest -m integration; use -m \"integration and not ha_e2e\" for the Speaches-only suite)",
     "smoke: minimal e2e subset used by the containerized CI smoke job (pytest -m 'integration and smoke')",
+    "ha_e2e: end-to-end tests that drive a real Home Assistant container against the proxy (opt in with: pytest -m ha_e2e)",
 ]
 addopts = "-m 'not integration'"
 pythonpath = ["tests"]
@@ -68,7 +70,10 @@ exclude = [
     "venv",
     "dist",
     "build",
+    "tmp",
+    "tests/ha_e2e/custom_components",
 ]
+extraPaths = ["tests"]
 
 [tool.ruff]
 # Enable Pyflakes (`F`), isort (`I`), and other recommended rules
@@ -94,4 +99,4 @@ exclude = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["wyoming_openai"]
+known-first-party = ["wyoming_openai", "ha_e2e"]

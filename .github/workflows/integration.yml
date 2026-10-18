@@ -72,7 +72,7 @@ jobs:
           exit 1
 
       - name: Run integration tests
-        run: pytest -m integration -v --timeout=180
+        run: pytest -m "integration and not ha_e2e" -v --timeout=180
 
       # always(): save the downloaded models even when tests fail, so a rerun
       # of a failed cold-cache run doesn't download them again.
