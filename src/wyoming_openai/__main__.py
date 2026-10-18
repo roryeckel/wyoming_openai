@@ -46,30 +46,20 @@ from .utilities import (
 
 
 def _prune_stale_log_backups(log_file, backup_count):
-    """Remove numbered backups left behind by a previously larger backup count."""
-    directory = os.path.dirname(log_file) or "."
-    prefix = os.path.basename(log_file) + "."
-    try:
-        entries = os.listdir(directory)
-    except OSError:
-        # Best effort: a directory that can be written but not listed must not stop the server from logging
-        return
-
-    for entry in entries:
-        suffix = entry.removeprefix(prefix)
-        if suffix == entry or not suffix.isdigit():
-            continue
+    """Remove contiguous numbered backups left behind by a previously larger backup count."""
+    next_index = backup_count + 1
+    while True:
+        stale = f"{log_file}.{next_index}"
+        # RotatingFileHandler always creates a contiguous .1..N sequence, so stop at the first gap to avoid
+        # deleting an archive such as the log file suffixed with a date
+        if not os.path.isfile(stale):
+            return
         try:
-            numbered = int(suffix)
-        except ValueError:
-            continue
-        if numbered <= backup_count:
-            continue
-        try:
-            os.remove(os.path.join(directory, entry))
+            os.remove(stale)
         except OSError:
             # Best effort: an undeletable stale backup must not stop the server from logging
-            pass
+            return
+        next_index += 1
 
 
 def configure_logging(
