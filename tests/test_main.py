@@ -723,6 +723,30 @@ async def test_main_rejects_incompatible_realtime_extra_body(monkeypatch, capsys
 
 
 @pytest.mark.asyncio
+async def test_main_allows_unused_tts_realtime_extra_body_in_stt_only_mode(monkeypatch, caplog):
+    """Test a Realtime TTS body is not validated without TTS, like the other bodies, only reported as unused."""
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    for env_var in ("TTS_MODELS", "TTS_STREAMING_MODELS", "TTS_REALTIME_MODELS", "TTS_VOICES"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI, "create_autodetected_factory", staticmethod(lambda: fake_factory)
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: _CapturingServer()))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1", "--tts-realtime-extra-body", '{"model":"x"}']
+    )
+
+    with caplog.at_level("WARNING"):
+        await main()
+
+    assert "TTS Realtime extra body is set but unused" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_main_rejects_incompatible_realtime_extra_body_without_realtime_models(monkeypatch, capsys):
     """Test a Realtime extra body is validated even when no Realtime models would use it."""
     monkeypatch.setattr(

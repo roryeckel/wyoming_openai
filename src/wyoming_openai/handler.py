@@ -121,7 +121,7 @@ def _get_boundary_detector(language: str | None) -> BoundaryDetector:
 
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
-TTS_CHUNK_SIZE = 2048  # Magical guess - but must be larger than 44 bytes for a potential WAV header
+TTS_CHUNK_SIZE = 2048  # Bytes read from the TTS response at a time; WavFramer buffers a header across reads
 TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests per connection when streaming sentences
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
@@ -849,8 +849,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_transcript_future = None
         if transcript_future is not None:
             if not transcript_future.done():
-                transcript_future.cancel()
-            elif not transcript_future.cancelled():
+                # Failed rather than cancelled, so an audio-stop waiting on it, as when stop() interrupts one, ends
+                # through the failure path, with a log entry and an error event, instead of as a cancelled task
+                transcript_future.set_exception(RealtimeTranscriptionError("Realtime transcription session was closed"))
+            if not transcript_future.cancelled():
                 # Read, so the failure of a stream that is dropped is not logged later as never retrieved
                 transcript_future.exception()
 
@@ -1884,7 +1886,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     streamed=True,
                     sentence=True,
                 ):
-                    raise TtsStreamError("OpenAI returned no audio while streaming chunk", chunk_preview, voice.name)
+                    raise TtsStreamError("streaming its audio failed, as logged above", chunk_preview, voice.name)
                 _LOGGER.debug("Completed direct streaming for chunk: %s", chunk_preview)
                 return TtsStreamResult(streamed=True)
 
@@ -2093,6 +2095,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if not await self._create_synthesis_task(self._stream_tts_audio(voice, text), name="unsplit_synthesis"):
             return False
+        if self._synthesis.failed:
+            # stop() ended it as the request finished and told the client; an audio stop would mark it complete
+            return False
 
         # Send audio stop after streaming completes
         await self._write_tts_audio_stop()
@@ -2101,16 +2106,22 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _write_tts_audio_start(self, rate: int, width: int, channels: int) -> None:
         """Send the audio start for the selected format and mark the stream as open."""
-        await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
+        # Marked before the write, which waits for the client to take it: stop() meanwhile must see the stream
         self._synthesis.audio_started = True
+        await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
 
     async def _write_tts_audio_stop(self) -> None:
         """Send the audio stop at the end of the audio sent so far and mark the stream as closed."""
-        await self.write_event(AudioStop(timestamp=int(self._synthesis.timestamp)).event())
+        # Marked before the write, which waits for the client to take it, so stop() meanwhile does not close the
+        # stream a second time
         self._synthesis.audio_started = False
+        await self.write_event(AudioStop(timestamp=int(self._synthesis.timestamp)).event())
 
     async def _finish_tts_audio_stream(self, voice: TtsVoiceModel) -> bool:
         """Send the audio stop of a completed synthesis, opening the stream first if nothing had audio."""
+        if self._synthesis.failed:
+            # stop() ended it after its last request finished and told the client, so nothing more is sent
+            return False
         if not self._synthesis.audio_started:
             if self._synthesis.skipped_speakable_sentence:
                 _LOGGER.error("TTS synthesis returned no audio for any speakable sentence")
@@ -2127,22 +2138,24 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Send PCM in a framer's format and move the stream's timestamp past it; empty audio sends nothing."""
         if not audio_data:
             return
+        timestamp = self._synthesis.timestamp
+        # Kept current chunk by chunk, so a sentence that fails or is cancelled midway is stopped at what was sent;
+        # moved before the write, which waits for the client, so a stop() meanwhile counts this chunk too
+        self._synthesis.timestamp = self._advance_audio_timestamp(
+            timestamp,
+            audio_data=audio_data,
+            audio_rate=framer.rate,
+            audio_width=framer.width,
+            audio_channels=framer.channels,
+        )
         await self.write_event(
             AudioChunk(
                 audio=audio_data,
                 rate=framer.rate,
                 width=framer.width,
                 channels=framer.channels,
-                timestamp=int(self._synthesis.timestamp),
+                timestamp=int(timestamp),
             ).event()
-        )
-        # Kept current chunk by chunk, so a sentence that fails or is cancelled midway is stopped at what was sent
-        self._synthesis.timestamp = self._advance_audio_timestamp(
-            self._synthesis.timestamp,
-            audio_data=audio_data,
-            audio_rate=framer.rate,
-            audio_width=framer.width,
-            audio_channels=framer.channels,
         )
 
     async def _stream_tts_audio(self, voice: TtsVoiceModel, text: str) -> bool:

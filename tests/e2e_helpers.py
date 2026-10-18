@@ -21,6 +21,7 @@ from rapidfuzz import fuzz
 from wyoming.asr import Transcribe, Transcript, TranscriptChunk, TranscriptStart, TranscriptStop
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
+from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import Describe, Info, SelectProgram
 from wyoming.tts import (
@@ -47,10 +48,14 @@ ARTIFACT_DIR_ENV_VAR = "WYOMING_E2E_ARTIFACT_DIR"
 class WyomingServerClosedError(RuntimeError):
     """Server closed the TCP connection before sending the expected event.
 
-    wyoming_openai rejects unknown models/voices by returning False from its
-    event handler, which makes the wyoming server close the socket without any
-    error event - so this is the expected failure mode for negative tests.
+    wyoming_openai rejects unknown models/voices with a Wyoming error event and
+    then returns False from its event handler, which makes the wyoming server
+    close the socket; see `WyomingTestClient.expect_rejection`.
     """
+
+
+class WyomingServerError(RuntimeError):
+    """Server answered with a Wyoming error event, as it does for a failed or refused request."""
 
 
 class WyomingTimeoutError(TimeoutError):
@@ -160,6 +165,22 @@ class WyomingTestClient:
             raise WyomingServerClosedError(f"Connection closed while waiting for {expecting}")
         return event
 
+    async def expect_rejection(self, event: Event) -> str:
+        """Send one request the server should refuse; return its error text once the connection has closed.
+
+        Only that one request is sent: anything written after it would race the
+        server closing the connection, and could fail before the error is read.
+        """
+        await self._write_event(event)
+        answer = await self._read_required(f"an error event for {event.type}")
+        if not Error.is_type(answer.type):
+            raise RuntimeError(f"Expected an error event for {event.type}, got {answer.type}")
+        try:
+            extra = await self._read_required(f"the connection to close after the error for {event.type}")
+        except WyomingServerClosedError:
+            return Error.from_event(answer).text
+        raise RuntimeError(f"Expected the connection to close after the error for {event.type}, got {extra.type}")
+
     async def select_program(self, name: str) -> None:
         """Pin a program for this connection (wyoming 1.10.0 select-program)."""
         await self._write_event(SelectProgram(name=name).event())
@@ -220,6 +241,8 @@ class WyomingTestClient:
                     final_text = Transcript.from_event(event).text
                 elif TranscriptStop.is_type(event.type):
                     break
+                elif Error.is_type(event.type):
+                    raise WyomingServerError(Error.from_event(event).text)
                 elif not TranscriptStart.is_type(event.type):
                     raise RuntimeError(f"Unexpected event during transcription: {event.type}")
         text = final_text if final_text is not None else streamed_text
@@ -265,6 +288,8 @@ class WyomingTestClient:
                     continue
                 if AudioStop.is_type(event.type):
                     break
+                if Error.is_type(event.type):
+                    raise WyomingServerError(Error.from_event(event).text)
             if expect_synthesize_stopped:
                 while True:
                     event = await self._read_required("synthesize-stopped")

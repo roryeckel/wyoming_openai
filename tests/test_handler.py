@@ -17,7 +17,7 @@ from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
 from wyoming.server import AsyncTcpServer
-from wyoming.tts import SynthesizeChunk, SynthesizeStart, SynthesizeVoice
+from wyoming.tts import Synthesize, SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
 from wyoming_openai.compatibility import (
     OpenAIBackend,
@@ -598,6 +598,87 @@ async def test_sentence_playback_stops_once_the_synthesis_has_failed(handler):
 
     assert result is False
     play.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_synthesis_stopped_by_the_server_as_it_finishes_is_not_completed_after_the_error(
+    enhanced_handler, mock_info, mock_clients, streaming
+):
+    """Test stop() landing after the last request finished does not let the synthesis send its stream end after."""
+    from wyoming_openai.handler import SHUTDOWN_ERROR
+
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = streaming
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    _mock_speech_response(tts_client, [REALTIME_TTS_PCM])
+    real_stream = enhanced_handler._stream_tts_audio
+    real_get = enhanced_handler._get_tts_audio_stream
+    stops = []
+
+    async def stopped_as_it_finishes(*args, **kwargs):
+        result = await (real_get if streaming else real_stream)(*args, **kwargs)
+        # Runs once this request has finished and before the handler resumes, so it has nothing left to cancel
+        stops.append(asyncio.ensure_future(enhanced_handler._stop_sentence_playback(SHUTDOWN_ERROR)))
+        return result
+
+    if streaming:
+        with patch.object(enhanced_handler, "_get_tts_audio_stream", side_effect=stopped_as_it_finishes):
+            assert await enhanced_handler.handle_event(SynthesizeStart().event())
+            assert await enhanced_handler.handle_event(SynthesizeChunk(text="Only sentence.").event())
+            await enhanced_handler.handle_event(Event(type="synthesize-stop"))
+    else:
+        with patch.object(enhanced_handler, "_stream_tts_audio", side_effect=stopped_as_it_finishes):
+            assert await enhanced_handler.handle_event(Synthesize(text="Only sentence.").event()) is False
+
+    await asyncio.gather(*stops)
+    assert len(stops) == 1
+    events = _event_types(enhanced_handler)
+    after_error = events[events.index("error") + 1 :]
+    # Nothing reopens or completes the stream once the client was told
+    assert "audio-start" not in after_error
+    assert after_error.count("audio-stop") <= (1 if streaming else 0)
+
+
+@pytest.mark.asyncio
+async def test_finishing_a_synthesis_that_stop_already_ended_sends_nothing(enhanced_handler, mock_info):
+    """Test the stream end of a synthesis is not sent once stop() closed its stream and told the client."""
+    voice = mock_info.tts[0].voices[0]
+    # As stop() leaves it when it lands after the playback of the last, buffered sentence
+    enhanced_handler._synthesis.failed = True
+    enhanced_handler._synthesis.audio_started = False
+
+    assert await enhanced_handler._finish_tts_audio_stream(voice) is False
+    enhanced_handler.write_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_while_the_last_audio_stop_is_written_closes_the_stream_once(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test stop() during the final audio stop write, to a slow client, does not send a second one."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    enhanced_handler._tts_extra_body = {"response_format": "pcm"}
+    _mock_speech_response(tts_client, [REALTIME_TTS_PCM])
+    written = []
+    stopping = asyncio.Event()
+
+    async def slow_client(event):
+        written.append(event.type)
+        if event.type == "audio-stop" and not stopping.is_set():
+            stopping.set()
+            await asyncio.sleep(0.05)
+
+    enhanced_handler.write_event = AsyncMock(side_effect=slow_client)
+    assert await enhanced_handler.handle_event(SynthesizeStart().event())
+    assert await enhanced_handler.handle_event(SynthesizeChunk(text="Only sentence.").event())
+    finishing = asyncio.create_task(enhanced_handler.handle_event(Event(type="synthesize-stop")))
+    await stopping.wait()
+    await enhanced_handler.stop()
+    await finishing
+
+    assert written.count("audio-stop") == 1
 
 
 @pytest.mark.asyncio
@@ -1499,6 +1580,33 @@ class TestOpenAIEventHandlerComprehensive:
             gc.collect()
 
         assert "exception was never retrieved" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_stop_during_a_realtime_audio_stop_fails_the_transcription(
+        self, enhanced_handler, mock_info, mock_clients, caplog
+    ):
+        """A server shutdown while the transcript is awaited ends that audio stop as a failure, not a cancelled task."""
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        connection = _FakeRealtimeConnection([])
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+        with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+            stopping = asyncio.create_task(enhanced_handler.handle_event(Event(type="audio-stop")))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert connection.input_audio_buffer.committed is True
+            await enhanced_handler.stop()
+            assert await stopping is False
+
+        assert "Realtime transcription session was closed" in caplog.text
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "transcript-start",
+            "error",
+        ]
+        await enhanced_handler._drain_background_tasks()
 
     @pytest.mark.asyncio
     async def test_realtime_audio_stop_without_audio_start_emits_nothing(self, enhanced_handler, mock_info):

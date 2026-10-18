@@ -314,7 +314,8 @@ def create_tts_voices(
         if not legacy_voices:
             raise ValueError(
                 f"None of the configured TTS voices {skipped_voices} are offered by {legacy_models}; "
-                f"choose from {list(OPENAI_LEGACY_SPEECH_TTS_VOICES)}, or use a later speech model"
+                f"choose from {list(OPENAI_LEGACY_SPEECH_TTS_VOICES)}, or remove those models from TTS_MODELS "
+                "and TTS_STREAMING_MODELS"
             )
         _LOGGER.warning("Voices not offered by %s are skipped for those models: %s", legacy_models, skipped_voices)
 

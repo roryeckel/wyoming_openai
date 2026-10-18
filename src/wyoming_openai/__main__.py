@@ -294,8 +294,9 @@ async def main():
             validate_realtime_stt_extra_body(args.stt_realtime_extra_body)
         if tts_requested and args.tts_voices:
             validate_tts_extra_body(args.tts_extra_body)
-        # Checked even without Realtime models, so a misplaced body is reported instead of ignored
-        validate_realtime_tts_extra_body(args.tts_realtime_extra_body)
+        if tts_requested:
+            # Checked even without Realtime models, so a misplaced body is reported instead of ignored
+            validate_realtime_tts_extra_body(args.tts_realtime_extra_body)
     except ValueError as exc:
         parser.error(str(exc))
 
