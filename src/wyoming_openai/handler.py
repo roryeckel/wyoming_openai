@@ -272,7 +272,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
-        await self._drop_audio_stream()
+        # The server stops handlers while an audio-stop may still be sending their recording, so that is left for
+        # disconnect(), which runs once the event in progress has finished
+        await self._cleanup_realtime_transcription()
         await super().stop()
 
     async def _handle_select_program(self, select_program: SelectProgram) -> bool:

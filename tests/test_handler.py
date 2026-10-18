@@ -961,9 +961,8 @@ class TestOpenAIEventHandlerComprehensive:
         ]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("teardown", ["disconnect", "stop"])
-    async def test_teardown_drops_the_recording_in_progress(self, enhanced_handler, mock_clients, teardown):
-        """A connection that ends during a recording leaves no recording behind and is sent nothing."""
+    async def test_disconnect_drops_the_recording_in_progress(self, enhanced_handler, mock_clients):
+        """A client that disconnects during a recording leaves no recording behind and is sent nothing."""
         stt_client, _ = mock_clients
         stt_client.audio.transcriptions.create = AsyncMock()
 
@@ -971,7 +970,7 @@ class TestOpenAIEventHandlerComprehensive:
         await enhanced_handler.handle_event(
             Event(type="audio-chunk", data={"rate": 16000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10)
         )
-        await getattr(enhanced_handler, teardown)()
+        await enhanced_handler.disconnect()
 
         assert enhanced_handler._audio_stream is None
         assert enhanced_handler._wav_buffer is None
@@ -996,7 +995,52 @@ class TestOpenAIEventHandlerComprehensive:
         await getattr(enhanced_handler, teardown)()
 
         assert manager.exited is True
-        assert enhanced_handler._audio_stream is None
+        enhanced_handler.write_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_leaves_the_recording_to_an_audio_stop_in_progress(self, enhanced_handler, mock_clients):
+        """A server stopping while a recording is being sent does not close the file under the upload."""
+        from openai.types.audio.transcription import Transcription
+
+        stt_client, _ = mock_clients
+
+        async def stop_during_upload(**kwargs):
+            await enhanced_handler.stop()
+            assert not kwargs["file"].closed
+            return Transcription(text="Hello")
+
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=stop_during_upload)
+
+        await _stream_audio(enhanced_handler)
+
+        stt_client.audio.transcriptions.create.assert_awaited_once()
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "transcript-start",
+            "transcript",
+            "transcript-stop",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "abandon",
+        [
+            pytest.param(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}), id="audio-start"),
+            pytest.param(Event(type="transcribe", data={"name": "unknown-model"}), id="refused-transcribe"),
+        ],
+    )
+    async def test_abandoning_a_realtime_stream_that_never_opened_closes_no_transcript(
+        self, enhanced_handler, mock_info, mock_clients, abandon
+    ):
+        """A Realtime session that failed to open sent no transcript-start, so abandoning its stream sends nothing."""
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        stt_client.realtime.connect = Mock(side_effect=RuntimeError("invalid api key"))
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+        await enhanced_handler.handle_event(abandon)
+
+        assert stt_client.realtime.connect.call_count == (2 if abandon.type == "audio-start" else 1)
         enhanced_handler.write_event.assert_not_called()
 
     @pytest.mark.asyncio
