@@ -63,7 +63,8 @@ async def main():
 
     def env_default(name: str) -> str | None:
         """An environment value left raw: argparse converts a string default with the option's type only when the
-        option is absent, so an explicit CLI option and --help never parse an invalid environment value."""
+        option is absent, so an explicit CLI option and --help never parse an invalid environment value. A blank
+        (whitespace-only) value is treated as unset, as an empty one already is."""
         return (os.getenv(name) or "").strip() or None
 
     # General configuration
@@ -178,7 +179,7 @@ async def main():
     parser.add_argument(
         "--tts-voice-labels",
         type=parse_voice_labels,
-        default=os.getenv("TTS_VOICE_LABELS") or None,
+        default=env_default("TTS_VOICE_LABELS"),
         help=(
             "Optional JSON object mapping a TTS voice name to the display name shown by Wyoming clients such as "
             'Home Assistant, for example \'{"af_heart": "Heart"}\'. Only the displayed name changes'

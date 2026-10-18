@@ -413,8 +413,9 @@ async def test_main_applies_tts_voice_labels_from_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_main_ignores_empty_tts_voice_labels_env(monkeypatch):
-    monkeypatch.setenv("TTS_VOICE_LABELS", "")
+@pytest.mark.parametrize("value", ["", " ", "\n"])
+async def test_main_ignores_blank_tts_voice_labels_env(monkeypatch, value):
+    monkeypatch.setenv("TTS_VOICE_LABELS", value)
 
     voices = await _advertised_tts_voices(monkeypatch, _FakeClient(), "--tts-voices", "alloy")
 
