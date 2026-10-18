@@ -1252,3 +1252,35 @@ async def test_main_rejects_invalid_log_backup_count(monkeypatch, capsys, value)
 
     assert exc_info.value.code == 2
     assert "--log-backup-count: expected a whole number of at least 1" in capsys.readouterr().err
+
+
+def test_configure_logging_ignores_non_decimal_backup_names(tmp_path, monkeypatch):
+    configured = _capture_basic_config(monkeypatch)
+    log_path = tmp_path / "wyoming_openai.log"
+    # "²".isdigit() is true, but it is not a backup number that int() accepts
+    unicode_digit = log_path.with_name(f"{log_path.name}.\u00b2")
+    unicode_digit.write_text("unrelated", encoding="utf-8")
+
+    try:
+        main_module.configure_logging("INFO", str(log_path), max_bytes=1024, backup_count=1)
+    finally:
+        _close_captured_handlers(configured)
+
+    assert unicode_digit.exists()
+
+
+def test_configure_logging_starts_when_the_log_directory_cannot_be_listed(monkeypatch, tmp_path):
+    configured = _capture_basic_config(monkeypatch)
+    log_path = tmp_path / "wyoming_openai.log"
+
+    def deny_listing(directory):
+        raise PermissionError("listing denied")
+
+    monkeypatch.setattr(main_module.os, "listdir", deny_listing)
+
+    try:
+        main_module.configure_logging("INFO", str(log_path), max_bytes=1024, backup_count=1)
+        file_handler = next(handler for handler in configured["handlers"] if isinstance(handler, RotatingFileHandler))
+        assert file_handler.baseFilename == str(log_path)
+    finally:
+        _close_captured_handlers(configured)

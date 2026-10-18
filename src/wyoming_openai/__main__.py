@@ -49,9 +49,21 @@ def _prune_stale_log_backups(log_file, backup_count):
     """Remove numbered backups left behind by a previously larger backup count."""
     directory = os.path.dirname(log_file) or "."
     prefix = os.path.basename(log_file) + "."
-    for entry in os.listdir(directory):
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        # Best effort: a directory that can be written but not listed must not stop the server from logging
+        return
+
+    for entry in entries:
         suffix = entry.removeprefix(prefix)
-        if suffix == entry or not suffix.isdigit() or int(suffix) <= backup_count:
+        if suffix == entry or not suffix.isdigit():
+            continue
+        try:
+            numbered = int(suffix)
+        except ValueError:
+            continue
+        if numbered <= backup_count:
             continue
         try:
             os.remove(os.path.join(directory, entry))
