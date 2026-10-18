@@ -413,6 +413,24 @@ def parse_positive_int(value: str) -> int:
     return number
 
 
+def parse_non_negative_int(value: str) -> int:
+    """
+    Parse an argparse value that must be a whole number of at least 0, where 0 disables a limit.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is not an integer or is smaller than 0.
+    """
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of at least 0, got '{value}'") from None
+
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"expected a whole number of at least 0, got {number}")
+
+    return number
+
+
 def validate_extra_body_response_format(
     extra_body: dict[str, object] | None, *, allowed_formats: set[str], body_name: str
 ) -> None:

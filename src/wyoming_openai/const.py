@@ -11,6 +11,10 @@ except importlib.metadata.PackageNotFoundError:
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
+# Keep the optional log file from growing without bound; 10 MiB per file, 5 rotated files kept
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 5
+
 # Attribution names for different Wyoming info levels
 ATTRIBUTION_NAME_MODEL = "OpenAI-Compatible Wyoming Proxy"
 ATTRIBUTION_NAME_PROGRAM = "OpenAI-Compatible Proxy"

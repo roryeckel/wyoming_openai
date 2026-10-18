@@ -1,5 +1,7 @@
+import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from unittest.mock import Mock
 
 import pytest
@@ -8,6 +10,7 @@ from conftest import WYOMING_CONFIG_ENV_PREFIXES
 import wyoming_openai.__main__ as main_module
 from wyoming_openai.__main__ import main
 from wyoming_openai.compatibility import create_tts_voices
+from wyoming_openai.const import DEFAULT_LOG_BACKUP_COUNT, DEFAULT_LOG_MAX_BYTES
 
 
 @pytest.mark.asyncio
@@ -1063,3 +1066,145 @@ async def test_main_rejects_invalid_tts_concurrent_requests_env(monkeypatch, cap
 
     assert exc_info.value.code == 2
     assert "--tts-concurrent-requests: expected a whole number of at least 1" in capsys.readouterr().err
+
+
+# Logging configuration
+
+
+def _capture_basic_config(monkeypatch):
+    """Intercept logging.basicConfig so a test never rewrites the root logger's real handlers."""
+    configured = {}
+    monkeypatch.setattr(main_module.logging, "basicConfig", lambda **kwargs: configured.update(kwargs))
+    return configured
+
+
+def test_configure_logging_rotates_the_log_file(tmp_path, monkeypatch):
+    configured = _capture_basic_config(monkeypatch)
+    log_path = tmp_path / "logs" / "wyoming_openai.log"
+
+    main_module.configure_logging("DEBUG", str(log_path), max_bytes=256, backup_count=1)
+
+    assert configured["level"] == logging.DEBUG
+    file_handler = next(handler for handler in configured["handlers"] if isinstance(handler, RotatingFileHandler))
+    assert file_handler.maxBytes == 256
+    assert file_handler.backupCount == 1
+
+    logger = logging.getLogger("test_configure_logging_rotates_the_log_file")
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    try:
+        for index in range(20):
+            logger.info("entry %02d %s", index, "x" * 40)
+    finally:
+        logger.removeHandler(file_handler)
+        file_handler.close()
+
+    assert (tmp_path / "logs" / "wyoming_openai.log.1").exists()
+    assert log_path.stat().st_size <= 256
+
+
+def test_configure_logging_defaults_to_rotating_the_log_file(tmp_path, monkeypatch):
+    configured = _capture_basic_config(monkeypatch)
+
+    main_module.configure_logging("INFO", str(tmp_path / "wyoming_openai.log"))
+
+    file_handler = next(handler for handler in configured["handlers"] if isinstance(handler, RotatingFileHandler))
+    assert file_handler.maxBytes == DEFAULT_LOG_MAX_BYTES
+    assert file_handler.backupCount == DEFAULT_LOG_BACKUP_COUNT
+
+
+def test_configure_logging_without_log_file_only_logs_to_the_stream(monkeypatch):
+    configured = _capture_basic_config(monkeypatch)
+
+    main_module.configure_logging("INFO")
+
+    assert [type(handler) for handler in configured["handlers"]] == [logging.StreamHandler]
+
+
+def test_configure_logging_rejects_an_unknown_level():
+    with pytest.raises(ValueError, match="Invalid log level"):
+        main_module.configure_logging("VERBOSE")
+
+
+@pytest.mark.asyncio
+async def test_main_passes_default_log_rotation_options(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert calls == [
+        (("INFO", None), {"max_bytes": DEFAULT_LOG_MAX_BYTES, "backup_count": DEFAULT_LOG_BACKUP_COUNT})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_main_reads_log_rotation_from_env(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: calls.append((args, kwargs)))
+    log_path = tmp_path / "wyoming_openai.log"
+    monkeypatch.setenv("WYOMING_LOG_FILE", str(log_path))
+    monkeypatch.setenv("WYOMING_LOG_MAX_BYTES", "4096")
+    monkeypatch.setenv("WYOMING_LOG_BACKUP_COUNT", "2")
+
+    await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert calls == [(("INFO", str(log_path)), {"max_bytes": 4096, "backup_count": 2})]
+
+
+@pytest.mark.asyncio
+async def test_main_cli_log_rotation_overrides_env(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: calls.append((args, kwargs)))
+    log_path = tmp_path / "wyoming_openai.log"
+    monkeypatch.setenv("WYOMING_LOG_MAX_BYTES", "4096")
+    monkeypatch.setenv("WYOMING_LOG_BACKUP_COUNT", "2")
+
+    await _run_main_and_capture_handler_kwargs(
+        monkeypatch,
+        "--log-file",
+        str(log_path),
+        "--log-max-bytes",
+        "2048",
+        "--log-backup-count",
+        "3",
+    )
+
+    assert calls == [(("INFO", str(log_path)), {"max_bytes": 2048, "backup_count": 3})]
+
+
+@pytest.mark.asyncio
+async def test_main_allows_disabling_log_rotation(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    await _run_main_and_capture_handler_kwargs(
+        monkeypatch, "--log-file", str(tmp_path / "wyoming_openai.log"), "--log-max-bytes", "0"
+    )
+
+    assert calls[0][1]["max_bytes"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["-1", "two", "1.5"])
+async def test_main_rejects_invalid_log_max_bytes(monkeypatch, capsys, value):
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--log-max-bytes", value])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "--log-max-bytes: expected a whole number of at least 0" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "-1", "two"])
+async def test_main_rejects_invalid_log_backup_count(monkeypatch, capsys, value):
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--log-backup-count", value])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "--log-backup-count: expected a whole number of at least 1" in capsys.readouterr().err

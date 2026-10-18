@@ -4,6 +4,7 @@ import logging
 import os
 from contextlib import AsyncExitStack
 from functools import partial
+from logging.handlers import RotatingFileHandler
 
 from wyoming.server import AsyncServer
 
@@ -19,7 +20,14 @@ from .compatibility import (
     tts_voice_to_string,
     uses_openai_realtime_voices,
 )
-from .const import DEFAULT_OPENAI_BASE_URL, REALTIME_TTS_MAX_SPEED, REALTIME_TTS_MIN_SPEED, __version__
+from .const import (
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_OPENAI_BASE_URL,
+    REALTIME_TTS_MAX_SPEED,
+    REALTIME_TTS_MIN_SPEED,
+    __version__,
+)
 from .handler import TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
 from .utilities import (
     clamp_realtime_tts_speed,
@@ -27,6 +35,7 @@ from .utilities import (
     create_json_object_parser,
     get_realtime_tts_speed,
     parse_finite_float,
+    parse_non_negative_int,
     parse_positive_int,
     parse_voice_labels,
     validate_realtime_stt_extra_body,
@@ -36,8 +45,13 @@ from .utilities import (
 )
 
 
-def configure_logging(level, log_file=None):
-    """Configure logging based on a string level, optionally also logging to a file."""
+def configure_logging(
+    level,
+    log_file=None,
+    max_bytes=DEFAULT_LOG_MAX_BYTES,
+    backup_count=DEFAULT_LOG_BACKUP_COUNT,
+):
+    """Configure logging based on a string level, optionally also logging to a size-rotated file."""
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {level}")
@@ -45,7 +59,14 @@ def configure_logging(level, log_file=None):
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file:
         os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        handlers.append(
+            RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+        )
 
     logging.basicConfig(level=numeric_level, handlers=handlers, force=True)
 
@@ -80,6 +101,21 @@ async def main():
         "--log-file",
         default=os.getenv("WYOMING_LOG_FILE", None),
         help="Optional file path to additionally log to (created if missing)",
+    )
+    parser.add_argument(
+        "--log-max-bytes",
+        type=parse_non_negative_int,
+        default=os.getenv("WYOMING_LOG_MAX_BYTES") or DEFAULT_LOG_MAX_BYTES,
+        help=(
+            "Maximum size of the log file in bytes before it is rotated "
+            f"(default: {DEFAULT_LOG_MAX_BYTES}; 0 disables rotation)"
+        ),
+    )
+    parser.add_argument(
+        "--log-backup-count",
+        type=parse_positive_int,
+        default=os.getenv("WYOMING_LOG_BACKUP_COUNT") or DEFAULT_LOG_BACKUP_COUNT,
+        help=f"Number of rotated log files to keep next to the current log file (default: {DEFAULT_LOG_BACKUP_COUNT})",
     )
     parser.add_argument(
         "--languages",
@@ -284,7 +320,12 @@ async def main():
     except ValueError as exc:
         parser.error(str(exc))
 
-    configure_logging(args.log_level, args.log_file)
+    configure_logging(
+        args.log_level,
+        args.log_file,
+        max_bytes=args.log_max_bytes,
+        backup_count=args.log_backup_count,
+    )
     _logger = logging.getLogger(__name__)
 
     _logger.info("Starting Wyoming OpenAI %s", __version__)
