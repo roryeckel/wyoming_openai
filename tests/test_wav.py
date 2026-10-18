@@ -4,6 +4,7 @@ import wave
 
 import pytest
 
+from wyoming_openai.utilities import take_whole_frames
 from wyoming_openai.wav import TTS_WAV_HEADER_MAX_BYTES, TtsAudioFormat, WavFramer, parse_wav_header
 
 PCM = b"\x00\x01" * 240
@@ -112,3 +113,17 @@ def test_framer_finish_hands_back_a_response_that_ended_inside_the_header():
     assert framer.feed(b"RIFF\x00\x00") == b""
     assert framer.finish() == b"RIFF\x00\x00"
     assert framer.header_missing
+
+
+def test_take_whole_frames_prepends_a_carried_partial_frame():
+    whole, partial = take_whole_frames(partial=b"\x01\x02", audio=b"\x03\x04\x05", frame_size=2)
+
+    assert whole == b"\x01\x02\x03\x04"
+    assert partial == b"\x05"
+
+
+def test_take_whole_frames_keeps_a_partial_frame_when_frames_are_single_bytes():
+    whole, partial = take_whole_frames(partial=b"\x01", audio=b"\x02", frame_size=1)
+
+    assert whole == b"\x01\x02"
+    assert partial == b""

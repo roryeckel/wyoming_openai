@@ -3,7 +3,6 @@ import base64
 import contextlib
 import functools
 import logging
-import struct
 import unicodedata
 import wave
 from collections.abc import AsyncGenerator, Coroutine
@@ -40,7 +39,6 @@ from .const import (
     DEFAULT_AUDIO_WIDTH,
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
     OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES,
-    REALTIME_AUDIO_CHANNELS,
     REALTIME_AUDIO_FORMAT,
     REALTIME_AUDIO_RATE,
     REALTIME_AUDIO_WIDTH,
@@ -50,12 +48,15 @@ from .const import (
 )
 from .utilities import (
     NamedBytesIO,
+    RealtimeAudioConverter,
     SsmlTextTransformer,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     strip_ssml,
+    truncate_for_log,
+    validate_audio_format,
     validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
@@ -64,13 +65,6 @@ from .utilities import (
 from .wav import TtsAudioFormat, WavFramer
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _truncate_for_log(text: str, max_length: int = 100) -> str:
-    """Truncate text for logging, adding ellipsis only if truncated."""
-    if len(text) <= max_length:
-        return text
-    return text[:max_length] + "..."
 
 
 def _normalize_for_comparison(text: str) -> str:
@@ -172,6 +166,14 @@ class _AudioStreamState:
     streaming: bool  # /v1/audio/transcriptions responds with a stream of transcript deltas; follows the model
     transcript_started: bool = False  # TranscriptStart was sent while the audio was still arriving
     failed: bool = False  # Reported with an error event; its audio is dropped and its audio-stop closes the connection
+    converter: RealtimeAudioConverter | None = None  # Set for a Realtime stream once its format is validated
+
+    @property
+    def realtime_converter(self) -> RealtimeAudioConverter:
+        """The converter of a Realtime stream, or an error if its session was set up incorrectly."""
+        if self.converter is None:
+            raise RealtimeTranscriptionError("Realtime audio converter was not initialized")
+        return self.converter
 
 
 class TtsStreamError(Exception):
@@ -281,16 +283,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._transcribe_rejected = False
         self._audio_stream: _AudioStreamState | None = None  # Between audio-start and audio-stop
         self._shutdown_reported = False  # stop() told the client its transcription was cut short
-        self._audio_sample_rate: int = DEFAULT_ASR_AUDIO_RATE
-        self._audio_width: int = DEFAULT_AUDIO_WIDTH
-        self._audio_channels: int = DEFAULT_AUDIO_CHANNELS
 
         # State for realtime transcription
         self._realtime_connection_manager: Any | None = None
         self._realtime_connection: Any | None = None
         self._realtime_receive_task: asyncio.Task[None] | None = None
         self._realtime_transcript_future: asyncio.Future[str] | None = None
-        self._realtime_pcm_tail: bytes = b""
 
         # State for event logging
         self._last_event_type: str | None = None
@@ -384,7 +382,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             # The client is still connected, so it is told about a synthesis or a transcription cut short before the
             # writer is closed: a stream being recorded, or an audio-stop waiting for its transcript
             transcribing = (
-                self._audio_stream is not None
+                (self._audio_stream is not None and not self._audio_stream.failed)
                 or self._realtime_transcript_future is not None
                 or self._wav_buffer is not None
             )
@@ -524,7 +522,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_stream.language,
         )
 
-    async def _handle_audio_start(self, sample_rate: int, audio_width: int, audio_channels: int) -> None:
+    async def _handle_audio_start(self, sample_rate: object, audio_width: object, audio_channels: object) -> None:
         """Handle start of audio stream"""
         # A stream the client never stopped must not leave its recording or Realtime session under this one
         await self._abandon_audio_stream("audio-start arrived before its audio-stop")
@@ -542,23 +540,31 @@ class OpenAIEventHandler(AsyncEventHandler):
             streaming=model is not None and self._is_asr_model_streaming(model.name),
         )
         self._audio_stream = audio_stream
-        self._audio_sample_rate = sample_rate
-        self._audio_width = audio_width
-        self._audio_channels = audio_channels
+
+        try:
+            rate, width, channels = validate_audio_format(sample_rate, audio_width, audio_channels)
+            if audio_stream.realtime:
+                # The converter owns the frame tail, format conversion, and the 24 kHz mono/16-bit fast path
+                audio_stream.converter = RealtimeAudioConverter(rate, width, channels)
+        except ValueError as err:
+            # Both transports fail the same way, before wave.open() or a Realtime session can raise for the format
+            _LOGGER.warning("Rejecting audio-start: %s", err)
+            # A failed stream drops its audio and closes the connection on its audio-stop, like other STT failures
+            audio_stream.failed = True
+            await self._report_stt_failure()
+            return
 
         if audio_stream.realtime:
-            await self._handle_realtime_audio_start(audio_stream, sample_rate, audio_width, audio_channels)
+            await self._handle_realtime_audio_start(audio_stream, rate, width, channels)
             return
 
         self._is_recording = True
         self._wav_buffer = NamedBytesIO(name="recording.wav")
         self._wav_write_buffer = wave.open(self._wav_buffer, "wb")
-        self._wav_write_buffer.setnchannels(audio_channels)
-        self._wav_write_buffer.setsampwidth(audio_width)
-        self._wav_write_buffer.setframerate(sample_rate)
-        _LOGGER.info(
-            "Recording started at %d Hz, %d channels, %d bytes per sample", sample_rate, audio_channels, audio_width
-        )
+        self._wav_write_buffer.setnchannels(channels)
+        self._wav_write_buffer.setsampwidth(width)
+        self._wav_write_buffer.setframerate(rate)
+        _LOGGER.info("Recording started at %d Hz, %d channels, %d bytes per sample", rate, channels, width)
 
     def _discard_recording(self) -> None:
         """Drop the /v1/audio/transcriptions recording, once sent or when its stream was never stopped."""
@@ -662,7 +668,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_realtime_audio_chunk(self, audio_stream: _AudioStreamState, chunk: AudioChunk) -> None:
         """Append a Wyoming audio chunk to the OpenAI Realtime input buffer."""
-        if not self._is_recording or self._realtime_connection is None:
+        connection = self._realtime_connection
+        if not self._is_recording or connection is None:
             _LOGGER.warning("Received realtime audio chunk without an active recording")
             return
 
@@ -679,50 +686,46 @@ class OpenAIEventHandler(AsyncEventHandler):
             return
 
         try:
-            frame_size = self._audio_width * self._audio_channels
-            if frame_size <= 0:
-                raise ValueError("Realtime PCM frame size must be positive")
-            pending = self._realtime_pcm_tail + chunk.audio
-            complete_size = len(pending) // frame_size * frame_size
-            self._realtime_pcm_tail = pending[complete_size:]
-            if not complete_size:
-                return
-            audio = self._convert_audio_to_realtime_pcm(
-                pending[:complete_size],
-                sample_rate=self._audio_sample_rate,
-                audio_width=self._audio_width,
-                audio_channels=self._audio_channels,
-            )
-            if not audio:
-                return
-
-            encoded_audio = base64.b64encode(audio).decode("ascii")
-            await self._realtime_connection.input_audio_buffer.append(audio=encoded_audio)
+            await self._append_realtime_audio(audio_stream.realtime_converter.convert_chunk(chunk.audio), connection)
         except Exception as err:
             # The session cannot take the rest of the audio either, so it fails now, with one log entry
             _LOGGER.exception("Error sending realtime audio chunk: %s", err)
             await self._cleanup_realtime_transcription()
             await self._fail_realtime_audio_stream(audio_stream)
 
-    async def _handle_realtime_audio_stop(self) -> bool:
+    async def _append_realtime_audio(self, audio: bytes, connection: Any) -> None:
+        """Append PCM16 audio to the Realtime input buffer of the given connection."""
+        if not audio:
+            return
+        await connection.input_audio_buffer.append(audio=base64.b64encode(audio).decode("ascii"))
+
+    async def _handle_realtime_audio_stop(self, audio_stream: _AudioStreamState) -> bool:
         """Commit realtime audio and emit the final transcription. Returns False to close a connection it failed on."""
-        if not self._is_recording or self._realtime_connection is None:
+        connection = self._realtime_connection
+        if not self._is_recording or connection is None:
             _LOGGER.warning("Received realtime audio stop event without recording")
             await self._cleanup_realtime_transcription()
             return True
 
         self._is_recording = False
+        # Captured before the flush append awaits, since stop() can clear the handler's attributes meanwhile
+        transcript_future = self._realtime_transcript_future
 
         transcript_sent = False
         try:
-            if self._realtime_transcript_future is None:
-                raise RealtimeTranscriptionError("Realtime transcription future was not initialized")
+            if transcript_future is None:
+                raise RealtimeTranscriptionError("Realtime transcription session was not initialized")
 
             try:
                 # The commit is a websocket send that can stall too, so it shares the time limit
                 async with asyncio.timeout(REALTIME_STT_TRANSCRIPT_TIMEOUT):
-                    await self._realtime_connection.input_audio_buffer.commit()
-                    transcript = await self._realtime_transcript_future
+                    await self._append_realtime_audio(audio_stream.realtime_converter.flush(), connection)
+                    if transcript_future.done():
+                        # stop() closed the session during the flush: await its failure instead of committing
+                        transcript = await transcript_future
+                    else:
+                        await connection.input_audio_buffer.commit()
+                        transcript = await transcript_future
             except TimeoutError as err:
                 # A server that stalls with the socket open would otherwise hold the Wyoming client forever
                 raise RealtimeTranscriptionError(
@@ -730,7 +733,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     "of the end of the audio"
                 ) from err
             if transcript:
-                _LOGGER.info("Successfully transcribed realtime stream: %s", _truncate_for_log(transcript))
+                _LOGGER.info("Successfully transcribed realtime stream: %s", truncate_for_log(transcript))
             else:
                 _LOGGER.warning("Received empty realtime transcription result")
             await self.write_event(Transcript(text=transcript).event())
@@ -863,7 +866,6 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task."""
-        self._realtime_pcm_tail = b""
         receive_task = self._realtime_receive_task
         self._realtime_receive_task = None
         if receive_task and not receive_task.done():
@@ -893,92 +895,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         elif connection is not None:
             self._run_in_background(connection.close(), name="openai_realtime_stt_close")
 
-    def _convert_audio_to_realtime_pcm(
-        self, audio: bytes, *, sample_rate: int, audio_width: int, audio_channels: int
-    ) -> bytes:
-        """Convert incoming Wyoming PCM to 24 kHz mono PCM16 for OpenAI Realtime."""
-        if (
-            sample_rate == REALTIME_AUDIO_RATE
-            and audio_width == REALTIME_AUDIO_WIDTH
-            and audio_channels == REALTIME_AUDIO_CHANNELS
-        ):
-            return audio
-
-        samples = self._decode_pcm_samples(audio, audio_width)
-        if not samples:
-            return b""
-
-        samples = self._downmix_pcm_samples(samples, audio_channels)
-        samples = self._resample_pcm_samples(samples, sample_rate, REALTIME_AUDIO_RATE)
-        return self._encode_pcm16_samples(samples)
-
-    def _decode_pcm_samples(self, audio: bytes, audio_width: int) -> list[int]:
-        """Decode PCM bytes into signed 16-bit sample values."""
-        sample_count = len(audio) // audio_width
-        if sample_count == 0:
-            return []
-
-        audio = audio[: sample_count * audio_width]
-        if audio_width == 1:
-            return [(sample - 128) << 8 for sample in audio]
-
-        if audio_width == 2:
-            return list(struct.unpack(f"<{sample_count}h", audio))
-
-        if audio_width == 3:
-            return [int.from_bytes(audio[i : i + 3], "little", signed=True) >> 8 for i in range(0, len(audio), 3)]
-
-        if audio_width == 4:
-            return [int.from_bytes(audio[i : i + 4], "little", signed=True) >> 16 for i in range(0, len(audio), 4)]
-
-        raise ValueError(f"Unsupported audio sample width for realtime transcription: {audio_width}")
-
-    def _downmix_pcm_samples(self, samples: list[int], audio_channels: int) -> list[int]:
-        """Downmix PCM samples to mono."""
-        if audio_channels <= 0:
-            raise ValueError(f"Unsupported audio channel count for realtime transcription: {audio_channels}")
-
-        if audio_channels == REALTIME_AUDIO_CHANNELS:
-            return samples
-
-        frame_count = len(samples) // audio_channels
-        mono_samples = []
-        for frame_index in range(frame_count):
-            start = frame_index * audio_channels
-            mono_samples.append(round(sum(samples[start : start + audio_channels]) / audio_channels))
-        return mono_samples
-
-    def _resample_pcm_samples(self, samples: list[int], source_rate: int, target_rate: int) -> list[int]:
-        """Linearly resample PCM samples to the target sample rate."""
-        if source_rate <= 0:
-            raise ValueError(f"Unsupported audio sample rate for realtime transcription: {source_rate}")
-
-        if source_rate == target_rate or len(samples) < 2:
-            return samples
-
-        output_count = max(1, round(len(samples) * target_rate / source_rate))
-        resampled = []
-        for output_index in range(output_count):
-            source_position = output_index * source_rate / target_rate
-            left_index = int(source_position)
-            if left_index >= len(samples) - 1:
-                resampled.append(samples[-1])
-                continue
-
-            fraction = source_position - left_index
-            sample = samples[left_index] + (samples[left_index + 1] - samples[left_index]) * fraction
-            resampled.append(round(sample))
-
-        return resampled
-
-    def _encode_pcm16_samples(self, samples: list[int]) -> bytes:
-        """Encode signed sample values as little-endian PCM16."""
-        if not samples:
-            return b""
-
-        clamped_samples = (max(-32768, min(32767, int(sample))) for sample in samples)
-        return struct.pack(f"<{len(samples)}h", *clamped_samples)
-
     async def _handle_audio_stop(self) -> bool:
         """Handle end of audio stream and perform transcription. Returns False to close a connection it failed on."""
         audio_stream, self._audio_stream = self._audio_stream, None
@@ -991,7 +907,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             return False
 
         if audio_stream.realtime:
-            return await self._handle_realtime_audio_stop()
+            return await self._handle_realtime_audio_stop(audio_stream)
 
         if not self._is_recording or not self._wav_buffer:
             _LOGGER.warning("Received audio stop event without recording")
@@ -1069,7 +985,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 # Handle non-streaming response
                 _LOGGER.debug("Handling non-streaming transcription response")
                 if transcription.text:
-                    _LOGGER.info("Successfully transcribed: %s", _truncate_for_log(transcription.text))
+                    _LOGGER.info("Successfully transcribed: %s", truncate_for_log(transcription.text))
                 else:
                     _LOGGER.warning("Received empty transcription result")
                 await self.write_event(Transcript(text=transcription.text).event())
@@ -1359,7 +1275,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Await tasks IN ORDER for sequential playback
         # Enable streaming for whichever task we're currently awaiting
         for i, (task_id, task) in enumerate(synthesis_tasks):
-            sentence_preview = _truncate_for_log(sentences[i], 50)
+            sentence_preview = truncate_for_log(sentences[i], 50)
             _LOGGER.debug("Processing sentence %d/%d: %s", i + 1, len(sentences), sentence_preview)
 
             self._allow_streaming_task_id = task_id
@@ -1788,7 +1704,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             return False
 
         chunk_text = synthesize_chunk.text if synthesize_chunk.text else ""
-        _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", _truncate_for_log(chunk_text, 50), len(chunk_text))
+        _LOGGER.debug("Received synthesis chunk: '%s' (length: %d)", truncate_for_log(chunk_text, 50), len(chunk_text))
 
         if self._synthesis.ssml_transformer is not None:
             chunk_text = self._synthesis.ssml_transformer.feed(chunk_text)
@@ -1830,14 +1746,14 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.info(
                 "Detected %d ready sentences for immediate synthesis: %s",
                 len(ready_sentences),
-                [_truncate_for_log(s, 30) for s in ready_sentences],
+                [truncate_for_log(s, 30) for s in ready_sentences],
             )
             if not await self._process_ready_sentences(ready_sentences):
                 return False
         else:
             _LOGGER.debug(
                 "No complete sentences ready yet, accumulator has: '%s'",
-                _truncate_for_log(self._synthesis.text_accumulator),
+                truncate_for_log(self._synthesis.text_accumulator),
             )
 
         return True
@@ -1869,13 +1785,13 @@ class OpenAIEventHandler(AsyncEventHandler):
             state.buffer.append(flushed)
 
         full_text = "".join(state.buffer)
-        _LOGGER.debug("Streaming synthesis completed with text: %s", _truncate_for_log(full_text))
+        _LOGGER.debug("Streaming synthesis completed with text: %s", truncate_for_log(full_text))
 
         try:
             if state.streamed:
                 # Earlier sentences were spoken as they arrived. What is left is final, complete or not
                 if state.text_accumulator.strip():
-                    _LOGGER.info("Processing final remaining text: '%s'", _truncate_for_log(state.text_accumulator))
+                    _LOGGER.info("Processing final remaining text: '%s'", truncate_for_log(state.text_accumulator))
                     if not await self._process_ready_sentences([state.text_accumulator]):
                         return False
                 succeeded = await self._finish_tts_audio_stream(voice)
@@ -1912,7 +1828,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             TtsStreamResult: Container with streaming status and optional buffered audio.
         """
-        chunk_preview = _truncate_for_log(text, 50)
+        chunk_preview = truncate_for_log(text, 50)
 
         def is_playing() -> bool:
             """Check if playback has reached this chunk, so nothing else is writing audio."""
@@ -2118,8 +2034,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         log = _LOGGER.debug if spelled_out else _LOGGER.warning
         log(
             "Realtime TTS spoke text that differs from the request. Requested: %s | Spoken: %s",
-            _truncate_for_log(text),
-            _truncate_for_log(spoken_text),
+            truncate_for_log(text),
+            truncate_for_log(spoken_text),
         )
 
     async def _stream_audio_to_wyoming(self, audio_data: bytes, audio_format: TtsAudioFormat, text: str = "") -> bool:
@@ -2166,7 +2082,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # Send audio stop after streaming completes
         await self._write_tts_audio_stop()
-        _LOGGER.info("Successfully synthesized: %s", _truncate_for_log(text))
+        _LOGGER.info("Successfully synthesized: %s", truncate_for_log(text))
         return True
 
     async def _write_tts_audio_start(self, rate: int, width: int, channels: int) -> None:
@@ -2320,14 +2236,14 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             speakable = _has_speakable_content(text)
             if framer.missing_bytes or (speakable and not sentence):
-                _LOGGER.error("TTS backend returned no audio for: %s", _truncate_for_log(text, 50))
+                _LOGGER.error("TTS backend returned no audio for: %s", truncate_for_log(text, 50))
                 return False
 
             if speakable:
-                _LOGGER.warning("Skipping sentence without audio: %s", _truncate_for_log(text, 50))
+                _LOGGER.warning("Skipping sentence without audio: %s", truncate_for_log(text, 50))
                 self._synthesis.skipped_speakable_sentence = True
             else:
-                _LOGGER.debug("No audio for text with nothing to speak: %s", _truncate_for_log(text, 50))
+                _LOGGER.debug("No audio for text with nothing to speak: %s", truncate_for_log(text, 50))
             if not sentence:
                 await write_audio(b"")
             return True

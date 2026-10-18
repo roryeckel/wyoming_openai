@@ -5,6 +5,7 @@ import wave
 from dataclasses import dataclass
 
 from .const import DEFAULT_AUDIO_CHANNELS, DEFAULT_AUDIO_WIDTH
+from .utilities import take_whole_frames
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -144,17 +145,11 @@ class WavFramer:
         return self._whole_frames(audio)
 
     def _whole_frames(self, audio: bytes) -> bytes:
-        """
-        Return the whole frames of the audio so far, holding back the start of one that continues in the next
-        bytes: a frame can be split wherever the response is, for one by a header of odd length.
-        """
-        frame_size = self.width * self.channels
-        if frame_size <= 1:
-            return audio
-        audio = self._partial + audio
-        whole = len(audio) - len(audio) % frame_size
-        self._partial = audio[whole:]
-        return audio[:whole]
+        """Return the whole frames of the audio so far, carrying a partial frame to the next bytes."""
+        audio, self._partial = take_whole_frames(
+            partial=self._partial, audio=audio, frame_size=self.width * self.channels
+        )
+        return audio
 
     def _bound(self, audio: bytes) -> bytes:
         """Keep only the PCM the header covers."""
