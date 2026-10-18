@@ -308,6 +308,11 @@ async def main():
         _logger.warning("TTS Realtime extra body is set but unused: no --tts-realtime-models are configured")
     if args.stt_realtime_extra_body and not args.stt_realtime_models:
         _logger.warning("STT Realtime extra body is set but unused: no --stt-realtime-models are configured")
+    http_stt_models = {*args.stt_models, *args.stt_streaming_models} - set(args.stt_realtime_models)
+    if args.stt_extra_body and stt_requested and not http_stt_models:
+        _logger.warning(
+            "STT extra body is set but unused: every STT model is a Realtime model; use --stt-realtime-extra-body"
+        )
     speech_api_tts_models = {*tts_models, *args.tts_streaming_models} - set(args.tts_realtime_models)
     if args.tts_extra_body and tts_requested and not speech_api_tts_models:
         _logger.warning(

@@ -473,10 +473,26 @@ def get_extra_body_boolean_field(
     raise ValueError(f"{body_name} extra_body {field_name} must be a boolean; got {field_value!r}")
 
 
+def validate_extra_body_languages(extra_body: dict[str, object] | None, *, body_name: str, allow_null: bool) -> None:
+    """
+    Reject a `languages` override that is not a list of language codes. It replaces the request language, so a
+    wrong one would otherwise only fail at the first transcription; `null` drops it where a null drops a field.
+    """
+    if not extra_body or "languages" not in extra_body:
+        return
+    languages = extra_body["languages"]
+    if languages is None and allow_null:
+        return
+    if isinstance(languages, list) and languages and all(isinstance(code, str) and code for code in languages):
+        return
+    raise ValueError(f"{body_name} extra_body languages must be a list of language codes; got {languages!r}")
+
+
 def validate_stt_extra_body(extra_body: dict[str, object] | None) -> None:
     """Validate STT extra_body fields that can affect client-side parsing."""
     validate_extra_body_response_format(extra_body, allowed_formats={"json"}, body_name="STT")
     validate_extra_body_boolean_field(extra_body, field_name="stream", body_name="STT")
+    validate_extra_body_languages(extra_body, body_name="STT", allow_null=False)
 
 
 def validate_tts_extra_body(extra_body: dict[str, object] | None) -> None:
@@ -494,6 +510,7 @@ def validate_realtime_stt_extra_body(extra_body: dict[str, object] | None) -> No
     validate_extra_body_disallowed_fields(
         extra_body, field_names={"model"}, body_name="STT Realtime", reason="use STT_REALTIME_MODELS"
     )
+    validate_extra_body_languages(extra_body, body_name="STT Realtime", allow_null=True)
 
 
 # Session fields Realtime TTS sets itself: the ones it relies on to get speech, and only speech, back,

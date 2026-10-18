@@ -71,6 +71,7 @@ class WavFramer:
         self.header_missing = False  # No WAV header could be parsed, so the bytes were released as raw PCM
         self._pending = b""  # Bytes held until the header is understood
         self._remaining: int | None = None  # Declared PCM bytes not received yet; None when unbounded
+        self._partial = b""  # The start of a frame whose rest has not arrived, since chunks hold whole frames
 
     @property
     def missing_bytes(self) -> int:
@@ -80,7 +81,7 @@ class WavFramer:
     def feed(self, chunk: bytes) -> bytes:
         """Take the next response bytes and return the PCM to play, which is empty while the header is incomplete."""
         if not self.awaiting_header:
-            return self._bound(chunk)
+            return self._whole_frames(self._bound(chunk))
 
         self._pending += chunk
         wav_params = parse_wav_header(self._pending)
@@ -115,21 +116,45 @@ class WavFramer:
                 data_offset,
                 "unknown" if self._remaining is None else f"{self._remaining} bytes",
             )
-            return self._bound(available_audio)
+            return self._whole_frames(self._bound(available_audio))
 
         if len(self._pending) <= TTS_WAV_HEADER_MAX_BYTES:
             return b""
 
         # Callers report `header_missing`: only they know if this was a stream or a whole buffered response
-        return self.finish()
+        return self._release_pending()
 
     def finish(self) -> bytes:
-        """Return the bytes still held when the response ends without a WAV header, to be played as raw PCM."""
+        """
+        Return the bytes still held when the response ends without a WAV header, to be played as raw PCM.
+        A frame the response ends in the middle of is dropped, since its samples are incomplete.
+        """
+        audio = self._release_pending()
+        if self._partial:
+            _LOGGER.debug("Dropping %d bytes that end the audio in the middle of a frame", len(self._partial))
+            self._partial = b""
+        return audio
+
+    def _release_pending(self) -> bytes:
+        """Give up on a WAV header and release the bytes held for it as raw PCM."""
         audio, self._pending = self._pending, b""
         if self.awaiting_header and audio:
             self.header_missing = True
         self.awaiting_header = False
-        return audio
+        return self._whole_frames(audio)
+
+    def _whole_frames(self, audio: bytes) -> bytes:
+        """
+        Return the whole frames of the audio so far, holding back the start of one that continues in the next
+        bytes: a frame can be split wherever the response is, for one by a header of odd length.
+        """
+        frame_size = self.width * self.channels
+        if frame_size <= 1:
+            return audio
+        audio = self._partial + audio
+        whole = len(audio) - len(audio) % frame_size
+        self._partial = audio[whole:]
+        return audio[:whole]
 
     def _bound(self, audio: bytes) -> bytes:
         """Keep only the PCM the header covers."""

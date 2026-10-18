@@ -778,6 +778,7 @@ async def test_main_warns_about_unused_realtime_extra_bodies(monkeypatch, caplog
     assert "STT Realtime extra body is set but unused" in caplog.text
     # A speech API model is configured, so its extra body is in use
     assert "TTS extra body is set but unused" not in caplog.text
+    assert "STT extra body is set but unused" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -842,7 +843,7 @@ async def test_main_keeps_configured_voices_for_realtime_models_off_the_official
 
 
 @pytest.mark.asyncio
-async def test_main_passes_stt_realtime_extra_body(monkeypatch):
+async def test_main_passes_stt_realtime_extra_body(monkeypatch, caplog):
     server = _CapturingServer()
 
     async def fake_factory(*args, **kwargs):
@@ -868,11 +869,14 @@ async def test_main_passes_stt_realtime_extra_body(monkeypatch):
         ],
     )
 
-    await main()
+    with caplog.at_level("WARNING"):
+        await main()
 
     handler = server.handlers[0]
     assert handler._stt_extra_body == {"temperature": 0.2}
     assert handler._stt_realtime_extra_body == {"keywords": ["Wyoming"]}
+    # The only STT model is a Realtime one, so the /v1/audio/transcriptions body goes unused
+    assert "STT extra body is set but unused" in caplog.text
 
 
 async def _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args):

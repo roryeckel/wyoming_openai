@@ -406,6 +406,43 @@ class TestCustomAsyncOpenAI:
                 openai_realtime_models=["gpt-realtime-2.1-mini"],
             )
 
+    def test_create_tts_voices_skips_later_voices_for_tts_1_on_the_official_api(self, caplog):
+        """Test tts-1 models are not offered the later speech voices, which they reject, while other models are."""
+        with caplog.at_level("WARNING", logger="wyoming_openai.compatibility"):
+            voices = create_tts_voices(
+                ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"],
+                [],
+                ["marin", "alloy", "brand-new-voice"],
+                "https://api.openai.com/v1",
+                ["en"],
+            )
+
+        by_model = {}
+        for voice in voices:
+            by_model.setdefault(voice.model_name, []).append(voice.backend_voice_name)
+        # Only voices known to be missing are skipped
+        assert by_model == {
+            "tts-1": ["alloy", "brand-new-voice"],
+            "tts-1-hd": ["alloy", "brand-new-voice"],
+            "gpt-4o-mini-tts": ["marin", "alloy", "brand-new-voice"],
+        }
+        assert "marin" in caplog.text
+
+    def test_create_tts_voices_rejects_tts_1_left_without_voices(self):
+        """Test a tts-1 model is not silently dropped when none of the configured voices fit it."""
+        with pytest.raises(ValueError, match="cedar"):
+            create_tts_voices(["tts-1"], [], ["marin", "cedar"], "https://api.openai.com/v1", ["en"])
+
+    def test_create_tts_voices_keeps_later_voices_for_tts_1_off_the_official_api(self, caplog):
+        """Test another server keeps voices it may offer under those names for its tts-1 model."""
+        with caplog.at_level("WARNING", logger="wyoming_openai.compatibility"):
+            voices = create_tts_voices(
+                ["tts-1"], [], ["marin", "alloy"], "http://localhost:8000/v1", ["en"], official_openai=False
+            )
+
+        assert [v.backend_voice_name for v in voices] == ["marin", "alloy"]
+        assert caplog.records == []
+
     @pytest.mark.parametrize("configured", [["onyx", "nova"], ["alloy", "fable", "custom"]])
     def test_create_tts_voices_keeps_speech_only_voices_off_the_official_api(self, caplog, configured):
         """Test another server classed as OPENAI is not blocked over voices it may offer under those names."""

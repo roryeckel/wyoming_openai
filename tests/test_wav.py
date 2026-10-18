@@ -46,6 +46,38 @@ def test_framer_strips_the_header_however_the_response_is_chunked(chunk_size):
     assert not framer.header_missing
 
 
+def _wav_with_extended_fmt(pcm: bytes, rate: int = 22050, channels: int = 2) -> bytes:
+    """A PCM WAV whose fmt chunk has the 18-byte form, which leaves the audio at an odd offset of 46 bytes."""
+    block_align = channels * 2
+    fmt = struct.pack("<HHIIHHH", 1, channels, rate, rate * block_align, block_align, 16, 0)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(pcm)) + pcm
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 2048])
+def test_framer_hands_out_whole_frames_after_a_header_of_odd_length(chunk_size):
+    """Stereo 16-bit frames are four bytes, so a 46-byte header would split them at every read."""
+    pcm = bytes(range(256)) * 32
+    wav = _wav_with_extended_fmt(pcm)
+    framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
+
+    chunks = [framer.feed(wav[i : i + chunk_size]) for i in range(0, len(wav), chunk_size)]
+
+    assert all(len(chunk) % 4 == 0 for chunk in chunks)
+    assert b"".join(chunks) + framer.finish() == pcm
+    assert (framer.rate, framer.width, framer.channels) == (22050, 2, 2)
+
+
+def test_framer_drops_a_frame_the_response_ends_in():
+    """Headerless PCM16 read in odd pieces keeps whole samples, and a last half sample is not played."""
+    framer = WavFramer(TtsAudioFormat(headerless=True, rate=24000))
+
+    assert framer.feed(PCM[:3]) == PCM[:2]
+    assert framer.feed(PCM[3:]) == PCM[2:]
+    assert framer.feed(b"\x7f") == b""
+    assert framer.finish() == b""
+
+
 def test_framer_passes_headerless_audio_through_at_the_declared_rate():
     framer = WavFramer(TtsAudioFormat(headerless=True, rate=24000))
 

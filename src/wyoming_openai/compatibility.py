@@ -263,8 +263,9 @@ def create_tts_voices(
         languages (list[str]): A list of supported languages.
         openai_realtime_models (list[str] | None): Models that synthesize over OpenAI's Realtime API,
             whose configured voices are filtered only on the official OpenAI API.
-        official_openai (bool): Whether to exclude speech-only voices from Realtime models and error
-            if none remain. Other servers keep every configured voice, since they may offer their own.
+        official_openai (bool): Whether to exclude the voices a model does not offer (speech-only voices from
+            Realtime models, the later speech voices from tts-1 models) and error if none remain. Other servers keep
+            every configured voice, since they may offer their own.
 
     Returns:
         list[TtsVoiceModel]: A list of Wyoming TtsVoiceModel instances.
@@ -297,10 +298,35 @@ def create_tts_voices(
                 "or remove those models from TTS_REALTIME_MODELS"
             )
 
-    model_voice_pairs = [
-        (model_name, voice_name)
+    # tts-1 and tts-1-hd predate the later speech voices, which they reject; as for Realtime, only voices known
+    # to be missing are skipped, and only on the official API
+    legacy_models = [
+        model_name
         for model_name in ordered_models
-        for voice_name in (realtime_voices if model_name in realtime_models else tts_voices)
+        if official_openai
+        and model_name not in realtime_models
+        and model_name.startswith(OPENAI_LEGACY_SPEECH_TTS_MODEL_PREFIXES)
+    ]
+    legacy_missing_voices = set(OPENAI_SPEECH_TTS_VOICES) - set(OPENAI_LEGACY_SPEECH_TTS_VOICES)
+    legacy_voices = [voice_name for voice_name in tts_voices if voice_name not in legacy_missing_voices]
+    if legacy_models and len(legacy_voices) < len(tts_voices):
+        skipped_voices = [voice_name for voice_name in tts_voices if voice_name in legacy_missing_voices]
+        if not legacy_voices:
+            raise ValueError(
+                f"None of the configured TTS voices {skipped_voices} are offered by {legacy_models}; "
+                f"choose from {list(OPENAI_LEGACY_SPEECH_TTS_VOICES)}, or use a later speech model"
+            )
+        _LOGGER.warning("Voices not offered by %s are skipped for those models: %s", legacy_models, skipped_voices)
+
+    def model_voices(model_name: str) -> list[str]:
+        if model_name in realtime_models:
+            return realtime_voices
+        if model_name in legacy_models:
+            return legacy_voices
+        return tts_voices
+
+    model_voice_pairs = [
+        (model_name, voice_name) for model_name in ordered_models for voice_name in model_voices(model_name)
     ]
     return _create_tts_voice_models(model_voice_pairs, tts_url, languages)
 

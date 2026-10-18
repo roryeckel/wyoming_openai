@@ -465,7 +465,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         else:
             self._log_unsupported_asr_model(transcribe.name)
         # A stream in progress is left with nothing to transcribe, as one that starts after a refusal is
-        await self._abandon_audio_stream("a transcribe during it was refused")
+        abandoned_stream = await self._abandon_audio_stream("a transcribe during it was refused")
+        if abandoned_stream is None or not abandoned_stream.failed:
+            await self._report_stt_failure()
         return False
 
     def _apply_transcribe_to_audio_stream(
@@ -553,16 +555,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         await self._cleanup_realtime_transcription()
         return audio_stream
 
-    async def _abandon_audio_stream(self, reason: str) -> None:
+    async def _abandon_audio_stream(self, reason: str) -> _AudioStreamState | None:
         """Drop an audio stream the client did not stop, and close the transcript sequence it opened."""
         audio_stream = await self._drop_audio_stream()
         if audio_stream is None:
-            return
+            return None
         _LOGGER.warning("Dropping an audio stream without transcribing it: %s", reason)
         if audio_stream.transcript_started:
             # Closed without a Transcript: a client reads the first one it gets as the result of the request it is
             # waiting for, which is no longer this stream
             await self.write_event(TranscriptStop().event())
+        return audio_stream
 
     async def _handle_audio_chunk(self, chunk: AudioChunk) -> None:
         """Handle audio chunk"""
@@ -570,7 +573,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Its failure was reported once; the audio has nowhere to go
             return
         if self._audio_stream is not None and self._audio_stream.realtime:
-            await self._handle_realtime_audio_chunk(chunk)
+            await self._handle_realtime_audio_chunk(self._audio_stream, chunk)
             return
 
         if self._is_recording and chunk.audio and self._wav_write_buffer:
@@ -584,7 +587,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Open an OpenAI Realtime transcription session."""
         if self._stt_client is None:
             _LOGGER.error("No STT client configured for realtime transcription")
-            await self._fail_realtime_audio_start(audio_stream)
+            await self._fail_realtime_audio_stream(audio_stream)
             return
 
         try:
@@ -609,13 +612,14 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as err:
             _LOGGER.exception("Error starting realtime transcription: %s", err)
             await self._cleanup_realtime_transcription()
-            await self._fail_realtime_audio_start(audio_stream)
+            await self._fail_realtime_audio_stream(audio_stream)
 
-    async def _fail_realtime_audio_start(self, audio_stream: _AudioStreamState) -> None:
+    async def _fail_realtime_audio_stream(self, audio_stream: _AudioStreamState) -> None:
         """
-        Report a Realtime session that could not be opened as soon as it fails: a client that reads while it
-        streams audio, such as Home Assistant 2026.10 and later, ends the request instead of recording on. The rest
-        of the stream's audio is dropped, and its audio-stop closes the connection.
+        Report a Realtime session that could not be opened, or that failed while the audio was still arriving, as
+        soon as that is known: a client that reads while it streams audio, such as Home Assistant 2026.10 and later,
+        ends the request instead of recording on. The rest of the stream's audio is dropped, and its audio-stop
+        closes the connection.
         """
         self._is_recording = False
         audio_stream.failed = True
@@ -630,10 +634,19 @@ class OpenAIEventHandler(AsyncEventHandler):
         """
         await self._write_event_bounded(Error(text=STT_FAILED_ERROR).event())
 
-    async def _handle_realtime_audio_chunk(self, chunk: AudioChunk) -> None:
+    async def _handle_realtime_audio_chunk(self, audio_stream: _AudioStreamState, chunk: AudioChunk) -> None:
         """Append a Wyoming audio chunk to the OpenAI Realtime input buffer."""
         if not self._is_recording or self._realtime_connection is None:
             _LOGGER.warning("Received realtime audio chunk without an active recording")
+            return
+
+        # session.update only sends the settings, so a server that rejects them, or a socket that closes, is only
+        # seen once the receiver has read it; the client is told then rather than after the rest of the audio
+        failure = self._get_realtime_transcription_failure()
+        if failure is not None:
+            _LOGGER.error("Realtime transcription failed while the audio was arriving: %s", failure)
+            await self._cleanup_realtime_transcription()
+            await self._fail_realtime_audio_stream(audio_stream)
             return
 
         if not chunk.audio:
@@ -660,8 +673,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             encoded_audio = base64.b64encode(audio).decode("ascii")
             await self._realtime_connection.input_audio_buffer.append(audio=encoded_audio)
         except Exception as err:
+            # The session cannot take the rest of the audio either, so it fails now, with one log entry
             _LOGGER.exception("Error sending realtime audio chunk: %s", err)
-            self._set_realtime_transcription_exception(err)
+            await self._cleanup_realtime_transcription()
+            await self._fail_realtime_audio_stream(audio_stream)
 
     async def _handle_realtime_audio_stop(self) -> bool:
         """Commit realtime audio and emit the final transcription. Returns False to close a connection it failed on."""
@@ -813,10 +828,12 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         return f"Realtime request failed with event type {getattr(event, 'type', 'unknown')}"
 
-    def _set_realtime_transcription_exception(self, err: Exception) -> None:
-        """Fail the pending realtime transcription, if any."""
-        if self._realtime_transcript_future and not self._realtime_transcript_future.done():
-            self._realtime_transcript_future.set_exception(err)
+    def _get_realtime_transcription_failure(self) -> BaseException | None:
+        """The error the Realtime session has already failed with, if any, before its transcript is awaited."""
+        transcript_future = self._realtime_transcript_future
+        if transcript_future is None or not transcript_future.done() or transcript_future.cancelled():
+            return None
+        return transcript_future.exception()
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task."""
@@ -830,8 +847,12 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         transcript_future = self._realtime_transcript_future
         self._realtime_transcript_future = None
-        if transcript_future is not None and not transcript_future.done():
-            transcript_future.cancel()
+        if transcript_future is not None:
+            if not transcript_future.done():
+                transcript_future.cancel()
+            elif not transcript_future.cancelled():
+                # Read, so the failure of a stream that is dropped is not logged later as never retrieved
+                transcript_future.exception()
 
         connection_manager = self._realtime_connection_manager
         connection = self._realtime_connection
@@ -1291,6 +1312,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 and an open audio stream are then left to `_stop_sentence_playback`, which the caller runs.
         """
         _LOGGER.info("Starting concurrent synthesis for %d sentences", len(sentences))
+        # Kept across the awaits, like _stop_sentence_playback does, to see whether it ended this synthesis
+        state = self._synthesis
 
         # Create ALL tasks with IDs - API calls start concurrently
         # Semaphore limits actual concurrency to the configured number of concurrent TTS requests
@@ -1333,6 +1356,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                 return False
             finally:
                 self._allow_streaming_task_id = None
+
+            # stop() may have ended the synthesis while this sentence finished; with nothing left to cancel it
+            # cannot stop the sentences that are already buffered, so they are not played after its error
+            if state.failed:
+                return False
 
             if result.streamed:
                 _LOGGER.debug("Sentence %d streamed directly with minimal latency", i + 1)
@@ -1476,9 +1504,17 @@ class OpenAIEventHandler(AsyncEventHandler):
         return None
 
     def _get_default_voice(self) -> TtsVoiceModel | None:
-        """Get the voice for a request that names none: the first one, preferring the speech API over Realtime."""
-        voices = list(self._iter_tts_voices())
-        return self._prefer_speech_api_voices(voices)[0] if voices else None
+        """
+        Get the voice for a request that names none: one of the selected program, or else of the first program
+        with voices, which is the only one Home Assistant shows. Within that program the speech API is preferred
+        over Realtime, so such a request never moves onto Realtime unless the program offers nothing else.
+        """
+        programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
+        for program in programs:
+            voices = [cast(TtsVoiceModel, voice) for voice in program.voices]
+            if voices:
+                return self._prefer_speech_api_voices(voices)[0]
+        return None
 
     def _get_voices_by_backend_name(self, backend_voice_name: str) -> list[TtsVoiceModel]:
         """Get TTS voices by the raw backend voice identifier."""

@@ -302,6 +302,21 @@ def test_validate_stt_extra_body_allows_boolean_stream_override():
     validate_stt_extra_body({"response_format": "json", "stream": True})
 
 
+@pytest.mark.parametrize("languages", ["en", [], ["en", 1], [""], None])
+def test_validate_stt_extra_body_rejects_languages_that_are_not_language_codes(languages):
+    """A `languages` override replaces the request language, so a wrong one is reported at startup."""
+    validate_stt_extra_body({"languages": ["en", "de"]})
+    with pytest.raises(ValueError, match="STT extra_body languages must be a list of language codes"):
+        validate_stt_extra_body({"languages": languages})
+
+
+def test_validate_realtime_stt_extra_body_checks_languages_and_allows_dropping_them():
+    """In the Realtime body a null drops the field, as for any other field there."""
+    validate_realtime_stt_extra_body({"languages": None})
+    with pytest.raises(ValueError, match="STT Realtime extra_body languages must be a list of language codes"):
+        validate_realtime_stt_extra_body({"languages": "en"})
+
+
 def test_validate_stt_extra_body_rejects_non_boolean_stream_override():
     """Test that STT extra_body rejects non-boolean stream values."""
     with pytest.raises(ValueError, match="STT extra_body stream must be a boolean"):
