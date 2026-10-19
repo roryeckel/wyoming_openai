@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HA E2E Scripted Replies",
+        "description": "Test-only conversation agent used by the wyoming_openai end-to-end harness."
+      }
+    },
+    "abort": {
+      "already_configured": "The test conversation agent is already configured."
+    }
+  }
+}

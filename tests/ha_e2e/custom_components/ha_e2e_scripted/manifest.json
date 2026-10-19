@@ -1,0 +1,15 @@
+{
+  "domain": "ha_e2e_scripted",
+  "name": "HA E2E Scripted Replies",
+  "codeowners": [
+    "@roryeckel"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "conversation"
+  ],
+  "documentation": "https://github.com/roryeckel/wyoming_openai/tree/main/tests/ha_e2e",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "version": "0.1.0"
+}

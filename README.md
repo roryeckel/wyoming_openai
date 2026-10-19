@@ -655,8 +655,10 @@ The `tests/test_e2e.py` suite drives a real `wyoming_openai` server over TCP and
 These tests are gated behind the `integration` marker and skipped by default. To run locally, just:
 
 ```bash
-pytest -m integration -v
+pytest -m "integration and not ha_e2e" -v
 ```
+
+The Home Assistant suite has its own `ha_e2e` marker and is described below.
 
 The fixtures handle the backend automatically: a Speaches instance already healthy on `localhost:8000` is reused; otherwise the Docker Compose stack (`docker-compose.speaches-cpu.yml` layered with `docker-compose.e2e.yml`, which swaps in a smaller Whisper model for testing) is started and torn down; if Docker is unavailable, the suite skips. Useful environment variables:
 
@@ -685,3 +687,55 @@ Windows note: this works under Docker Desktop; run pytest from a native Windows 
 Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are intentionally not covered - they use the OpenAI websocket API, which Speaches does not implement.
 
 The [Integration](.github/workflows/integration.yml) GitHub Actions workflow runs this suite on pushes and PRs against `main`: one job with the subprocess proxy, plus a smoke job against the freshly built Docker image.
+
+#### Home Assistant End-to-End Tests
+
+`tests/ha_e2e/` drives a real, headless Home Assistant against the proxy. Instead of a hand-written Wyoming client, it onboards Home Assistant through the REST API, adds the Wyoming config entry through the config-flow API, creates an Assist pipeline over the websocket API, and runs each turn through `assist_pipeline/run` from the STT stage to the TTS stage. A test-only custom conversation agent streams scripted replies through Home Assistant's ChatLog delta API, so streaming TTS is exercised deterministically without an LLM.
+
+The suite covers a multi-sentence reply with numbers, a ~2000-character reply with pauses between deltas, a one-word reply, an invalid STT model, and a proxy `docker stop` during a long streaming reply. TTS output is fetched from Home Assistant's `tts_output` URL and transcribed directly with Speaches, independently of the proxy.
+
+Run it locally:
+
+```bash
+docker build -t wyoming_openai:e2e .
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
+pytest -m ha_e2e -v --timeout=600
+```
+
+Or in PowerShell:
+
+```powershell
+docker build -t wyoming_openai:e2e .
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
+pytest -m ha_e2e -v --timeout=600
+```
+
+The harness generates a test-only Home Assistant user and password on a fresh instance and stores them, along with the config-entry IDs it creates, in `tests/ha_e2e/.state/` (gitignored). Re-runs reuse the stored refresh token and reload those entries instead of adding duplicates. If Home Assistant is already onboarded but that state is missing, reset the stack:
+
+```bash
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml down -v
+```
+
+Use `HA_VERSION` to pin the Home Assistant image (default `2026.10.1`); `down -v` is required when switching versions or resetting onboarding:
+
+```powershell
+$env:HA_VERSION = "2026.9.0"
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
+```
+
+The pipeline's TTS URL returns mp3 by default, so the harness needs `ffmpeg` on the host to decode it before transcription. It is present on GitHub's Ubuntu runners; install it locally if `ffmpeg -version` fails.
+
+Each run writes input WAVs, TTS output WAVs, event JSON, and `report.md` under `tests/ha_e2e/artifacts/run-<timestamp>/`. Override the location with `HA_E2E_ARTIFACT_DIR`. Other useful variables are `HA_E2E_BASE_URL`, `HA_E2E_SPEACHES_URL`, `HA_E2E_STT_MODEL`, `HA_E2E_PROXY_CONTAINER`, and `HA_E2E_HA_CONTAINER`.
+
+The fixture WAVs are committed under `tests/ha_e2e/fixtures/audio/`. They are generated once with Speaches Kokoro, not by the proxy under test, and are 16 kHz mono with trailing silence for Home Assistant's VAD. Regenerate them with Speaches running:
+
+```bash
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d speaches
+python tests/ha_e2e/generate_fixtures.py
+```
+
+The failure lanes require the Docker CLI: the invalid-STT proxy runs next to the good one, and the streaming-reply lane stops the proxy container to exercise the SIGTERM path, then restarts it for later runs.
+
+The [Home Assistant E2E](.github/workflows/ha-e2e.yml) workflow runs on `workflow_dispatch` and on pull requests labeled `ha-e2e` (not on every push). It is also called by the release workflows: the version bump cannot open a release PR until it passes, and `draft-release.yml` will not create a draft release until it passes against the exact release commit. Publishing the draft therefore cannot ship a release that skipped the Home Assistant check. Set the repository variable `HA_E2E_VERSION` to override the Home Assistant image tag used by release runs.
+
+Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covered by the Speaches lane. The compose overlay and workflow contain a clearly marked, unwired hook for a later OpenAI HTTP/Realtime lane that runs only by `workflow_dispatch` with an API key secret.

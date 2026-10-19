@@ -185,3 +185,7 @@ cython_debug/
 /tmp/logs/*
 !/tmp/logs/.gitkeep
 !/tmp/.gitkeep
+
+# HA E2E generated credentials and artifacts
+tests/ha_e2e/.state/
+tests/ha_e2e/artifacts/
