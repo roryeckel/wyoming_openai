@@ -26,7 +26,7 @@ on:
         default: "2026.10.1"
         type: string
       ref:
-        description: Git ref to test (release workflows pass main)
+        description: Git ref to test (release workflows pass the resolved release commit)
         required: false
         default: ""
         type: string

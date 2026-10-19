@@ -20,22 +20,61 @@ permissions:
   pull-requests: read
 
 jobs:
+  # Resolve one immutable commit for the gate, checkout, notes, and release
+  # target.  Without this, a merge landing while E2E runs could be released
+  # without ever passing the gate.
+  resolve:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       contains(github.event.pull_request.labels.*.name, 'release-bump'))
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Resolve release commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            sha="${MERGE_SHA:-}"
+            if [[ -z "$sha" || "$sha" == "null" ]]; then
+              echo "Merged release PR has no merge commit SHA; refusing to release an unpinned commit." >&2
+              exit 1
+            fi
+          else
+            sha="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH}" --jq '.sha')"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Resolved release commit is not a full SHA: $sha" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release commit: $sha"
+
   # Authoritative release gate: this runs automatically when the release-bump
   # PR is merged, before the draft release exists.  Publishing the draft (and
   # therefore PyPI/Docker) cannot happen if this job fails.
   ha-e2e:
+    needs: resolve
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
        contains(github.event.pull_request.labels.*.name, 'release-bump'))
     uses: ./.github/workflows/ha-e2e.yml
     with:
-      ref: main
+      ref: ${{ needs.resolve.outputs.sha }}
       force: true
       ha_version: ${{ vars.HA_E2E_VERSION || '2026.10.1' }}
 
   draft:
-    needs: ha-e2e
+    needs: [resolve, ha-e2e]
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
@@ -46,7 +85,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: main
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Resolve version
         id: version
@@ -283,6 +322,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           NEW_VERSION: ${{ steps.version.outputs.new }}
           TITLE: ${{ steps.title.outputs.final }}
+          TARGET_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           set -euo pipefail
           # If a release for this tag already exists (draft or published), update notes in place; else create a new draft.
@@ -290,13 +330,14 @@ jobs:
             echo "Release $TAG already exists — updating notes."
             gh release edit "$TAG" \
               --repo "$REPO" \
+              --target "$TARGET_SHA" \
               --notes-file RELEASE_NOTES.md \
               --title "$TITLE"
           else
-            echo "Creating new draft release $TAG."
+            echo "Creating new draft release $TAG at $TARGET_SHA."
             gh release create "$TAG" \
               --repo "$REPO" \
-              --target main \
+              --target "$TARGET_SHA" \
               --title "$TITLE" \
               --notes-file RELEASE_NOTES.md \
               --draft

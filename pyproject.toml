@@ -44,6 +44,8 @@ dev = [
     "pyright==1.1.414",
     "rapidfuzz==3.14.6",
     "httpx==0.28.1",
+    # The HA E2E harness passes proxy=None, which websockets only accepts in 15+.
+    "websockets>=15",
 ]
 
 [tool.pytest.ini_options]
