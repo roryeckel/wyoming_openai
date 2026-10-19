@@ -483,7 +483,7 @@ def _create_entry_via_flow(
             raise HarnessConfigError(f"{handler} flow aborted: {result.get('reason')}")
         if result.get("type") == "form":
             errors = result.get("errors") or {}
-            if errors and any(key in errors for key in ("cannot_connect", "unknown")):
+            if any(str(error) in ("cannot_connect", "unknown") for error in errors.values()):
                 time.sleep(min(1.0 + attempt * 0.5, 5.0))
                 continue
             raise HarnessConfigError(f"{handler} flow rejected the input: {errors}")

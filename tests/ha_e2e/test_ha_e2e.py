@@ -148,6 +148,16 @@ def _set_reply(stack: HaStack, reply: str, delay_ms: int) -> None:
     )
 
 
+def _clear_tts_cache(stack: HaStack) -> None:
+    """Clear Home Assistant's memory and disk TTS caches before a turn.
+
+    Otherwise a fixed reply from an earlier run can be served from the cache,
+    bypassing the proxy's synthesis path entirely.
+    """
+
+    stack.rest.call_service("tts", "clear_cache", {})
+
+
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize(
@@ -167,6 +177,7 @@ async def test_assist_conversation_turn(
     audio = _audio_for(fixture)
     input_path = _save_input(report, scenario, fixture)
     _set_reply(stack, scenario.reply, scenario.delta_delay_ms)
+    _clear_tts_cache(stack)
 
     record = TurnRecord(
         turn=scenario.turn,
@@ -375,6 +386,7 @@ async def test_proxy_stop_during_streaming_reply(
     audio = _audio_for(fixture)
     input_path = _save_input(report, scenario, fixture)
     _set_reply(stack, scenario.reply, scenario.delta_delay_ms)
+    _clear_tts_cache(stack)
     logs_before = await asyncio.to_thread(container_logs, settings.ha_container)
     stop_called = False
     result: AssistRunResult | None = None
