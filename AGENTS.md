@@ -58,6 +58,16 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
 ```
 
+## Releases
+
+Releases off `main` go through the **Bump Version** GitHub Action
+(`.github/workflows/bump-version.yml`); don't hand-edit the version strings or
+create the tag. Dispatch it with `gh workflow run bump-version.yml -f
+bump_type=<patch|minor|major>`: it runs the Home Assistant E2E gate, opens a
+`release-bump` PR, and, once merged, the gated **Draft Release** workflow
+creates the draft release. Publishing that draft fires PyPI and Docker
+`latest`. See `.agents/skills/bump-version/SKILL.md` for the full flow.
+
 ## Architecture
 
 ### Core Components
