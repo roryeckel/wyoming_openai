@@ -82,7 +82,7 @@ jobs:
 
       - name: Restore Hugging Face model cache
         id: hf-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: hf-cache
           key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-e2e.yml') }}
@@ -150,7 +150,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ha-e2e-artifacts
           path: ha-e2e-artifacts/
@@ -170,7 +170,7 @@ jobs:
 
       - name: Save Hugging Face model cache
         if: always() && steps.hf-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: hf-cache
           key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-e2e.yml') }}

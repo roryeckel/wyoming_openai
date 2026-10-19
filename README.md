@@ -710,7 +710,7 @@ docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f d
 pytest -m ha_e2e -v --timeout=600
 ```
 
-The harness generates a test-only Home Assistant user and password on a fresh instance and stores them in `tests/ha_e2e/.state/` (gitignored). Re-runs reuse the stored refresh token. If Home Assistant is already onboarded but that state is missing, reset the stack:
+The harness generates a test-only Home Assistant user and password on a fresh instance and stores them, along with the config-entry IDs it creates, in `tests/ha_e2e/.state/` (gitignored). Re-runs reuse the stored refresh token and reload those entries instead of adding duplicates. If Home Assistant is already onboarded but that state is missing, reset the stack:
 
 ```bash
 docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml down -v

@@ -22,6 +22,11 @@ HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 READY_TIMEOUT_SECONDS = 180.0
 ENTRY_TIMEOUT_SECONDS = 120.0
 ENTITY_TIMEOUT_SECONDS = 90.0
+ENTRY_STATE_FILENAME = "config_entries.json"
+# Titles come from the proxy's Wyoming ASR/TTS program names.  They are the
+# only stable identifier the config-entry API exposes; the API omits entry data,
+# which contains host/port.
+PROXY_ENTRY_TITLES = frozenset({"openai", "openai-streaming", "openai-realtime"})
 
 
 class HaUnavailableError(RuntimeError):
@@ -107,6 +112,55 @@ def _read_credentials(path: Path) -> HarnessCredentials:
         raise HarnessConfigError(
             f"cannot read harness credentials from {path}: {exc}. Reset Home Assistant with: {RESET_COMMAND}"
         ) from exc
+
+
+def _entry_state_path(settings: HaE2ESettings) -> Path:
+    return settings.state_dir / ENTRY_STATE_FILENAME
+
+
+def _load_entry_state(settings: HaE2ESettings) -> dict[str, str]:
+    path = _entry_state_path(settings)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(value) for key, value in payload.items() if isinstance(value, str)}
+
+
+def _save_entry_state(settings: HaE2ESettings, state: dict[str, str]) -> None:
+    path = _entry_state_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _wyoming_entry_key(settings: HaE2ESettings, host: str) -> str:
+    return f"wyoming:{host}:{settings.wyoming_port}"
+
+
+def _reset_untracked_wyoming_entries(
+    rest: HaRestClient,
+    settings: HaE2ESettings,
+    state: dict[str, str],
+) -> None:
+    """Remove duplicate proxy entries left by older harness runs.
+
+    The config-entry API does not expose the host/port data, so a state file is
+    the harness's source of truth.  Entries whose title matches a proxy program
+    but whose ID is not tracked are leftovers and would otherwise accumulate on
+    every run.
+    """
+
+    tracked_ids = set(state.values())
+    for entry in rest.list_config_entries("wyoming"):
+        entry_id = str(entry.get("entry_id", ""))
+        if entry_id in tracked_ids:
+            continue
+        if entry.get("title") in PROXY_ENTRY_TITLES:
+            _LOGGER.info("Removing untracked Wyoming config entry %s (%s)", entry_id, entry.get("title"))
+            rest.delete_config_entry(entry_id)
+            time.sleep(0.2)
 
 
 class HaRestClient:
@@ -386,19 +440,6 @@ def ensure_session(settings: HaE2ESettings) -> HaSession:
         rest.close()
 
 
-def _entry_matches_host(entry: dict[str, Any], host: str, port: int) -> bool:
-    data = entry.get("data") or {}
-    try:
-        entry_port = int(data.get("port", -1))
-    except (TypeError, ValueError):
-        return False
-    return data.get("host") == host and entry_port == port
-
-
-def _find_entry(entries: list[dict[str, Any]], host: str, port: int) -> dict[str, Any] | None:
-    return next((entry for entry in entries if _entry_matches_host(entry, host, port)), None)
-
-
 def _wait_for_entry(rest: HaRestClient, entry_id: str, timeout: float = ENTRY_TIMEOUT_SECONDS) -> None:
     deadline = time.monotonic() + timeout
     last_state = "missing"
@@ -474,20 +515,31 @@ def _reload_or_recreate(rest: HaRestClient, entry: dict[str, Any]) -> str:
     return entry_id
 
 
-def ensure_wyoming_entry(rest: HaRestClient, settings: HaE2ESettings, host: str) -> str:
-    """Reuse or create a Wyoming config entry for ``host``."""
+def ensure_wyoming_entry(
+    rest: HaRestClient,
+    settings: HaE2ESettings,
+    host: str,
+    state: dict[str, str],
+) -> str:
+    """Reuse or create a Wyoming config entry for ``host``.
 
+    The config-entry API omits ``data`` (host/port), so the harness persists the
+    entry IDs it created under tests/ha_e2e/.state and reuses them by ID.
+    """
+
+    key = _wyoming_entry_key(settings, host)
     entries = rest.list_config_entries("wyoming")
-    existing = _find_entry(entries, host, settings.wyoming_port)
-    if existing is not None:
-        try:
-            return _reload_or_recreate(rest, existing)
-        except HaApiError:
-            entries = rest.list_config_entries("wyoming")
-            existing = _find_entry(entries, host, settings.wyoming_port)
-            if existing is not None:
-                rest.delete_config_entry(str(existing["entry_id"]))
-                time.sleep(1.0)
+    tracked_id = state.get(key)
+    if tracked_id:
+        existing = next((entry for entry in entries if entry.get("entry_id") == tracked_id), None)
+        if existing is not None:
+            try:
+                entry_id = _reload_or_recreate(rest, existing)
+                state[key] = entry_id
+                _save_entry_state(settings, state)
+                return entry_id
+            except HaApiError as exc:
+                _LOGGER.warning("Reloading Wyoming entry %s failed; recreating it: %s", tracked_id, exc)
 
     result = _create_entry_via_flow(
         rest,
@@ -496,25 +548,34 @@ def ensure_wyoming_entry(rest: HaRestClient, settings: HaE2ESettings, host: str)
     )
     entry_id = _entry_id_from_result(rest, result, "wyoming")
     _wait_for_entry(rest, entry_id)
+    state[key] = entry_id
+    _save_entry_state(settings, state)
     return entry_id
 
 
-def ensure_custom_entry(rest: HaRestClient) -> str:
+def ensure_custom_entry(rest: HaRestClient, settings: HaE2ESettings, state: dict[str, str]) -> str:
     """Reuse or create the test-only conversation agent entry."""
 
+    key = "custom:ha_e2e_scripted"
     entries = rest.list_config_entries("ha_e2e_scripted")
-    if entries:
+    tracked_id = state.get(key)
+    existing = next((entry for entry in entries if entry.get("entry_id") == tracked_id), None)
+    if existing is None and entries:
+        existing = entries[0]
+    if existing is not None:
         try:
-            return _reload_or_recreate(rest, entries[0])
-        except HaApiError:
-            entries = rest.list_config_entries("ha_e2e_scripted")
-            if entries:
-                rest.delete_config_entry(str(entries[0]["entry_id"]))
-                time.sleep(1.0)
+            entry_id = _reload_or_recreate(rest, existing)
+            state[key] = entry_id
+            _save_entry_state(settings, state)
+            return entry_id
+        except HaApiError as exc:
+            _LOGGER.warning("Reloading the HA E2E scripted entry failed; recreating it: %s", exc)
 
     result = _create_entry_via_flow(rest, "ha_e2e_scripted", {})
     entry_id = _entry_id_from_result(rest, result, "ha_e2e_scripted")
     _wait_for_entry(rest, entry_id)
+    state[key] = entry_id
+    _save_entry_state(settings, state)
     return entry_id
 
 
@@ -587,9 +648,11 @@ def configure_ha(settings: HaE2ESettings, session: HaSession) -> HaStack:
     ws = HaWsClient(settings, session.access_token)
     try:
         rest.wait_running()
-        custom_entry_id = ensure_custom_entry(rest)
-        good_entry_id = ensure_wyoming_entry(rest, settings, settings.wyoming_host)
-        bad_entry_id = ensure_wyoming_entry(rest, settings, settings.bad_stt_host)
+        entry_state = _load_entry_state(settings)
+        _reset_untracked_wyoming_entries(rest, settings, entry_state)
+        custom_entry_id = ensure_custom_entry(rest, settings, entry_state)
+        good_entry_id = ensure_wyoming_entry(rest, settings, settings.wyoming_host, entry_state)
+        bad_entry_id = ensure_wyoming_entry(rest, settings, settings.bad_stt_host, entry_state)
 
         custom_entities = _wait_for_entities(rest, ws, custom_entry_id, ("conversation",))
         good_entities = _wait_for_entities(rest, ws, good_entry_id, ("stt", "tts"))

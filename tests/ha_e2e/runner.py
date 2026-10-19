@@ -237,23 +237,36 @@ async def run_assist(
                         audio_task.cancel()
                     await asyncio.gather(audio_task, return_exceptions=True)
 
-                if watcher_task is not None:
-                    if not watcher_task.done():
-                        watcher_task.cancel()
-                    try:
-                        await watcher_task
-                    except asyncio.CancelledError:
-                        pass
-
+                # HA emits run-end before the TTS URL has finished streaming.
+                # Keep the stop watcher alive while the audio download completes,
+                # then wait for any callback it started.
                 if fetch_task is not None and progress is not None:
+                    fetch_timed_out = False
                     try:
                         await asyncio.wait_for(fetch_task, timeout=tts_timeout)
                     except TimeoutError:
+                        fetch_timed_out = True
                         fetch_task.cancel()
                         await asyncio.gather(fetch_task, return_exceptions=True)
-                        raise TimeoutError(f"TTS audio was not fully fetched within {tts_timeout}s") from None
+
+                    if watcher_task is not None:
+                        if not watcher_task.done():
+                            try:
+                                await asyncio.wait_for(watcher_task, timeout=60)
+                            except TimeoutError:
+                                watcher_task.cancel()
+                                await asyncio.gather(watcher_task, return_exceptions=True)
+                                raise TimeoutError("TTS stop watcher did not finish") from None
+                        else:
+                            await watcher_task
+
+                    if fetch_timed_out:
+                        raise TimeoutError(f"TTS audio was not fully fetched within {tts_timeout}s")
                     if progress.error is not None and not allow_tts_error:
                         raise progress.error
+                elif watcher_task is not None:
+                    watcher_task.cancel()
+                    await asyncio.gather(watcher_task, return_exceptions=True)
             finally:
                 for task in (audio_task, watcher_task, fetch_task):
                     if task is not None and not task.done():
