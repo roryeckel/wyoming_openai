@@ -89,6 +89,24 @@ def language_tags_match(requested: str, advertised: str) -> bool:
     )
 
 
+def supports_language(language: str | None, advertised: list[str]) -> bool:
+    """
+    Whether an STT model or TTS voice advertising `advertised` takes `language`, by `language_tags_match`. No
+    language, or nothing advertised, places no restriction. STT and TTS share this so WYOMING_LANGUAGES reads alike.
+    """
+    return not language or not advertised or any(language_tags_match(language, tag) for tag in advertised)
+
+
+def advertised_language(language: str, advertised: list[str]) -> str:
+    """
+    The advertised tag that `language` matched, in the operator's spelling, for a backend that may only take that
+    spelling ('en-US' requested, 'en' advertised -> 'en'). An exact match, or nothing advertised, keeps `language`.
+    """
+    if not advertised or language in advertised:
+        return language
+    return next((tag for tag in advertised if language_tags_match(language, tag)), language)
+
+
 def _decode_entity_reference(body: str) -> str | None:
     """Decode an XML character/entity reference body (without '&' and ';').
 

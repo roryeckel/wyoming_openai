@@ -11,6 +11,7 @@ from wyoming_openai.utilities import (
     RealtimeAudioConverter,
     RealtimePcmResampler,
     SsmlTextTransformer,
+    advertised_language,
     clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
@@ -52,6 +53,20 @@ from wyoming_openai.utilities import (
 )
 def test_language_tags_match_regional_tags_to_their_bare_language(requested, advertised, expected):
     assert language_tags_match(requested, advertised) is expected
+
+
+@pytest.mark.parametrize(
+    ("language", "advertised", "expected"),
+    [
+        ("en-US", ["fr", "en"], "en"),
+        ("en", ["en-US"], "en-US"),
+        ("en-US", ["en-US", "en"], "en-US"),
+        ("de", [], "de"),
+        ("de", ["en"], "de"),
+    ],
+)
+def test_advertised_language_takes_the_matched_spelling(language, advertised, expected):
+    assert advertised_language(language, advertised) == expected
 
 
 def test_strip_ssml_strips_break_tags():

@@ -245,15 +245,22 @@ def wyoming_endpoint(request: pytest.FixtureRequest) -> Generator[tuple[str, int
         yield external
         return
 
-    request.getfixturevalue("speaches_backend")
-    proc, port, log_path = _start_wyoming_server(
-        env_overrides={"STT_BACKEND": "SPEACHES", "TTS_BACKEND": "SPEACHES"}
+    yield from _spawn_endpoint(
+        request, env_overrides={"STT_BACKEND": "SPEACHES", "TTS_BACKEND": "SPEACHES"}, log_label="wyoming-subprocess"
     )
+
+
+def _spawn_endpoint(
+    request: pytest.FixtureRequest, env_overrides: dict[str, str], log_label: str
+) -> Generator[tuple[str, int], None, None]:
+    """(host, port) of a proxy subprocess on Speaches, terminated and its log preserved as `log_label` after."""
+    request.getfixturevalue("speaches_backend")
+    proc, port, log_path = _start_wyoming_server(env_overrides=env_overrides)
     try:
         yield ("127.0.0.1", port)
     finally:
         _terminate(proc)
-        _preserve_log(log_path, "wyoming-subprocess")
+        _preserve_log(log_path, log_label)
 
 
 def _spawned_endpoint(
@@ -267,13 +274,7 @@ def _spawned_endpoint(
     if _external_endpoint() is not None:
         pytest.skip(f"{label} test requires a locally spawned server (WYOMING_E2E_URI is set)")
 
-    request.getfixturevalue("speaches_backend")
-    proc, port, log_path = _start_wyoming_server(env_overrides=env_overrides)
-    try:
-        yield ("127.0.0.1", port)
-    finally:
-        _terminate(proc)
-        _preserve_log(log_path, f"wyoming-subprocess-{label}")
+    yield from _spawn_endpoint(request, env_overrides, log_label=f"wyoming-subprocess-{label}")
 
 
 @pytest.fixture(scope="session")

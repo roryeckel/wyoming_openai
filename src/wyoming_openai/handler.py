@@ -50,13 +50,14 @@ from .utilities import (
     NamedBytesIO,
     RealtimeAudioConverter,
     SsmlTextTransformer,
+    advertised_language,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
-    language_tags_match,
     primary_language_subtag,
     strip_ssml,
+    supports_language,
     truncate_for_log,
     validate_audio_format,
     validate_realtime_stt_extra_body,
@@ -115,9 +116,11 @@ def _get_boundary_detector(language: str | None) -> BoundaryDetector:
 
 def _final_transcript(final_text: str | None, snapshot: str) -> str:
     """
-    The final transcript of a stream whose deltas built `snapshot`. The final text may revise them, but an empty
-    one is not a revision: it cannot be told apart from a backend that only streams, as Speaches 0.9 answers a
-    streamed transcription with text="" and the deltas alone, so the snapshots already sent stand.
+    The final transcript of a stream whose deltas built `snapshot`. Any non-empty final text replaces them, as the
+    completed ASR may revise what it streamed (OpenAI's `transcript.text.done` carries the complete transcription,
+    and wyoming 1.11 chunks are revisable); a backend sending partial final texts is outside the supported contract.
+    An empty one is not a revision: it cannot be told apart from a backend that only streams, as Speaches 0.9 answers
+    a streamed transcription with text="" and the deltas alone, so the snapshots already sent stand.
     """
     return final_text or snapshot
 
@@ -485,6 +488,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if requested_model:
             if self._is_asr_language_supported(requested_language, requested_model):
+                if requested_language:
+                    # Sent to the backend as WYOMING_LANGUAGES spells it, since a regional tag only matched it here
+                    requested_language = advertised_language(requested_language, requested_model.languages)
                 self._current_asr_model = requested_model
                 self._current_language = requested_language
                 self._transcribe_rejected = False
@@ -825,6 +831,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     if delta:
                         full_text += delta
                         _LOGGER.debug("Realtime transcription chunk: %s", delta)
+                        # Always the transcript so far: wyoming 1.11 requires whole transcripts from a streaming ASR
+                        # service, so there is deliberately no mode that sends the pre-1.11 fragments
                         await self.write_event(TranscriptChunk(text=full_text).event())
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = _final_transcript(getattr(event, "transcript", None), full_text)
@@ -981,6 +989,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         if chunk.delta:
                             full_text += chunk.delta
                             _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
+                            # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
                             await self.write_event(TranscriptChunk(text=full_text).event())
                     elif chunk.type == "transcript.text.done":
                         full_text = _final_transcript(chunk.text, full_text)
@@ -1475,8 +1484,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.warning("No ASR models specified")
 
     def _is_asr_language_supported(self, language: str | None, model: AsrModel) -> bool:
-        """Check if a language is supported by an ASR model"""
-        return not language or not model.languages or language in model.languages
+        """Check if a language is supported by an ASR model; regional tags match as they do for TTS voices"""
+        return supports_language(language, model.languages)
 
     def _log_unsupported_asr_language(self, model_name: str | None, language: str | None):
         """Log an unsupported ASR language"""
@@ -1494,17 +1503,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         Get the voice for a request that names none: one of the selected program, or else of the first program
         with voices, which is the only one Home Assistant shows. Within that program the speech API is preferred
         over Realtime among language-compatible voices, so a Realtime voice is chosen only when no speech API voice
-        of the program supports the language. A language-only request stays within that program.
+        of the program supports the language. A language-only request stays within that program. The language
+        selects the voice as wyoming 1.11 defines it ("selects a voice if name is not set"), even though every voice
+        currently advertises the same WYOMING_LANGUAGES.
         """
+        voices = self._get_default_program_voices()
+        compatible = [voice for voice in voices if not language or self._is_tts_language_supported(language, voice)]
+        return self._prefer_speech_api_voices(compatible)[0] if compatible else None
+
+    def _get_default_program_voices(self) -> list[TtsVoiceModel]:
+        """The voices of the selected program, or else of the first program with voices; empty without any."""
         programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
         for program in programs:
-            voices = [cast(TtsVoiceModel, voice) for voice in program.voices]
-            if voices:
-                compatible = [
-                    voice for voice in voices if not language or self._is_tts_language_supported(language, voice)
-                ]
-                return self._prefer_speech_api_voices(compatible)[0] if compatible else None
-        return None
+            if program.voices:
+                return [cast(TtsVoiceModel, voice) for voice in program.voices]
+        return []
 
     def _get_voices_by_backend_name(self, backend_voice_name: str) -> list[TtsVoiceModel]:
         """Get TTS voices by the raw backend voice identifier."""
@@ -1557,7 +1570,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
         """Check if a language is supported by a TTS voice; a regional tag matches its bare language either way"""
-        return not voice.languages or any(language_tags_match(language, advertised) for advertised in voice.languages)
+        return supports_language(language, voice.languages)
 
     def _validate_tts_voice_and_language(
         self, requested_voice: str | None, requested_language: str | None
@@ -1593,9 +1606,14 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if voice is None:
             # Only a program that has voices can be short of one for the language
-            if not requested_voice and requested_language and self._get_default_voice() is not None:
+            program_voices = [] if requested_voice or not requested_language else self._get_default_program_voices()
+            if program_voices:
+                advertised = sorted({language for voice in program_voices for language in voice.languages})
                 _LOGGER.error(
-                    "No TTS voice supports language %s in the default or selected program", requested_language
+                    "No TTS voice supports language %s in the default or selected program. Available languages: %s "
+                    "(add it to WYOMING_LANGUAGES)",
+                    requested_language,
+                    advertised,
                 )
             else:
                 self._log_unsupported_voice(requested_voice)
@@ -1608,6 +1626,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Validate if a language is supported by a TTS voice.
 
         Returns True if supported. If no language is specified, also returns True.
+
+        A named voice is held to its advertised languages on purpose, as it has been since the first release; only
+        wyoming before 1.11 dropping the language of a named request let one through. Do not relax this to a warning.
         """
         if language and not self._is_tts_language_supported(language, voice):
             _LOGGER.error(

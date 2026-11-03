@@ -359,6 +359,29 @@ def test_is_asr_language_supported(handler):
     assert handler._is_asr_language_supported("en", model)
 
 
+@pytest.mark.parametrize(
+    ("advertised", "requested", "expected"),
+    [
+        (["en"], "en-US", True),
+        (["en"], "en_US", True),
+        (["en"], "EN", True),
+        (["en-US"], "en", True),
+        (["en-US"], "en-GB", False),
+        (["en"], "fr", False),
+        (["en"], None, True),
+        ([], "fr", True),
+    ],
+)
+def test_asr_and_tts_language_checks_agree(handler, advertised, requested, expected):
+    """WYOMING_LANGUAGES reads the same for a transcribe as for a synthesize."""
+    model = handler._get_asr_model("m1")
+    voice = handler._get_voice("voice1")
+    model.languages = advertised
+    voice.languages = advertised
+    assert handler._is_asr_language_supported(requested, model) is expected
+    assert handler._validate_tts_language(requested, voice) is expected
+
+
 def test_validate_tts_language(handler):
     voice = handler._get_voice("voice1")
     assert handler._validate_tts_language("en", voice)
@@ -1130,6 +1153,40 @@ class TestOpenAIEventHandlerComprehensive:
         assert "language fr" in caplog.text and "language en" in caplog.text
         session = connection.session.update.call_args.kwargs["session"]
         assert session["audio"]["input"]["transcription"]["language"] == "en"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("realtime", [False, True])
+    @pytest.mark.parametrize(
+        ("advertised", "requested", "sent"),
+        [(["en"], "en-US", "en"), (["en"], "EN_us", "en"), (["en-US"], "en", "en-US"), (["en"], "en", "en")],
+    )
+    async def test_transcribe_language_is_sent_as_advertised(
+        self, enhanced_handler, mock_info, mock_clients, realtime, advertised, requested, sent
+    ):
+        """A tag that only matched WYOMING_LANGUAGES regionally reaches the backend in the advertised spelling."""
+        stt_client, _ = mock_clients
+        mock_info.asr[0].models[0].languages = advertised
+        model_name = mock_info.asr[0].models[0].name
+        connection = None
+        if realtime:
+            model_name = "gpt-realtime-whisper"
+            _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name=model_name)
+            connection = _FakeRealtimeConnection(
+                [_FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")]
+            )
+            stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+        assert await enhanced_handler.handle_event(
+            Event(type="transcribe", data={"name": model_name, "language": requested})
+        )
+        await _stream_audio(enhanced_handler, rate=24000 if realtime else 16000)
+
+        if connection is not None:
+            session = connection.session.update.call_args.kwargs["session"]
+            assert session["audio"]["input"]["transcription"]["language"] == sent
+        else:
+            assert stt_client.audio.transcriptions.create.call_args.kwargs["language"] == sent
+        await enhanced_handler._drain_background_tasks()
 
     @pytest.mark.asyncio
     async def test_repeated_transcribe_during_a_realtime_session_is_not_reported(
@@ -5159,6 +5216,8 @@ def test_language_only_voice_failure_names_the_language_only_when_voices_exist(e
     with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
         assert enhanced_handler._validate_tts_voice_and_language(None, "de") is None
     assert "No TTS voice supports language de" in caplog.text
+    assert "Available languages: ['en']" in caplog.text
+    assert "WYOMING_LANGUAGES" in caplog.text
 
     caplog.clear()
     mock_info.tts = []
