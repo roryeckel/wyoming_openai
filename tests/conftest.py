@@ -281,8 +281,39 @@ async def wyoming_client(wyoming_endpoint: tuple[str, int]):
         yield client
 
 
+@pytest.fixture(scope="session")
+def wyoming_endpoint_streaming_stt(request: pytest.FixtureRequest) -> Generator[tuple[str, int], None, None]:
+    """Proxy whose only STT model streams its response, as STT_STREAMING_MODELS configures.
+
+    Skips in external mode: an external server's environment cannot be controlled.
+    """
+    if _external_endpoint() is not None:
+        pytest.skip("streaming STT test requires a locally spawned server (WYOMING_E2E_URI is set)")
+
+    request.getfixturevalue("speaches_backend")
+    proc, port, log_path = _start_wyoming_server(
+        env_overrides={
+            "STT_BACKEND": "SPEACHES",
+            "TTS_BACKEND": "SPEACHES",
+            "STT_STREAMING_MODELS": STT_MODEL,
+        }
+    )
+    try:
+        yield ("127.0.0.1", port)
+    finally:
+        _terminate(proc)
+        _preserve_log(log_path, "wyoming-subprocess-streaming-stt")
+
+
 @pytest_asyncio.fixture
 async def wyoming_client_autodetect(wyoming_endpoint_autodetect: tuple[str, int]):
     host, port = wyoming_endpoint_autodetect
+    async with WyomingTestClient(host=host, port=port) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def streaming_stt_client(wyoming_endpoint_streaming_stt: tuple[str, int]):
+    host, port = wyoming_endpoint_streaming_stt
     async with WyomingTestClient(host=host, port=port) as client:
         yield client

@@ -1389,7 +1389,7 @@ class TestOpenAIEventHandlerComprehensive:
 
     @pytest.mark.asyncio
     async def test_handle_realtime_transcription_flow(self, enhanced_handler, mock_info, mock_clients):
-        """Test realtime STT emits deltas, final transcript, and cleanup without audio transcriptions API."""
+        """Realtime STT emits snapshots and an authoritative final transcript, then cleans up."""
         stt_client, _ = mock_clients
         mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
         enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
@@ -1397,6 +1397,8 @@ class TestOpenAIEventHandlerComprehensive:
         connection = _FakeRealtimeConnection(
             [
                 _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hello"),
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta=""),
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta=" word"),
                 _FakeRealtimeServerEvent(
                     "conversation.item.input_audio_transcription.completed", transcript="Hello world"
                 ),
@@ -1430,13 +1432,19 @@ class TestOpenAIEventHandlerComprehensive:
         assert connection.input_audio_buffer.committed is True
 
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-        assert event_types == ["transcript-start", "transcript-chunk", "transcript", "transcript-stop"]
-        chunk_event = next(
-            call.args[0]
+        assert event_types == [
+            "transcript-start",
+            "transcript-chunk",
+            "transcript-chunk",
+            "transcript",
+            "transcript-stop",
+        ]
+        chunks = [
+            TranscriptChunk.from_event(call.args[0]).text
             for call in enhanced_handler.write_event.call_args_list
             if call.args[0].type == "transcript-chunk"
-        )
-        assert TranscriptChunk.from_event(chunk_event).text == "Hello"
+        ]
+        assert chunks == ["Hello", "Hello word"]
         transcript_event = next(
             call.args[0] for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "transcript"
         )
@@ -1446,6 +1454,61 @@ class TestOpenAIEventHandlerComprehensive:
         assert manager.exited is True
         assert connection.closed is True
         assert enhanced_handler._realtime_receive_task is None
+
+        # A second request on the same Wyoming connection starts with an empty snapshot.
+        connection = _FakeRealtimeConnection(
+            [
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Next"),
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Next!"),
+            ]
+        )
+        stt_client.realtime.connect.return_value = _FakeRealtimeConnectionManager(connection)
+        enhanced_handler.write_event.reset_mock()
+        assert await self._record_and_stop(enhanced_handler, "gpt-realtime-whisper")
+        chunks = [
+            TranscriptChunk.from_event(call.args[0]).text
+            for call in enhanced_handler.write_event.call_args_list
+            if call.args[0].type == "transcript-chunk"
+        ]
+        assert chunks == ["Next"]
+        await enhanced_handler._drain_background_tasks()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("deltas", "completed", "expected_chunks", "expected_final"),
+        [
+            ([""], "Only final text", [], "Only final text"),
+            (["Hel", "lo"], "", ["Hel", "Hello"], "Hello"),
+            (["Hel", "lo"], "Hello.", ["Hel", "Hello"], "Hello."),
+        ],
+    )
+    async def test_realtime_transcription_final_text(
+        self, enhanced_handler, mock_info, mock_clients, deltas, completed, expected_chunks, expected_final
+    ):
+        """A completion carries the final text, but one without any leaves the streamed snapshots standing."""
+        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        connection = _FakeRealtimeConnection(
+            [
+                *[
+                    _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta=delta)
+                    for delta in deltas
+                ],
+                _FakeRealtimeServerEvent(
+                    "conversation.item.input_audio_transcription.completed", transcript=completed
+                ),
+            ]
+        )
+        mock_clients[0].realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+        assert await self._record_and_stop(enhanced_handler, "gpt-realtime-whisper")
+
+        events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert [TranscriptChunk.from_event(e).text for e in events if e.type == "transcript-chunk"] == expected_chunks
+        assert events[-2].type == "transcript"
+        assert Transcript.from_event(events[-2]).text == expected_final
+        assert events[-1].type == "transcript-stop"
+        await enhanced_handler._drain_background_tasks()
 
     @pytest.mark.asyncio
     async def test_handle_realtime_transcription_error_cleans_up(self, enhanced_handler, mock_info, mock_clients):
@@ -1861,6 +1924,48 @@ class TestOpenAIEventHandlerComprehensive:
 
         assert written == ["error"]
         assert enhanced_handler._wav_buffer is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("deltas", "done_text", "expected_chunks", "expected_final"),
+        [
+            (["Hello", "", " word"], "Hello world!", ["Hello", "Hello word"], "Hello world!"),
+            (["Hello", " world"], None, ["Hello", "Hello world"], "Hello world"),
+            (["Noise"], "", ["Noise"], "Noise"),  # Speaches 0.9 sends the deltas and an empty final text
+            ([], "Only final text", [], "Only final text"),
+            ([""], None, [], ""),
+        ],
+    )
+    async def test_transcription_stream_snapshots(
+        self, enhanced_handler, mock_clients, deltas, done_text, expected_chunks, expected_final
+    ):
+        """SSE deltas become replaceable snapshots; final text can correct them or arrive without deltas."""
+        stt_client, _ = mock_clients
+
+        class _Stream:
+            async def __aiter__(self):
+                for delta in deltas:
+                    yield Mock(type="transcript.text.delta", delta=delta)
+                if done_text is not None:
+                    yield Mock(type="transcript.text.done", text=done_text)
+
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=_Stream())
+        with patch("wyoming_openai.handler.AsyncStream", _Stream):
+            # Reuse the handler to catch accidental accumulation across requests.
+            for _ in range(2):
+                enhanced_handler.write_event.reset_mock()
+                assert await self._record_and_stop(enhanced_handler)
+                events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+                assert [event.type for event in events] == [
+                    "transcript-start",
+                    *(["transcript-chunk"] * len(expected_chunks)),
+                    "transcript",
+                    "transcript-stop",
+                ]
+                assert [TranscriptChunk.from_event(e).text for e in events if e.type == "transcript-chunk"] == (
+                    expected_chunks
+                )
+                assert Transcript.from_event(events[-2]).text == expected_final
 
     @pytest.mark.asyncio
     async def test_transcription_stream_error_reports_the_failure(self, enhanced_handler, mock_clients):
@@ -5018,6 +5123,82 @@ def test_nameless_voice_request_prefers_the_speech_api(enhanced_handler, mock_in
     # Realtime is still the default when it is the only transport
     mock_info.tts[0].voices.remove(speech_voice)
     assert enhanced_handler._validate_tts_voice_and_language(None, None) is realtime_voice
+
+
+def test_language_only_voice_selection_prefers_compatible_speech_voice(enhanced_handler, mock_info):
+    speech_voice, realtime_voice = _add_realtime_voice_first(mock_info, enhanced_handler)
+    realtime_voice.languages = ["fr"]
+    french_voice = TtsVoiceModel(
+        name="french",
+        model_name="tts-1",
+        description="French",
+        attribution=speech_voice.attribution,
+        installed=True,
+        languages=["fr"],
+        version=None,
+    )
+    mock_info.tts[0].voices.append(french_voice)
+
+    assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is french_voice
+    assert enhanced_handler._validate_tts_voice_and_language(None, "en") is speech_voice
+    assert enhanced_handler._validate_tts_voice_and_language(None, "de") is None
+    # A named voice is never switched just to satisfy the language.
+    assert enhanced_handler._validate_tts_voice_and_language("alloy", "fr") is None
+    mock_info.tts[0].voices.remove(french_voice)
+    assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is realtime_voice
+
+
+def test_language_only_voice_selection_stays_in_default_or_selected_program(enhanced_handler, mock_info):
+    english = mock_info.tts[0]
+    french_voice = TtsVoiceModel(
+        name="french",
+        model_name="tts-1",
+        description="French",
+        attribution=english.voices[0].attribution,
+        installed=True,
+        languages=["fr"],
+        version=None,
+    )
+    french = Mock(voices=[french_voice])
+    mock_info.tts.append(french)
+    assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is None
+    enhanced_handler._selected_tts_program = french
+    assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is french_voice
+    assert enhanced_handler._validate_tts_voice_and_language(None, "en") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("named", [False, True])
+async def test_serialized_tts_language_reaches_sentence_segmentation(enhanced_handler, mock_info, streaming, named):
+    """Exercise the public event round trip, which dropped language for named voices before Wyoming 1.11."""
+    english = mock_info.tts[0].voices[0]
+    french = TtsVoiceModel(
+        name="french",
+        model_name="tts-1",
+        description="French",
+        attribution=english.attribution,
+        installed=True,
+        languages=["fr"],
+        version=None,
+    )
+    mock_info.tts[0].voices.append(french)
+    voice = SynthesizeVoice(name="french" if named else None, language="fr", speaker="speaker")
+    segmenter = Mock()
+    segmenter.segment.return_value = ["Bonjour."]
+    enhanced_handler._play_sentences = AsyncMock(return_value=True)
+    enhanced_handler._finish_tts_audio_stream = AsyncMock(return_value=True)
+    with patch("wyoming_openai.handler._get_boundary_detector", return_value=segmenter) as get_segmenter:
+        if streaming:
+            enhanced_handler._is_tts_voice_streaming = Mock(return_value=True)
+            assert await enhanced_handler.handle_event(SynthesizeStart(voice=voice).event())
+            assert enhanced_handler._synthesis.voice is french
+            assert await enhanced_handler.handle_event(SynthesizeChunk(text="Bonjour.").event())
+        else:
+            enhanced_handler._splits_plain_synthesize = Mock(return_value=True)
+            assert await enhanced_handler.handle_event(Synthesize(text="Bonjour.", voice=voice).event())
+            assert enhanced_handler._play_sentences.call_args.args[1] is french
+        get_segmenter.assert_called_with("fr")
 
 
 @pytest.mark.asyncio

@@ -801,22 +801,26 @@ class OpenAIEventHandler(AsyncEventHandler):
         }
 
     async def _receive_realtime_transcription_events(self) -> None:
-        """Receive Realtime server events and forward transcript deltas to Wyoming."""
+        """Accumulate Realtime deltas into Wyoming transcript snapshots for this session."""
         connection = self._realtime_connection
         transcript_future = self._realtime_transcript_future
         if connection is None or transcript_future is None:
             return
 
+        full_text = ""
         try:
             async for event in connection:
                 event_type = getattr(event, "type", "")
                 if event_type == "conversation.item.input_audio_transcription.delta":
                     delta = getattr(event, "delta", "")
                     if delta:
+                        full_text += delta
                         _LOGGER.debug("Realtime transcription chunk: %s", delta)
-                        await self.write_event(TranscriptChunk(text=delta).event())
+                        await self.write_event(TranscriptChunk(text=full_text).event())
                 elif event_type == "conversation.item.input_audio_transcription.completed":
-                    transcript = getattr(event, "transcript", "")
+                    # A completion that carries no text cannot be told apart from a backend that only
+                    # streams, so the snapshots already sent stand rather than being replaced by nothing.
+                    transcript = getattr(event, "transcript", "") or full_text
                     if not transcript_future.done():
                         transcript_future.set_result(transcript)
                     return
@@ -970,7 +974,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                         if chunk.delta:
                             full_text += chunk.delta
                             _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
-                            await self.write_event(TranscriptChunk(text=chunk.delta).event())
+                            await self.write_event(TranscriptChunk(text=full_text).event())
+                    elif chunk.type == "transcript.text.done":
+                        # The final hypothesis may revise earlier deltas. An empty one is not a revision:
+                        # Speaches 0.9 answers a streamed transcription with text="" and the deltas alone.
+                        if chunk.text:
+                            full_text = chunk.text
                 if full_text:
                     _LOGGER.info("Successfully transcribed stream: %s", full_text)
                 else:
@@ -1476,17 +1485,20 @@ class OpenAIEventHandler(AsyncEventHandler):
                 return voice
         return None
 
-    def _get_default_voice(self) -> TtsVoiceModel | None:
+    def _get_default_voice(self, language: str | None = None) -> TtsVoiceModel | None:
         """
         Get the voice for a request that names none: one of the selected program, or else of the first program
         with voices, which is the only one Home Assistant shows. Within that program the speech API is preferred
-        over Realtime, so such a request never moves onto Realtime unless the program offers nothing else.
+        over Realtime among language-compatible voices. A language-only request stays within that program.
         """
         programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
         for program in programs:
             voices = [cast(TtsVoiceModel, voice) for voice in program.voices]
             if voices:
-                return self._prefer_speech_api_voices(voices)[0]
+                compatible = [
+                    voice for voice in voices if not language or self._is_tts_language_supported(language, voice)
+                ]
+                return self._prefer_speech_api_voices(compatible)[0] if compatible else None
         return None
 
     def _get_voices_by_backend_name(self, backend_voice_name: str) -> list[TtsVoiceModel]:
@@ -1555,7 +1567,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         Returns:
             TtsVoiceModel | None: The validated voice, or None if validation failed.
         """
-        voice = self._get_voice(requested_voice) if requested_voice else self._get_default_voice()
+        voice = self._get_voice(requested_voice) if requested_voice else self._get_default_voice(requested_language)
         if voice is None and requested_voice:
             backend_matches = self._get_voices_by_backend_name(requested_voice)
             if not backend_matches:
@@ -1575,7 +1587,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._log_legacy_voice_fallback(requested_voice, voice, backend_matches)
 
         if voice is None:
-            self._log_unsupported_voice(requested_voice)
+            if not requested_voice and requested_language:
+                _LOGGER.error(
+                    "No TTS voice supports language %s in the default or selected program", requested_language
+                )
+            else:
+                self._log_unsupported_voice(requested_voice)
             return None
         if not self._validate_tts_language(requested_language, voice):
             return None
