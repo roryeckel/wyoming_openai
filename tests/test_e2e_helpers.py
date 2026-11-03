@@ -32,6 +32,7 @@ async def test_transcribe_uses_latest_snapshot_or_authoritative_final(final_text
     result = await client.transcribe(wav_buffer.getvalue())
 
     assert result.text == ("Hello world" if final_text is None else final_text)
+    assert result.chunks == ["Hello word", "Hello world"]
 
 
 def test_fuzzy_text_match_accepts_punctuation_and_case_differences():

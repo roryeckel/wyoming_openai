@@ -52,6 +52,43 @@ def truncate_for_log(text: str, max_length: int = 100) -> str:
     return text[:max_length] + "..."
 
 
+def _normalize_language_tag(tag: str) -> str:
+    """A language tag in one spelling: 'en_US' and 'EN-us' both become 'en-us'."""
+    return tag.replace("_", "-").lower()
+
+
+def primary_language_subtag(tag: str) -> str:
+    """The primary subtag of a BCP-47 tag ('en-US' -> 'en'); never a prefix of it ('fil' is not 'fi')."""
+    return _normalize_language_tag(tag).split("-")[0]
+
+
+def _is_bare_or_regional_tag(subtags: list[str]) -> bool:
+    """A bare language ('en') or a language and region ('en-us', 'es-419'), nothing else such as a script."""
+    if len(subtags) == 1:
+        return True
+    region = subtags[1]
+    return len(subtags) == 2 and ((len(region) == 2 and region.isalpha()) or (len(region) == 3 and region.isdigit()))
+
+
+def language_tags_match(requested: str, advertised: str) -> bool:
+    """
+    Whether a requested language tag is one an advertised tag covers: the same tag in any spelling, or a bare
+    language and a regional tag of it ('en-US' and 'en'). Two different regions ('en-GB', 'en-US') do not match,
+    and a tag with a script or other subtag ('sr-Latn', 'zh-Hant-TW') only matches itself.
+    """
+    requested, advertised = _normalize_language_tag(requested), _normalize_language_tag(advertised)
+    if requested == advertised:
+        return True
+    requested_subtags, advertised_subtags = requested.split("-"), advertised.split("-")
+    if len(requested_subtags) > 1 and len(advertised_subtags) > 1:
+        return False
+    return (
+        requested_subtags[0] == advertised_subtags[0]
+        and _is_bare_or_regional_tag(requested_subtags)
+        and _is_bare_or_regional_tag(advertised_subtags)
+    )
+
+
 def _decode_entity_reference(body: str) -> str | None:
     """Decode an XML character/entity reference body (without '&' and ';').
 

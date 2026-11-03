@@ -179,8 +179,9 @@ async def test_stt_streaming_transcript_is_complete(streaming_stt_client: Wyomin
 
     assert "transcript-chunk" in result.event_types, result.event_types
     assert result.text.strip(), "Streaming STT returned an empty final transcript"
-    assert result.chunks[-1] == result.text, f"last chunk {result.chunks[-1]!r} differs from final {result.text!r}"
     assert_fuzzy_match(result.text, phrase)
+    # The final transcript may revise the chunks, so the last one is only held to the phrase
+    assert_fuzzy_match(result.chunks[-1], phrase)
 
 
 @pytest.mark.asyncio

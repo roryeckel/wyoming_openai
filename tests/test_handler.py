@@ -1486,8 +1486,7 @@ class TestOpenAIEventHandlerComprehensive:
         self, enhanced_handler, mock_info, mock_clients, deltas, completed, expected_chunks, expected_final
     ):
         """A completion carries the final text, but one without any leaves the streamed snapshots standing."""
-        mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
-        enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
+        stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
         connection = _FakeRealtimeConnection(
             [
                 *[
@@ -1499,7 +1498,7 @@ class TestOpenAIEventHandlerComprehensive:
                 ),
             ]
         )
-        mock_clients[0].realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
 
         assert await self._record_and_stop(enhanced_handler, "gpt-realtime-whisper")
 
@@ -5125,40 +5124,53 @@ def test_nameless_voice_request_prefers_the_speech_api(enhanced_handler, mock_in
     assert enhanced_handler._validate_tts_voice_and_language(None, None) is realtime_voice
 
 
-def test_language_only_voice_selection_prefers_compatible_speech_voice(enhanced_handler, mock_info):
-    speech_voice, realtime_voice = _add_realtime_voice_first(mock_info, enhanced_handler)
-    realtime_voice.languages = ["fr"]
-    french_voice = TtsVoiceModel(
+def _french_voice(attribution):
+    """A speech API voice that only advertises French."""
+    return TtsVoiceModel(
         name="french",
         model_name="tts-1",
         description="French",
-        attribution=speech_voice.attribution,
+        attribution=attribution,
         installed=True,
         languages=["fr"],
         version=None,
     )
+
+
+def test_language_only_voice_selection_prefers_compatible_speech_voice(enhanced_handler, mock_info):
+    speech_voice, realtime_voice = _add_realtime_voice_first(mock_info, enhanced_handler)
+    realtime_voice.languages = ["fr"]
+    french_voice = _french_voice(speech_voice.attribution)
     mock_info.tts[0].voices.append(french_voice)
 
     assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is french_voice
     assert enhanced_handler._validate_tts_voice_and_language(None, "en") is speech_voice
+    assert enhanced_handler._validate_tts_voice_and_language(None, "en-US") is speech_voice
     assert enhanced_handler._validate_tts_voice_and_language(None, "de") is None
-    # A named voice is never switched just to satisfy the language.
+    # A named voice is never switched just to satisfy the language, but a regional tag of its language is accepted
     assert enhanced_handler._validate_tts_voice_and_language("alloy", "fr") is None
+    assert enhanced_handler._validate_tts_voice_and_language("alloy", "en_US") is speech_voice
     mock_info.tts[0].voices.remove(french_voice)
     assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is realtime_voice
 
 
+def test_language_only_voice_failure_names_the_language_only_when_voices_exist(enhanced_handler, mock_info, caplog):
+    """Without any TTS voice the language is not what is missing."""
+    with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+        assert enhanced_handler._validate_tts_voice_and_language(None, "de") is None
+    assert "No TTS voice supports language de" in caplog.text
+
+    caplog.clear()
+    mock_info.tts = []
+    with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+        assert enhanced_handler._validate_tts_voice_and_language(None, "de") is None
+    assert "No TTS voices specified" in caplog.text
+    assert "supports language" not in caplog.text
+
+
 def test_language_only_voice_selection_stays_in_default_or_selected_program(enhanced_handler, mock_info):
     english = mock_info.tts[0]
-    french_voice = TtsVoiceModel(
-        name="french",
-        model_name="tts-1",
-        description="French",
-        attribution=english.voices[0].attribution,
-        installed=True,
-        languages=["fr"],
-        version=None,
-    )
+    french_voice = _french_voice(english.voices[0].attribution)
     french = Mock(voices=[french_voice])
     mock_info.tts.append(french)
     assert enhanced_handler._validate_tts_voice_and_language(None, "fr") is None
@@ -5172,16 +5184,7 @@ def test_language_only_voice_selection_stays_in_default_or_selected_program(enha
 @pytest.mark.parametrize("named", [False, True])
 async def test_serialized_tts_language_reaches_sentence_segmentation(enhanced_handler, mock_info, streaming, named):
     """Exercise the public event round trip, which dropped language for named voices before Wyoming 1.11."""
-    english = mock_info.tts[0].voices[0]
-    french = TtsVoiceModel(
-        name="french",
-        model_name="tts-1",
-        description="French",
-        attribution=english.attribution,
-        installed=True,
-        languages=["fr"],
-        version=None,
-    )
+    french = _french_voice(mock_info.tts[0].voices[0].attribution)
     mock_info.tts[0].voices.append(french)
     voice = SynthesizeVoice(name="french" if named else None, language="fr", speaker="speaker")
     segmenter = Mock()

@@ -54,6 +54,8 @@ from .utilities import (
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
+    language_tags_match,
+    primary_language_subtag,
     strip_ssml,
     truncate_for_log,
     validate_audio_format,
@@ -108,9 +110,16 @@ def _build_boundary_detector(segmenter_language: str) -> BoundaryDetector:
 
 def _get_boundary_detector(language: str | None) -> BoundaryDetector:
     """Get the sentence segmenter for a language tag (e.g. 'en', 'en-US', 'es'), English without one."""
-    # The primary subtag of a BCP-47 tag ('en-US' -> 'en'); never a prefix of it ('fil' is not 'fi')
-    base_language = (language or "en").replace("_", "-").split("-")[0].lower()
-    return _build_boundary_detector(_get_segmenter_language(base_language))
+    return _build_boundary_detector(_get_segmenter_language(primary_language_subtag(language or "en")))
+
+
+def _final_transcript(final_text: str | None, snapshot: str) -> str:
+    """
+    The final transcript of a stream whose deltas built `snapshot`. The final text may revise them, but an empty
+    one is not a revision: it cannot be told apart from a backend that only streams, as Speaches 0.9 answers a
+    streamed transcription with text="" and the deltas alone, so the snapshots already sent stand.
+    """
+    return final_text or snapshot
 
 
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
@@ -818,9 +827,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         _LOGGER.debug("Realtime transcription chunk: %s", delta)
                         await self.write_event(TranscriptChunk(text=full_text).event())
                 elif event_type == "conversation.item.input_audio_transcription.completed":
-                    # A completion that carries no text cannot be told apart from a backend that only
-                    # streams, so the snapshots already sent stand rather than being replaced by nothing.
-                    transcript = getattr(event, "transcript", "") or full_text
+                    transcript = _final_transcript(getattr(event, "transcript", None), full_text)
                     if not transcript_future.done():
                         transcript_future.set_result(transcript)
                     return
@@ -976,12 +983,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                             _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
                             await self.write_event(TranscriptChunk(text=full_text).event())
                     elif chunk.type == "transcript.text.done":
-                        # The final hypothesis may revise earlier deltas. An empty one is not a revision:
-                        # Speaches 0.9 answers a streamed transcription with text="" and the deltas alone.
-                        if chunk.text:
-                            full_text = chunk.text
+                        full_text = _final_transcript(chunk.text, full_text)
                 if full_text:
-                    _LOGGER.info("Successfully transcribed stream: %s", full_text)
+                    _LOGGER.info("Successfully transcribed stream: %s", truncate_for_log(full_text))
                 else:
                     _LOGGER.warning(
                         "Received empty transcription from stream."
@@ -1489,7 +1493,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         """
         Get the voice for a request that names none: one of the selected program, or else of the first program
         with voices, which is the only one Home Assistant shows. Within that program the speech API is preferred
-        over Realtime among language-compatible voices. A language-only request stays within that program.
+        over Realtime among language-compatible voices, so a Realtime voice is chosen only when no speech API voice
+        of the program supports the language. A language-only request stays within that program.
         """
         programs = [self._selected_tts_program] if self._selected_tts_program else self._wyoming_info.tts
         for program in programs:
@@ -1551,8 +1556,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         return getattr(voice, "backend_voice_name", voice.name)
 
     def _is_tts_language_supported(self, language: str, voice: TtsVoice) -> bool:
-        """Check if a language is supported by a TTS voice"""
-        return not voice.languages or language in voice.languages
+        """Check if a language is supported by a TTS voice; a regional tag matches its bare language either way"""
+        return not voice.languages or any(language_tags_match(language, advertised) for advertised in voice.languages)
 
     def _validate_tts_voice_and_language(
         self, requested_voice: str | None, requested_language: str | None
@@ -1587,7 +1592,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._log_legacy_voice_fallback(requested_voice, voice, backend_matches)
 
         if voice is None:
-            if not requested_voice and requested_language:
+            # Only a program that has voices can be short of one for the language
+            if not requested_voice and requested_language and self._get_default_voice() is not None:
                 _LOGGER.error(
                     "No TTS voice supports language %s in the default or selected program", requested_language
                 )

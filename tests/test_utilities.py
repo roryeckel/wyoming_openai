@@ -19,6 +19,7 @@ from wyoming_openai.utilities import (
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
+    language_tags_match,
     parse_finite_float,
     parse_non_negative_int,
     parse_voice_labels,
@@ -29,6 +30,28 @@ from wyoming_openai.utilities import (
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
+
+
+@pytest.mark.parametrize(
+    ("requested", "advertised", "expected"),
+    [
+        ("en", "en", True),
+        ("en-US", "en", True),
+        ("en", "en-US", True),
+        ("en_US", "en-us", True),
+        ("EN", "en", True),
+        ("es-419", "es", True),
+        ("sr-Latn", "sr-latn", True),
+        ("sr", "sr-Latn", False),
+        ("sr-Latn", "sr", False),
+        ("zh", "zh-Hant-TW", False),
+        ("en-GB", "en-US", False),
+        ("fr", "en", False),
+        ("fil", "fi", False),
+    ],
+)
+def test_language_tags_match_regional_tags_to_their_bare_language(requested, advertised, expected):
+    assert language_tags_match(requested, advertised) is expected
 
 
 def test_strip_ssml_strips_break_tags():
