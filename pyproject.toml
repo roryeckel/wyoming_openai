@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=84.0.0"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -22,11 +22,13 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "openai[realtime]==3.22.1",
-    # Realtime TTS reads its websocket without a receive-queue limit (max_queue=None), which needs 14.1 or later
-    "websockets>=14.1",
+    "openai[realtime]==3.44.0",
+    # Realtime TTS reads its websocket without a receive-queue limit (max_queue=None), which needs 14.1 or later.
+    # The HA E2E harness passes proxy=None, which websockets only accepts in 15+.
+    # openai[realtime] caps websockets at <16, so 15.0.1 is the newest version we can install.
+    "websockets>=15.0.1,<16",
     "wyoming==1.11.0",
-    "yasbd-lib>=1.0.1,<2.0"
+    "yasbd-lib>=1.0.5,<2.0"
 ]
 
 [project.urls]
@@ -35,17 +37,15 @@ Issues = "https://github.com/roryeckel/wyoming_openai/issues"
 
 [project.optional-dependencies]
 dev = [
-    "ruff==0.16.9",
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
-    "pytest-mock==3.16.0",
+    "ruff==0.17.3",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
+    "pytest-mock==3.17.0",
     "pytest-cov==7.1.0",
     "pytest-timeout==2.4.0",
     "pyright==1.1.414",
     "rapidfuzz==3.14.6",
     "httpx==0.28.1",
-    # The HA E2E harness passes proxy=None, which websockets only accepts in 15+.
-    "websockets>=15",
 ]
 
 [tool.pytest.ini_options]
