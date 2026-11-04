@@ -1,7 +1,38 @@
 """Unit tests for the e2e helper utilities (run in the default suite)."""
 
+import io
+import wave
+from unittest.mock import AsyncMock
+
 import pytest
-from e2e_helpers import fuzzy_match, fuzzy_text_match
+from e2e_helpers import WyomingTestClient, fuzzy_match, fuzzy_text_match
+from wyoming.asr import Transcript, TranscriptChunk, TranscriptStart, TranscriptStop
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_text", [None, "", "Hello world!"])
+async def test_transcribe_uses_latest_snapshot_or_authoritative_final(final_text):
+    """A corrected snapshot replaces prior text; even an empty final transcript takes precedence."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        wav.writeframes(b"\x00\x00" * 100)
+    events = [
+        TranscriptStart().event(),
+        TranscriptChunk(text="Hello word").event(),
+        TranscriptChunk(text="Hello world").event(),
+    ]
+    if final_text is not None:
+        events.append(Transcript(text=final_text).event())
+    events.append(TranscriptStop().event())
+    client = WyomingTestClient()
+    client._client = AsyncMock()
+    client._client.read_event.side_effect = events
+
+    result = await client.transcribe(wav_buffer.getvalue())
+
+    assert result.text == ("Hello world" if final_text is None else final_text)
+    assert result.chunks == ["Hello word", "Hello world"]
 
 
 def test_fuzzy_text_match_accepts_punctuation_and_case_differences():

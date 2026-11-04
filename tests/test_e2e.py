@@ -162,6 +162,29 @@ async def test_stt_with_explicit_model(wyoming_client: WyomingTestClient) -> Non
 
 
 @pytest.mark.asyncio
+async def test_stt_streaming_transcript_is_complete(streaming_stt_client: WyomingTestClient) -> None:
+    """Streaming STT must carry the whole transcript, in the final event as well as the chunks.
+
+    A backend may answer with its deltas and an empty `transcript.text.done` (Speaches 0.9 does),
+    so an empty final text must not replace what was already streamed.
+    """
+    info = await streaming_stt_client.describe()
+    voice = _first_voice_name(info)
+    program = next((asr for asr in info.asr if asr.supports_transcript_streaming), None)
+    assert program is not None, "Server should advertise a streaming ASR program"
+    phrase = "Turn on the kitchen lights."
+
+    audio = await streaming_stt_client.synthesize(phrase, voice=voice)
+    result = await streaming_stt_client.transcribe(audio.to_wav_bytes())
+
+    assert "transcript-chunk" in result.event_types, result.event_types
+    assert result.text.strip(), "Streaming STT returned an empty final transcript"
+    assert_fuzzy_match(result.text, phrase)
+    # The final transcript may revise the chunks, so the last one is only held to the phrase
+    assert_fuzzy_match(result.chunks[-1], phrase)
+
+
+@pytest.mark.asyncio
 async def test_backend_autodetection_speaches(wyoming_client_autodetect: WyomingTestClient) -> None:
     """Server started without STT_BACKEND/TTS_BACKEND should still come up.
 

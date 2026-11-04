@@ -245,33 +245,42 @@ def wyoming_endpoint(request: pytest.FixtureRequest) -> Generator[tuple[str, int
         yield external
         return
 
-    request.getfixturevalue("speaches_backend")
-    proc, port, log_path = _start_wyoming_server(
-        env_overrides={"STT_BACKEND": "SPEACHES", "TTS_BACKEND": "SPEACHES"}
+    yield from _spawn_endpoint(
+        request, env_overrides={"STT_BACKEND": "SPEACHES", "TTS_BACKEND": "SPEACHES"}, log_label="wyoming-subprocess"
     )
+
+
+def _spawn_endpoint(
+    request: pytest.FixtureRequest, env_overrides: dict[str, str], log_label: str
+) -> Generator[tuple[str, int], None, None]:
+    """(host, port) of a proxy subprocess on Speaches, terminated and its log preserved as `log_label` after."""
+    request.getfixturevalue("speaches_backend")
+    proc, port, log_path = _start_wyoming_server(env_overrides=env_overrides)
     try:
         yield ("127.0.0.1", port)
     finally:
         _terminate(proc)
-        _preserve_log(log_path, "wyoming-subprocess")
+        _preserve_log(log_path, log_label)
+
+
+def _spawned_endpoint(
+    request: pytest.FixtureRequest, env_overrides: dict[str, str], label: str
+) -> Generator[tuple[str, int], None, None]:
+    """(host, port) of a proxy spawned with its own environment, which skips in external mode.
+
+    An external server's environment cannot be controlled. `label` names the test in the skip
+    reason and the preserved log.
+    """
+    if _external_endpoint() is not None:
+        pytest.skip(f"{label} test requires a locally spawned server (WYOMING_E2E_URI is set)")
+
+    yield from _spawn_endpoint(request, env_overrides, log_label=f"wyoming-subprocess-{label}")
 
 
 @pytest.fixture(scope="session")
 def wyoming_endpoint_autodetect(request: pytest.FixtureRequest) -> Generator[tuple[str, int], None, None]:
-    """Proxy spawned without explicit backend env vars to exercise autodetection.
-
-    Skips in external mode: an external server's environment cannot be controlled.
-    """
-    if _external_endpoint() is not None:
-        pytest.skip("autodetection test requires a locally spawned server (WYOMING_E2E_URI is set)")
-
-    request.getfixturevalue("speaches_backend")
-    proc, port, log_path = _start_wyoming_server(env_overrides={})
-    try:
-        yield ("127.0.0.1", port)
-    finally:
-        _terminate(proc)
-        _preserve_log(log_path, "wyoming-subprocess-autodetect")
+    """Proxy spawned without explicit backend env vars to exercise autodetection."""
+    yield from _spawned_endpoint(request, env_overrides={}, label="autodetect")
 
 
 @pytest_asyncio.fixture
@@ -281,8 +290,25 @@ async def wyoming_client(wyoming_endpoint: tuple[str, int]):
         yield client
 
 
+@pytest.fixture(scope="session")
+def wyoming_endpoint_streaming_stt(request: pytest.FixtureRequest) -> Generator[tuple[str, int], None, None]:
+    """Proxy whose only STT model streams its response, as STT_STREAMING_MODELS configures."""
+    yield from _spawned_endpoint(
+        request,
+        env_overrides={"STT_BACKEND": "SPEACHES", "TTS_BACKEND": "SPEACHES", "STT_STREAMING_MODELS": STT_MODEL},
+        label="streaming-stt",
+    )
+
+
 @pytest_asyncio.fixture
 async def wyoming_client_autodetect(wyoming_endpoint_autodetect: tuple[str, int]):
     host, port = wyoming_endpoint_autodetect
+    async with WyomingTestClient(host=host, port=port) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def streaming_stt_client(wyoming_endpoint_streaming_stt: tuple[str, int]):
+    host, port = wyoming_endpoint_streaming_stt
     async with WyomingTestClient(host=host, port=port) as client:
         yield client

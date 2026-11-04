@@ -89,6 +89,8 @@ class TranscriptionResult:
 
     text: str
     event_types: list[str] = field(default_factory=list)
+    chunks: list[str] = field(default_factory=list)
+    """Each `transcript-chunk` text in order; under Wyoming 1.11 each one is the transcript so far."""
 
 
 class WyomingTestClient:
@@ -229,6 +231,7 @@ class WyomingTestClient:
         await self._write_event(AudioStop().event())
 
         event_types: list[str] = []
+        chunks: list[str] = []
         streamed_text = ""
         final_text: str | None = None
         async with asyncio.timeout(self._operation_timeout):
@@ -236,7 +239,8 @@ class WyomingTestClient:
                 event = await self._read_required("transcript events")
                 event_types.append(event.type)
                 if TranscriptChunk.is_type(event.type):
-                    streamed_text += TranscriptChunk.from_event(event).text
+                    streamed_text = TranscriptChunk.from_event(event).text
+                    chunks.append(streamed_text)
                 elif Transcript.is_type(event.type):
                     final_text = Transcript.from_event(event).text
                 elif TranscriptStop.is_type(event.type):
@@ -246,7 +250,7 @@ class WyomingTestClient:
                 elif not TranscriptStart.is_type(event.type):
                     raise RuntimeError(f"Unexpected event during transcription: {event.type}")
         text = final_text if final_text is not None else streamed_text
-        return TranscriptionResult(text=text, event_types=event_types)
+        return TranscriptionResult(text=text, event_types=event_types, chunks=chunks)
 
     async def synthesize(
         self, text: str, voice: str | None = None, text_format: str | None = None
