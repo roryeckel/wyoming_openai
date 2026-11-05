@@ -1475,7 +1475,9 @@ class TestOpenAIEventHandlerComprehensive:
         )
         await enhanced_handler.handle_event(Event(type="audio-stop"))
 
-        stt_client.realtime.connect.assert_called_once_with(extra_query={"intent": "transcription"})
+        stt_client.realtime.connect.assert_called_once_with(
+            model="gpt-realtime-whisper", extra_query={"intent": "transcription"}
+        )
         stt_client.audio.transcriptions.create.assert_not_called()
         connection.session.update.assert_called_once()
         session = connection.session.update.call_args.kwargs["session"]
@@ -1593,7 +1595,9 @@ class TestOpenAIEventHandlerComprehensive:
         )
         assert await enhanced_handler.handle_event(Event(type="audio-stop")) is False
 
-        stt_client.realtime.connect.assert_called_once_with(extra_query={"intent": "transcription"})
+        stt_client.realtime.connect.assert_called_once_with(
+            model="gpt-realtime-whisper", extra_query={"intent": "transcription"}
+        )
         stt_client.audio.transcriptions.create.assert_not_called()
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
         assert event_types == ["transcript-start", "error"]
