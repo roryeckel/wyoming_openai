@@ -16,6 +16,8 @@ import pytest
 import pytest_asyncio
 from openai import omit
 from pcm_reference import assert_samples_close, interleave_pcm, reference_resample, sine_samples
+from websockets.exceptions import ConnectionClosedOK
+from websockets.frames import Close
 from wyoming.asr import Transcript, TranscriptChunk
 from wyoming.audio import AudioChunk
 from wyoming.error import Error
@@ -1796,6 +1798,60 @@ class TestOpenAIEventHandlerComprehensive:
         enhanced_handler.write_event.reset_mock()
         assert await enhanced_handler.handle_event(Event(type="audio-stop")) is True
         enhanced_handler.write_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "server_message",
+        [
+            pytest.param("The current model does not support realtime transcription.", id="server-error"),
+            pytest.param(None, id="transport-error-only"),
+        ],
+    )
+    async def test_realtime_startup_close_logs_the_captured_server_error(
+        self, enhanced_handler, mock_info, mock_clients, caplog, server_message
+    ):
+        """An error received before session.update fails must survive cleanup, with the send traceback intact."""
+        stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+        connection = _FakeRealtimeConnection([])
+        manager = _FakeRealtimeConnectionManager(connection)
+        stt_client.realtime.connect = Mock(return_value=manager)
+        send_error = ConnectionClosedOK(Close(1000, ""), Close(1000, ""), True)
+
+        async def update_then_closed(**kwargs):
+            if server_message is not None:
+                await connection.events.put(_FakeRealtimeServerEvent("error", error={"message": server_message}))
+                # Deterministic ordering: the receiver has captured the rejection when sending fails.
+                await asyncio.wait_for(enhanced_handler._realtime_receive_task, timeout=1)
+            raise send_error
+
+        connection.session.update = AsyncMock(side_effect=update_then_closed)
+
+        with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+            await enhanced_handler.handle_event(
+                Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+            )
+            for _ in range(3):
+                await enhanced_handler.handle_event(
+                    Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x00\x01")
+                )
+            assert await enhanced_handler.handle_event(Event(type="audio-stop")) is False
+
+        records = [record for record in caplog.records if record.name == "wyoming_openai.handler"]
+        assert len(records) == 1
+        cause = server_message if server_message is not None else str(send_error)
+        assert records[0].getMessage() == f"Error starting realtime transcription: {cause}"
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[1] is send_error
+        assert str(send_error) in caplog.text
+
+        events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert [event.type for event in events] == ["error"]
+        assert Error.from_event(events[0]).text == STT_FAILED_ERROR
+        assert enhanced_handler._realtime_transcript_future is None
+        assert enhanced_handler._realtime_receive_task is None
+        await enhanced_handler._drain_background_tasks()
+        assert manager.exited is True
+        assert connection.closed is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

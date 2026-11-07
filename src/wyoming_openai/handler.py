@@ -654,7 +654,10 @@ class OpenAIEventHandler(AsyncEventHandler):
                 audio_width,
             )
         except Exception as err:
-            _LOGGER.exception("Error starting realtime transcription: %s", err)
+            # A server error may arrive before session.update fails on the closed socket. Preserve that cause
+            # before cleanup discards the future; exception() still includes the startup exception's traceback.
+            failure = self._get_realtime_transcription_failure()
+            _LOGGER.exception("Error starting realtime transcription: %s", failure if failure is not None else err)
             await self._cleanup_realtime_transcription()
             await self._fail_realtime_audio_stream(audio_stream)
 
