@@ -7,8 +7,6 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # The environment name is part of the PyPI trusted publisher binding.
-    # After the PyPI cutover, renaming it or removing this block breaks publishing.
     environment:
       name: pypi
       url: https://pypi.org/p/wyoming-openai
