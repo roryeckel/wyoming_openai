@@ -1271,3 +1271,70 @@ def test_configure_logging_keeps_numeric_archives_after_a_gap(tmp_path, monkeypa
         "wyoming_openai.log.1",
         "wyoming_openai.log.20261018",
     ]
+
+
+async def _capture_hass_settings(monkeypatch, *cli_args):
+    """Run main() and return the handler's Home Assistant names and prompt budget, and the names started."""
+    started = []
+    monkeypatch.setattr(main_module.HomeAssistantNames, "start", lambda self: started.append(self))
+    kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args)
+    return kwargs["stt_hass_names"], kwargs["stt_prompt_max_chars"], started
+
+
+@pytest.mark.asyncio
+async def test_main_leaves_home_assistant_names_off_without_a_token(monkeypatch):
+    names, max_chars, started = await _capture_hass_settings(monkeypatch)
+
+    assert names is None
+    assert max_chars == 500
+    assert started == []
+
+
+@pytest.mark.asyncio
+async def test_main_connects_to_home_assistant_in_the_background(monkeypatch):
+    names, _, started = await _capture_hass_settings(
+        monkeypatch, "--stt-hass-token", "token", "--stt-hass-url", "http://ha:8123"
+    )
+
+    # Started, not awaited, so the server does not wait for Home Assistant
+    assert started == [names]
+    assert names.websocket_url == "ws://ha:8123/api/websocket"
+
+
+@pytest.mark.asyncio
+async def test_main_reads_home_assistant_settings_from_env(monkeypatch):
+    monkeypatch.setenv("STT_HASS_TOKEN", "env-token")
+    monkeypatch.setenv("STT_HASS_URL", "https://ha.example.com")
+    monkeypatch.setenv("STT_PROMPT_MAX_CHARS", "300")
+
+    names, max_chars, _ = await _capture_hass_settings(monkeypatch)
+
+    assert names._token == "env-token"
+    assert names.websocket_url == "wss://ha.example.com/api/websocket"
+    assert max_chars == 300
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cli_args", "message"),
+    [
+        (["--stt-hass-token", "t", "--stt-hass-url", "ftp://ha"], "Home Assistant URL must be"),
+        (["--stt-hass-token", "t"], "--stt-hass-url (STT_HASS_URL) is required"),
+        (["--stt-prompt-max-chars", "0"], "--stt-prompt-max-chars"),
+    ],
+)
+async def test_main_rejects_invalid_home_assistant_settings(monkeypatch, capsys, cli_args, message):
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1", *cli_args])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_main_warns_about_an_unused_home_assistant_token(monkeypatch, caplog):
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-hass-token", "t"])
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    with caplog.at_level(logging.WARNING):
+        await main()
+    assert "Home Assistant token is set but unused" in caplog.text

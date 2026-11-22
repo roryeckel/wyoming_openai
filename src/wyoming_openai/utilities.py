@@ -3,8 +3,9 @@ import html.entities
 import json
 import logging
 import math
+import re
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import Enum
 from io import BytesIO
 from typing import TypeGuard
@@ -344,6 +345,57 @@ class SsmlTextTransformer:
 
     def _request_space(self) -> None:
         self._space_pending = True
+
+
+# A name followed by its aliases, kept together so a prompt that runs out of room drops whole entities or areas
+NameGroup = tuple[str, ...]
+
+# A prefix that already ends a sentence or a list is not given another period
+_PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def clean_name(name: object) -> str | None:
+    """A name with its whitespace collapsed, or None when it is not a string or is blank."""
+    if not isinstance(name, str):
+        return None
+    return _WHITESPACE.sub(" ", name).strip() or None
+
+
+def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_chars: int) -> str | None:
+    """
+    The STT prompt: the prefix (STT_PROMPT) first, then as many whole name groups as fit in max_chars, in the form
+    "<prefix>. Name1, Name2.". Names already added, compared case-insensitively, are skipped. The prefix is never
+    shortened, and when no names fit, or there are none, the prompt is the prefix exactly as given.
+    """
+    head = (prefix or "").strip()
+    if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
+        head += "."
+
+    seen: set[str] = set()
+    chosen: list[str] = []
+    for group in groups:
+        unique = []
+        for name in group:
+            cleaned = clean_name(name)
+            if cleaned is not None and cleaned.casefold() not in seen:
+                seen.add(cleaned.casefold())
+                unique.append(cleaned)
+        if not unique:
+            continue
+        if len(_join_prompt(head, [*chosen, *unique])) > max_chars:
+            # Greedy and in order, so the most useful names are kept and the prompt is the same for the same names
+            break
+        chosen.extend(unique)
+
+    if not chosen:
+        return prefix
+    return _join_prompt(head, chosen)
+
+
+def _join_prompt(head: str, names: list[str]) -> str:
+    body = ", ".join(names) + "."
+    return f"{head} {body}" if head else body
 
 
 def strip_ssml(text: str) -> str:

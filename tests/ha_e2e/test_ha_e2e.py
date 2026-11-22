@@ -34,9 +34,11 @@ from ha_e2e.docker_control import (
     wait_for_tcp,
 )
 from ha_e2e.ha_api import (
+    HaApiError,
     HaSession,
     HaStack,
     HaUnavailableError,
+    HaWsClient,
     configure_ha,
     ensure_session,
 )
@@ -496,3 +498,63 @@ async def test_proxy_stop_during_streaming_reply(
         )
         if restart_error is not None and error is restart_error:
             raise restart_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+async def test_reads_exposed_names_from_home_assistant(settings: HaE2ESettings, ha_session: HaSession):
+    """
+    The proxy keeps the names of a real instance current: an entity exposed to Assist after it connected, with its
+    alias, area and floor, is picked up from the registry change events.
+    """
+    from wyoming_openai.home_assistant import HomeAssistantNames
+
+    loop = asyncio.get_running_loop()
+
+    async def until(condition, timeout: float = 30.0) -> None:
+        deadline = loop.time() + timeout
+        while not condition():
+            assert loop.time() < deadline, "timed out waiting for Home Assistant"
+            await asyncio.sleep(0.2)
+
+    names = HomeAssistantNames(ha_session.access_token, settings.base_url)
+    ws = HaWsClient(settings, ha_session.access_token)
+    floor_id = area_id = helper_id = None
+    entity = ("Wyoming Ecobee", "Thermostat")
+    try:
+        names.start()
+
+        floor_id = ws.command("config/floor_registry/create", name="Wyoming Test Floor")["floor_id"]
+        area_id = ws.command("config/area_registry/create", name="Wyoming Test Room", floor_id=floor_id)["area_id"]
+        helper_id = ws.command("input_boolean/create", name="Wyoming Ecobee")["id"]
+        entity_id = f"input_boolean.{helper_id}"
+        for _ in range(60):
+            try:
+                ws.command("config/entity_registry/get", entity_id=entity_id)
+                break
+            except HaApiError:
+                await asyncio.sleep(0.5)
+        ws.command("config/entity_registry/update", entity_id=entity_id, area_id=area_id, aliases=["Thermostat"])
+        ws.command(
+            "homeassistant/expose_entity", assistants=["conversation"], entity_ids=[entity_id], should_expose=True
+        )
+
+        await until(lambda: entity in names.names)
+        # The area and floor hold an exposed entity, so they come before it
+        assert names.names.index(("Wyoming Test Room",)) < names.names.index(entity)
+        assert names.names.index(("Wyoming Test Floor",)) < names.names.index(entity)
+
+        # The connection is open by now, so only a registry change event can take the entity away again
+        ws.command(
+            "homeassistant/expose_entity", assistants=["conversation"], entity_ids=[entity_id], should_expose=False
+        )
+        await until(lambda: entity not in names.names)
+    finally:
+        await names.aclose()
+        if helper_id is not None:
+            ws.command("input_boolean/delete", input_boolean_id=helper_id)
+        if area_id is not None:
+            ws.command("config/area_registry/delete", area_id=area_id)
+        if floor_id is not None:
+            ws.command("config/floor_registry/delete", floor_id=floor_id)
+        ws.close()

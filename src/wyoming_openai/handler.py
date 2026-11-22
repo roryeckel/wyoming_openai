@@ -37,6 +37,7 @@ from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel, pars
 from .const import (
     DEFAULT_AUDIO_CHANNELS,
     DEFAULT_AUDIO_WIDTH,
+    DEFAULT_STT_PROMPT_MAX_CHARS,
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
     OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES,
     REALTIME_AUDIO_FORMAT,
@@ -46,11 +47,14 @@ from .const import (
     REALTIME_TTS_EVENT_TIMEOUT,
     REALTIME_TTS_INSTRUCTIONS,
 )
+from .home_assistant import HomeAssistantNames
 from .utilities import (
     NamedBytesIO,
+    NameGroup,
     RealtimeAudioConverter,
     SsmlTextTransformer,
     advertised_language,
+    build_prompt,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
@@ -179,6 +183,8 @@ class _AudioStreamState:
     transcript_started: bool = False  # TranscriptStart was sent while the audio was still arriving
     failed: bool = False  # Reported with an error event; its audio is dropped and its audio-stop closes the connection
     converter: RealtimeAudioConverter | None = None  # Set for a Realtime stream once its format is validated
+    # The transcript_names, then transcript_terms, of the transcribe it was selected by, for the STT prompt
+    bias_names: tuple[NameGroup, ...] = ()
 
     @property
     def realtime_converter(self) -> RealtimeAudioConverter:
@@ -214,6 +220,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_client: CustomAsyncOpenAI | None,
         stt_temperature: float | None = None,
         stt_prompt: str | None = None,
+        stt_hass_names: HomeAssistantNames | None = None,
+        stt_prompt_max_chars: int = DEFAULT_STT_PROMPT_MAX_CHARS,
         stt_extra_body: dict[str, object] | None = None,
         stt_realtime_models: list[str] | set[str] | None = None,
         stt_realtime_extra_body: dict[str, object] | None = None,
@@ -237,6 +245,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_client (CustomAsyncOpenAI | None): The client for text-to-speech.
             stt_temperature (float | None): The temperature for STT, or None for default.
             stt_prompt (str | None): An optional prompt for STT.
+            stt_hass_names (HomeAssistantNames | None): Names read from Home Assistant, added to the STT prompt
+                after stt_prompt and the names sent with transcribe. They are shared by every connection and owned by
+                the caller.
+            stt_prompt_max_chars (int): The length the names may bring the STT prompt to; stt_prompt is never
+                shortened.
             stt_extra_body (dict[str, object] | None): Optional JSON body fields merged into STT requests.
             stt_realtime_models (list[str] | set[str] | None): STT models that use OpenAI Realtime transcription.
             stt_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime
@@ -263,6 +276,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_client = stt_client
         self._stt_temperature = stt_temperature
         self._stt_prompt = stt_prompt
+        self._hass_names = stt_hass_names
+        self._stt_prompt_max_chars = stt_prompt_max_chars
         self._stt_extra_body = dict(stt_extra_body) if stt_extra_body else None
         self._stt_realtime_extra_body = dict(stt_realtime_extra_body) if stt_realtime_extra_body else None
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
@@ -290,6 +305,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Selected by the last transcribe, for the audio streams that start after it
         self._current_asr_model: AsrModel | None = None
         self._current_language: str | None = None
+        self._current_bias_names: tuple[NameGroup, ...] = ()
         # The last transcribe was refused. A refusal closes the connection, but a caller that keeps sending
         # events must not have the default model transcribe what the client asked for and was refused
         self._transcribe_rejected = False
@@ -455,6 +471,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     )
                     self._current_asr_model = None
                     self._current_language = None
+                    self._current_bias_names = ()
                 break
 
         for program in self._wyoming_info.tts:
@@ -471,19 +488,23 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _handle_transcribe(self, transcribe: Transcribe) -> bool:
         """Handle transcription request"""
-        # No OpenAI-compatible endpoint accepts VAD sensitivity or hotword biasing
+        # No OpenAI-compatible endpoint accepts VAD sensitivity
         if transcribe.vad_sensitivity is not None:
             _LOGGER.debug("Ignoring unsupported Transcribe field vad_sensitivity: %s", transcribe.vad_sensitivity)
-        if transcribe.transcript_names:
-            _LOGGER.debug("Ignoring unsupported Transcribe field transcript_names: %s", transcribe.transcript_names)
-        if transcribe.transcript_terms:
-            _LOGGER.debug("Ignoring unsupported Transcribe field transcript_terms: %s", transcribe.transcript_terms)
 
         requested_model = self._get_asr_model(transcribe.name)
         requested_language = transcribe.language
 
         self._current_asr_model = None
         self._current_language = None
+        # Names bias the transcription through the STT prompt, ahead of the terms and the Home Assistant names
+        self._current_bias_names = tuple(
+            (name,)
+            for field in (transcribe.transcript_names, transcribe.transcript_terms)
+            if isinstance(field, list)
+            for name in field
+            if isinstance(name, str)
+        )
         self._transcribe_rejected = True
 
         if requested_model:
@@ -520,6 +541,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not audio_stream.realtime and not self._is_asr_model_realtime(model.name):
             audio_stream.model = model
             audio_stream.language = language
+            audio_stream.bias_names = self._current_bias_names
             audio_stream.streaming = self._is_asr_model_streaming(model.name)
             _LOGGER.debug("Transcribe during the recording selected model %s, language %s", model.name, language)
             return
@@ -553,6 +575,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             language=self._current_language,
             realtime=model is not None and self._is_asr_model_realtime(model.name),
             streaming=model is not None and self._is_asr_model_streaming(model.name),
+            bias_names=self._current_bias_names,
         )
         self._audio_stream = audio_stream
 
@@ -643,7 +666,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._receive_realtime_transcription_events(), name="openai_realtime_transcription"
             )
 
-            await connection.session.update(session=self._get_realtime_transcription_session(audio_stream))
+            prompt = self._get_stt_prompt(audio_stream)
+            await connection.session.update(session=self._get_realtime_transcription_session(audio_stream, prompt))
             self._is_recording = True
             await self.write_event(TranscriptStart().event())
             audio_stream.transcript_started = True
@@ -782,7 +806,32 @@ class OpenAIEventHandler(AsyncEventHandler):
             raise RealtimeTranscriptionError("No STT client configured for realtime transcription")
         return self._stt_client.realtime.connect(extra_query={"intent": "transcription"})
 
-    def _get_realtime_transcription_session(self, audio_stream: _AudioStreamState) -> dict[str, object]:
+    def _get_stt_prompt(self, audio_stream: _AudioStreamState) -> str | None:
+        """
+        The STT prompt: STT_PROMPT, followed by the names sent with transcribe and the names read from Home
+        Assistant. A prompt in the extra body of the stream's transport replaces it, so it is STT_PROMPT alone then, as
+        without names; OpenAI's Realtime sessions for some models take none, so it is None for those.
+        """
+        model = audio_stream.model
+        extra_body = self._stt_realtime_extra_body if audio_stream.realtime else self._stt_extra_body
+        if model is None or (extra_body and "prompt" in extra_body):
+            return self._stt_prompt
+        hass_names = self._hass_names.names if self._hass_names is not None else ()
+        promptless = self._is_openai_stt_model(model.name, OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES)
+        if audio_stream.realtime and promptless:
+            # Called once per stream; only a prompt that would otherwise have been sent is worth reporting
+            if self._stt_prompt is not None or audio_stream.bias_names or hass_names:
+                _LOGGER.debug("Leaving out the STT prompt: %s does not support one", model.name)
+            return None
+        groups = audio_stream.bias_names + hass_names
+        prompt = build_prompt(self._stt_prompt, groups, self._stt_prompt_max_chars)
+        if groups:
+            _LOGGER.debug("STT prompt: %s", prompt)
+        return prompt
+
+    def _get_realtime_transcription_session(
+        self, audio_stream: _AudioStreamState, prompt: str | None
+    ) -> dict[str, object]:
         """Build a Realtime transcription session update payload."""
         if not audio_stream.model:
             raise RealtimeTranscriptionError("No ASR model set for realtime transcription")
@@ -798,11 +847,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             transcription["language"] = language
         if languages is not None:
             transcription["languages"] = languages
-        if self._stt_prompt is not None:
-            if self._is_openai_stt_model(model_name, OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES):
-                _LOGGER.debug("Leaving out the STT prompt: %s does not support one", model_name)
-            else:
-                transcription["prompt"] = self._stt_prompt
+        if prompt is not None:
+            transcription["prompt"] = prompt
         transcription.update(extra_body)
         # A null in the extra body drops the field, e.g. {"prompt": null} for a model that takes no prompt
         transcription = {key: value for key, value in transcription.items() if value is not None}
@@ -967,13 +1013,14 @@ class OpenAIEventHandler(AsyncEventHandler):
                 model.name, audio_stream.language, extra_body
             )
 
+            prompt = self._get_stt_prompt(audio_stream)
             transcription_kwargs = {
                 "file": self._wav_buffer,
                 "model": model.name,
                 "language": language if language is not None else omit,
                 "languages": languages if languages is not None else omit,
                 "temperature": self._stt_temperature if self._stt_temperature is not None else omit,
-                "prompt": self._stt_prompt if self._stt_prompt is not None else omit,
+                "prompt": prompt if prompt is not None else omit,
                 "response_format": "json",
                 "stream": use_streaming if use_streaming else omit,
             }

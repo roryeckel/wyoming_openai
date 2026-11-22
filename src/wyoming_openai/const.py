@@ -57,3 +57,35 @@ OPENAI_SPEECH_TTS_VOICES = (*OPENAI_LEGACY_SPEECH_TTS_VOICES, "ballad", "verse",
 OPENAI_SPEECH_ONLY_TTS_VOICES = tuple(
     voice_name for voice_name in OPENAI_SPEECH_TTS_VOICES if voice_name not in OPENAI_REALTIME_TTS_VOICES
 )
+
+# Biasing STT toward names: those a client sends with transcribe, and those Home Assistant exposes to Assist.
+# Whisper keeps at most 224 prompt tokens and drops the start of a longer prompt, which holds STT_PROMPT; 500
+# characters stay below that in English and most other languages written in the Latin alphabet
+DEFAULT_STT_PROMPT_MAX_CHARS = 500
+HASS_REQUEST_TIMEOUT = 10.0  # Seconds to connect to Home Assistant, or to read the names from it
+HASS_RETRY_SECONDS = 30.0  # Seconds before connecting to Home Assistant again after the connection failed
+HASS_CHANGE_DEBOUNCE_SECONDS = 1.0  # Seconds without another registry change before the names are read again
+# The registry events that can change the names, with the fields whose update can, or None when any change can. An
+# entity's exposure to Assist is kept in its options; a device's name is part of its entities' displayed names
+HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
+    "entity_registry_updated": frozenset(
+        {
+            "aliases",
+            "area_id",
+            "device_id",
+            "disabled_by",
+            "entity_id",
+            "has_entity_name",
+            "name",
+            "options",
+            "original_name",
+        }
+    ),
+    "device_registry_updated": frozenset({"area_id", "name", "name_by_user"}),
+    "area_registry_updated": None,
+    "floor_registry_updated": None,
+}
+# Entities in these domains are named first, since they are the ones spoken commands control
+HASS_PRIORITY_DOMAINS = frozenset(
+    {"light", "switch", "fan", "media_player", "climate", "scene", "todo", "cover", "lock"}
+)

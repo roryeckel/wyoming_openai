@@ -24,11 +24,13 @@ from .const import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
     DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_STT_PROMPT_MAX_CHARS,
     REALTIME_TTS_MAX_SPEED,
     REALTIME_TTS_MIN_SPEED,
     __version__,
 )
 from .handler import TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
+from .home_assistant import HomeAssistantNames
 from .utilities import (
     clamp_realtime_tts_speed,
     create_enum_parser,
@@ -178,6 +180,16 @@ async def main():
     )
     parser.add_argument("--stt-prompt", default=os.getenv("STT_PROMPT", None), help="Optional prompt for STT requests")
     parser.add_argument(
+        "--stt-prompt-max-chars",
+        type=parse_positive_int,
+        default=env_default("STT_PROMPT_MAX_CHARS") or DEFAULT_STT_PROMPT_MAX_CHARS,
+        help=(
+            "Length in characters the names sent with transcribe and read from Home Assistant may bring the STT "
+            "prompt to; names that do not fit are left out, while --stt-prompt is always kept whole "
+            f"(default: {DEFAULT_STT_PROMPT_MAX_CHARS})"
+        ),
+    )
+    parser.add_argument(
         "--stt-extra-body",
         type=stt_extra_body_parser,
         default=env_default("STT_EXTRA_BODY"),
@@ -208,6 +220,21 @@ async def main():
             "Optional JSON object merged into the transcription settings of --stt-realtime-models sessions; "
             "it cannot set the model (--stt-extra-body only applies to /v1/audio/transcriptions)"
         ),
+    )
+
+    # Home Assistant names for the STT prompt
+    parser.add_argument(
+        "--stt-hass-token",
+        default=env_default("STT_HASS_TOKEN"),
+        help=(
+            "Long-lived access token of a Home Assistant administrator. When set, the names of the entities, areas "
+            "and floors exposed to Assist are added to the STT prompt after --stt-prompt"
+        ),
+    )
+    parser.add_argument(
+        "--stt-hass-url",
+        default=env_default("STT_HASS_URL"),
+        help="Home Assistant URL, such as http://homeassistant.local:8123; required with a Home Assistant token",
     )
 
     # TTS configuration
@@ -340,6 +367,15 @@ async def main():
     except ValueError as exc:
         parser.error(str(exc))
 
+    hass_names: HomeAssistantNames | None = None
+    if args.stt_hass_token and stt_requested:
+        if not args.stt_hass_url:
+            parser.error("--stt-hass-url (STT_HASS_URL) is required with a Home Assistant token")
+        try:
+            hass_names = HomeAssistantNames(args.stt_hass_token, args.stt_hass_url)
+        except ValueError as exc:
+            parser.error(str(exc))
+
     configure_logging(
         args.log_level,
         args.log_file,
@@ -364,6 +400,9 @@ async def main():
         _logger.warning(
             "TTS extra body is set but unused: every TTS model is a Realtime model; use --tts-realtime-extra-body"
         )
+
+    if args.stt_hass_token and not stt_requested:
+        _logger.warning("A Home Assistant token is set but unused: no STT models are configured")
 
     if not stt_requested and not tts_requested:
         _logger.error("No STT or TTS models specified. Exiting.")
@@ -538,6 +577,11 @@ async def main():
         else:
             _logger.warning("No TTS models specified")
 
+        if hass_names is not None:
+            # Connects in the background, so the server does not wait for Home Assistant; the result is logged
+            hass_names.start()
+            exit_stack.push_async_callback(hass_names.aclose)
+
         # Create Wyoming server
         server = AsyncServer.from_uri(args.uri)
 
@@ -553,6 +597,8 @@ async def main():
                 tts_speed=args.tts_speed,
                 tts_instructions=args.tts_instructions,
                 stt_prompt=args.stt_prompt,
+                stt_hass_names=hass_names,
+                stt_prompt_max_chars=args.stt_prompt_max_chars,
                 stt_extra_body=args.stt_extra_body,
                 stt_realtime_models=args.stt_realtime_models,
                 stt_realtime_extra_body=args.stt_realtime_extra_body,

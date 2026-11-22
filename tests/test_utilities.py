@@ -12,6 +12,7 @@ from wyoming_openai.utilities import (
     RealtimePcmResampler,
     SsmlTextTransformer,
     advertised_language,
+    build_prompt,
     clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
@@ -634,3 +635,27 @@ def test_realtime_converter_rejects_a_rate_below_the_minimum():
 def test_realtime_converter_rejects_an_unsupported_pcm_format(width, channels):
     with pytest.raises(ValueError):
         RealtimeAudioConverter(24000, width, channels)
+
+
+def test_build_prompt_puts_stt_prompt_first():
+    groups = [("Kitchen",), ("Ecobee", "Thermostat")]
+    assert build_prompt("Smart home commands", groups, 500) == "Smart home commands. Kitchen, Ecobee, Thermostat."
+    assert build_prompt("Commands:", groups, 500) == "Commands: Kitchen, Ecobee, Thermostat."
+    assert build_prompt(None, groups, 500) == "Kitchen, Ecobee, Thermostat."
+
+
+def test_build_prompt_skips_names_added_before():
+    groups = [("Kitchen",), ("kitchen", "Kitchen  Light"), ("KITCHEN",), (" ",)]
+    assert build_prompt(None, groups, 500) == "Kitchen, Kitchen Light."
+
+
+def test_build_prompt_drops_whole_groups_that_do_not_fit():
+    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("Lamp",)]
+    # The group after Kitchen does not fit whole, and the shorter one after it is not tried
+    assert build_prompt(None, groups, len("Kitchen, Ecobee.")) == "Kitchen."
+
+
+@pytest.mark.parametrize("prefix", ["A long prompt that does not leave room for any name ", None])
+def test_build_prompt_keeps_stt_prompt_as_given_when_no_names_fit(prefix):
+    assert build_prompt(prefix, [("Kitchen",)], 5) == prefix
+    assert build_prompt(prefix, [], 500) == prefix
