@@ -65,7 +65,7 @@ from .utilities import (
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
-from .wav import TtsAudioFormat, WavFramer
+from .wav import TtsAudioFormat, WavFormatError, WavFramer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2261,7 +2261,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     audio_data = framer.feed(chunk)
                     if awaiting_header and framer.header_missing:
                         log_missing_header(
-                            "Could not parse WAV header after buffering %d bytes, falling back to raw PCM",
+                            "TTS response is not a WAV file; playing its first %d bytes as raw PCM",
                             len(audio_data),
                         )
                     # A parsed header alone only opens the stream for a caller that wants it opened when
@@ -2271,7 +2271,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             if held_audio := framer.finish():
                 log_missing_header(
-                    "TTS response ended before a complete WAV header was available, falling back to raw PCM"
+                    "TTS response is not a WAV file; playing it as raw PCM"
                 )
                 await write_audio(held_audio)
 
@@ -2295,6 +2295,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await write_audio(b"")
             return True
 
+        except WavFormatError as e:
+            _LOGGER.error("TTS backend returned audio that cannot be played: %s", e)
+            return False
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
             return False
