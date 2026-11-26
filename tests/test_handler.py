@@ -38,6 +38,7 @@ from wyoming_openai.compatibility import (
 from wyoming_openai.handler import (
     SHUTDOWN_ERROR,
     STT_FAILED_ERROR,
+    TTS_CHUNK_SIZE,
     OpenAIEventHandler,
     TtsStreamError,
     _AudioStreamState,
@@ -6300,7 +6301,9 @@ async def test_headerless_wav_response_is_reported_by_the_path_that_saw_it(
     with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
         assert await _play_buffered_sentence(enhanced_handler, pcm, True, 0, WAV_AUDIO_FORMAT)
     assert "is not a WAV file" not in caplog.text
-    assert enhanced_handler.write_event.call_args.args[0].payload == pcm
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert b"".join(event.payload for event in events if event.type == "audio-chunk") == pcm
+    enhanced_handler.write_event.reset_mock()
 
     _mock_speech_response(tts_client, [pcm[:2048], pcm[2048:]])
     with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
@@ -7102,3 +7105,68 @@ async def test_mp3_response_fails_naming_it_instead_of_playing_static(
 
     assert "TTS backend returned audio that cannot be played: TTS response is MP3 audio" in caplog.text
     assert not [call for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "audio-chunk"]
+
+
+@pytest.mark.asyncio
+async def test_buffered_sentence_is_played_in_stream_sized_pieces_that_yield_to_the_event_loop(enhanced_handler):
+    """Test a long buffered sentence does not hold the event loop for its whole conversion."""
+    pcm = bytes(range(256)) * 40
+    wav = _pcm_wav_with_unbounded_sizes(pcm)
+    loop_turns = 0
+
+    async def count_loop_turns():
+        nonlocal loop_turns
+        while True:
+            loop_turns += 1
+            await asyncio.sleep(0)
+
+    turns_at_writes = []
+
+    async def write(event):
+        if event.type == "audio-chunk":
+            turns_at_writes.append(loop_turns)
+
+    enhanced_handler.write_event = AsyncMock(side_effect=write)
+    counter = asyncio.create_task(count_loop_turns())
+    try:
+        assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is not None
+    finally:
+        counter.cancel()
+
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert b"".join(event.payload for event in events if event.type == "audio-chunk") == pcm
+    assert len(turns_at_writes) == -(-len(wav) // TTS_CHUNK_SIZE)
+    # Other tasks ran between every two pieces
+    assert turns_at_writes == sorted(set(turns_at_writes))
+
+
+@pytest.mark.asyncio
+async def test_buffered_float_wav_sentence_is_played_as_pcm16(enhanced_handler):
+    """Test a buffered sentence of IEEE float WAV is converted like a streamed one."""
+    wav = _float_wav([0.0, 0.5, -0.5, 1.0] * 1000)
+
+    assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is not None
+
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert (events[0].type, events[0].data["width"]) == ("audio-start", 2)
+    pcm = b"".join(event.payload for event in events if event.type == "audio-chunk")
+    assert pcm == struct.pack("<4h", 0, 16384, -16384, 32767) * 1000
+
+
+@pytest.mark.asyncio
+async def test_a_wav_header_too_long_to_buffer_fails_buffered_or_streamed_alike(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test the 64 KiB header limit no longer depends on whether a sentence happened to be buffered whole."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    metadata = riff_chunk(b"LIST", b"\x00" * 70000)
+    wav = wav_file(fmt_chunk_body(1, bits=16), b"\x00\x01" * 240, chunks=metadata)
+
+    with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+        assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is None
+        # As httpx reads a live response
+        _mock_speech_response(tts_client, [wav[i : i + TTS_CHUNK_SIZE] for i in range(0, len(wav), TTS_CHUNK_SIZE)])
+        assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
+
+    assert caplog.text.count("has no data chunk in its first 65536 bytes") == 2

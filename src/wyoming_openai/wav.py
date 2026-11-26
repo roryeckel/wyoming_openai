@@ -1,5 +1,7 @@
+import array
 import logging
 import struct
+import sys
 import uuid
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -161,10 +163,18 @@ def parse_wav_header(wav_data: bytes) -> WavHeader | None:
 
 def _float_to_pcm16(audio: bytes, width: int) -> bytes:
     """Convert little-endian IEEE float samples, nominally within [-1, 1], to 16-bit PCM, clipping beyond it."""
-    count = len(audio) // width
-    samples = struct.unpack(f"<{count}{'f' if width == 4 else 'd'}", audio)
-    # NaN fails `x == x` and becomes silence rather than a full-scale click
-    return struct.pack(f"<{count}h", *(round(32767 * max(-1.0, min(1.0, x))) if x == x else 0 for x in samples))
+    samples = array.array("f" if width == 4 else "d")
+    samples.frombytes(audio)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    # NaN fails every comparison and becomes silence rather than a full-scale click. One list comprehension over an
+    # array runs over twice as fast as unpacking with `struct`, which matters on a Raspberry Pi
+    pcm = array.array(
+        "h", [0 if x != x else 32767 if x >= 1.0 else -32767 if x <= -1.0 else round(x * 32767) for x in samples]
+    )
+    if sys.byteorder == "big":
+        pcm.byteswap()
+    return pcm.tobytes()
 
 
 class WavFramer:

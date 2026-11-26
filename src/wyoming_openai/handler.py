@@ -2100,7 +2100,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         """
 
         async def buffered_response() -> AsyncGenerator[bytes, None]:
-            yield audio_data
+            # In the pieces a live response is read in, so a buffered sentence is framed exactly like a streamed
+            # one, and converting a long sentence gives other connections a turn between pieces
+            for start in range(0, len(audio_data), TTS_CHUNK_SIZE):
+                if start:
+                    await asyncio.sleep(0)
+                yield audio_data[start : start + TTS_CHUNK_SIZE]
 
         return await self._play_tts_audio(
             buffered_response(), audio_format=audio_format, text=text, streamed=False, sentence=True
