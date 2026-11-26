@@ -35,6 +35,21 @@ _WAVE_FORMAT_NAMES = {
     0x0050: "MPEG",
     0x0055: "MPEG Layer 3",
 }
+# How a response starts when it is audio of a kind the proxy does not play, named so it fails saying what it is
+# instead of playing as noise. Raw PCM starts with one of these only by a chance too small to matter. MP3 without
+# an ID3 tag is not recognized: its frame sync, eleven set bits, is also how near-silent 16-bit PCM starts
+_FOREIGN_AUDIO_SIGNATURES = (
+    (b"RF64", "RF64 WAV"),
+    (b"BW64", "BW64 WAV"),
+    (b"RIFX", "big-endian RIFX WAV"),
+    (b"fLaC", "FLAC"),
+    (b"OggS", "Ogg (Opus or Vorbis)"),
+    # An ID3v2 tag, followed by its major version
+    (b"ID3\x02", "MP3"),
+    (b"ID3\x03", "MP3"),
+    (b"ID3\x04", "MP3"),
+)
+_SIGNATURE_BYTES = 4  # Enough of a response to tell a WAV file from raw PCM or another kind of audio
 
 
 @dataclass(frozen=True)
@@ -43,6 +58,9 @@ class TtsAudioFormat:
 
     headerless: bool  # Raw PCM16 mono rather than a WAV file
     rate: int  # Hz; for WAV only a fallback until the header is parsed
+    # Whether a headerless response may be a WAV file anyway, from a backend that ignores response_format, and is
+    # then read by its header. True for /v1/audio/speech; never for Realtime, which only carries raw PCM
+    may_be_wav: bool = False
 
 
 class WavFormatError(ValueError):
@@ -56,6 +74,13 @@ class WavHeader(NamedTuple):
     data_offset: int
     data_size: int | None  # Whole frames the data chunk declares; None when it uses the unbounded-size sentinel
     sample_format: int = WAVE_FORMAT_PCM  # WAVE_FORMAT_PCM or WAVE_FORMAT_IEEE_FLOAT, after unwrapping EXTENSIBLE
+
+
+def _reject_foreign_audio(start: bytes) -> None:
+    """Raise for a response whose first bytes show it is a kind of audio the proxy does not play."""
+    for signature, name in _FOREIGN_AUDIO_SIGNATURES:
+        if start.startswith(signature):
+            raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only WAV and raw PCM)")
 
 
 def _describe_format(tag: int) -> str:
@@ -149,8 +174,11 @@ class WavFramer:
         self.rate = audio_format.rate
         self.width = DEFAULT_AUDIO_WIDTH  # Of the PCM handed out, which float audio is converted to
         self.channels = DEFAULT_AUDIO_CHANNELS
-        self.awaiting_header = not audio_format.headerless
-        self.header_missing = False  # The response was not a WAV file, so its bytes were released as raw PCM
+        # Until the first bytes show whether the response is a WAV file, and then until its header is understood
+        self.awaiting_header = not audio_format.headerless or audio_format.may_be_wav
+        self.header_missing = False  # A WAV file was requested but not returned, so the bytes were played as raw PCM
+        self.unrequested_wav = False  # Raw PCM was requested but a WAV file returned, which is read by its header
+        self._expects_wav = not audio_format.headerless
         self._pending = b""  # Bytes held until the header is understood
         self._remaining: int | None = None  # Declared PCM bytes not received yet; None when unbounded
         self._partial = b""  # The start of a frame whose rest has not arrived, since chunks hold whole frames
@@ -167,14 +195,24 @@ class WavFramer:
         Take the next response bytes and return the PCM to play, which is empty while the header is incomplete.
 
         Raises:
-            WavFormatError: The response is a WAV file whose header cannot be read or whose audio cannot be played.
+            WavFormatError: The response is a WAV file whose header cannot be read or whose audio cannot be played,
+                or audio of another kind the proxy recognizes, such as MP3 or FLAC.
         """
         if not self.awaiting_header:
             return self._convert(self._whole_frames(self._bound(chunk)))
 
         self._pending += chunk
+        if len(self._pending) < _SIGNATURE_BYTES:
+            return b""
+        if not self._pending.startswith(b"RIFF"):
+            _reject_foreign_audio(self._pending)
+            # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
+            # Callers report `header_missing`: only they know if this was a stream or a whole buffered response
+            return self._release_pending()
+
         header = parse_wav_header(self._pending)
         if header:
+            self.unrequested_wav = not self._expects_wav
             self.rate, self.channels, self._source_width = header.rate, header.channels, header.width
             data_offset, data_size = header.data_offset, header.data_size
             self._float = header.sample_format == WAVE_FORMAT_IEEE_FLOAT
@@ -213,18 +251,14 @@ class WavFramer:
 
         if len(self._pending) <= TTS_WAV_HEADER_MAX_BYTES:
             return b""
-        if self._pending.startswith(b"RIFF"):
-            raise WavFormatError(
-                f"TTS response starts as a WAV file but has no data chunk in its first {TTS_WAV_HEADER_MAX_BYTES} bytes"
-            )
-
-        # Callers report `header_missing`: only they know if this was a stream or a whole buffered response
-        return self._release_pending()
+        raise WavFormatError(
+            f"TTS response starts as a WAV file but has no data chunk in its first {TTS_WAV_HEADER_MAX_BYTES} bytes"
+        )
 
     def finish(self) -> bytes:
         """
-        Return the bytes still held when the response ends without a WAV header, to be played as raw PCM.
-        A frame the response ends in the middle of is dropped, since its samples are incomplete.
+        Return the bytes still held when the response ends too short to show it is a WAV file, to be played as raw
+        PCM. A frame the response ends in the middle of is dropped, since its samples are incomplete.
 
         Raises:
             WavFormatError: The response ended inside a WAV header.
@@ -240,7 +274,7 @@ class WavFramer:
     def _release_pending(self) -> bytes:
         """Give up on a WAV header and release the bytes held for it as raw PCM."""
         audio, self._pending = self._pending, b""
-        if self.awaiting_header and audio:
+        if self.awaiting_header and audio and self._expects_wav:
             self.header_missing = True
         self.awaiting_header = False
         return self._whole_frames(audio)

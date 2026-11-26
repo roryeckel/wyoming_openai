@@ -101,23 +101,97 @@ def test_framer_reports_declared_audio_that_did_not_arrive():
     assert framer.missing_bytes == 100
 
 
-def test_framer_releases_bytes_as_raw_pcm_when_no_header_shows_up():
+def test_framer_plays_a_response_that_is_not_a_wav_file_as_raw_pcm_from_its_first_bytes():
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
-    raw = b"\x00\x01" * (TTS_WAV_HEADER_MAX_BYTES // 2)
 
-    assert framer.feed(raw) == b""
-    assert framer.feed(b"\x00\x01") == raw + b"\x00\x01"
+    # Held only until there are enough bytes to see it is not a WAV file
+    assert framer.feed(PCM[:3]) == b""
+    assert framer.feed(PCM[3:7]) == PCM[:6]
     assert framer.header_missing
+    assert not framer.awaiting_header
     assert framer.rate == 24000
     # Later bytes pass straight through
-    assert framer.feed(PCM) == PCM
+    assert framer.feed(PCM[7:]) == PCM[6:]
+    assert framer.finish() == b""
 
 
-def test_framer_finish_hands_back_a_short_response_that_is_not_a_wav_file():
+def test_framer_finish_hands_back_a_response_too_short_to_be_a_wav_file():
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
 
-    assert framer.feed(PCM) == b""
-    assert framer.finish() == PCM
+    assert framer.feed(PCM[:3]) == b""
+    assert framer.finish() == PCM[:2]
+    assert framer.header_missing
+
+
+WAV_FORMAT = TtsAudioFormat(headerless=False, rate=24000)
+SPEECH_PCM_FORMAT = TtsAudioFormat(headerless=True, rate=24000, may_be_wav=True)
+REALTIME_FORMAT = TtsAudioFormat(headerless=True, rate=24000)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 5, 4096])
+def test_framer_reads_a_wav_file_returned_for_a_raw_pcm_request(chunk_size):
+    """A backend that ignores `response_format: pcm` and answers with float WAV still plays, by its header."""
+    data = b"".join(struct.pack("<f", x) for x in FLOATS)
+    wav = wav_file(fmt_chunk_body(WAVE_FORMAT_IEEE_FLOAT, rate=16000), data)
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+
+    pcm = b"".join(framer.feed(wav[i : i + chunk_size]) for i in range(0, len(wav), chunk_size)) + framer.finish()
+
+    assert list(struct.unpack(f"<{len(FLOATS)}h", pcm)) == FLOATS_AS_PCM16
+    assert (framer.rate, framer.width, framer.channels) == (16000, 2, 1)
+    assert framer.unrequested_wav
+    assert not framer.header_missing
+
+
+def test_framer_plays_raw_pcm_returned_for_a_raw_pcm_request_without_reporting_it():
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+
+    assert framer.feed(PCM[:3]) == b""
+    assert framer.feed(PCM[3:]) == PCM
+    assert framer.finish() == b""
+    assert not framer.header_missing
+    assert not framer.unrequested_wav
+
+
+def test_framer_never_reads_realtime_audio_as_a_wav_file():
+    """Realtime only carries raw PCM, so even bytes that spell a WAV header are played as they come."""
+    wav = _wav()
+    framer = WavFramer(REALTIME_FORMAT)
+
+    assert framer.feed(wav) == wav
+    assert not framer.unrequested_wav
+
+
+FOREIGN_AUDIO = [
+    (b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64" * 8, "MP3"),
+    (b"fLaC\x00\x00\x00\x22" + bytes(34), "FLAC"),
+    (b"OggS\x00\x02" + bytes(22), r"Ogg \(Opus or Vorbis\)"),
+    (b"RF64\xff\xff\xff\xffWAVEds64" + bytes(28), "RF64 WAV"),
+    (b"BW64\xff\xff\xff\xffWAVEds64" + bytes(28), "BW64 WAV"),
+    (b"RIFX" + _wav()[4:], "big-endian RIFX WAV"),
+]
+
+
+@pytest.mark.parametrize(("audio", "name"), FOREIGN_AUDIO, ids=["mp3", "flac", "ogg", "rf64", "bw64", "rifx"])
+@pytest.mark.parametrize("audio_format", [WAV_FORMAT, SPEECH_PCM_FORMAT], ids=["wav-requested", "pcm-requested"])
+def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, audio_format):
+    framer = WavFramer(audio_format)
+
+    assert framer.feed(audio[:2]) == b""
+    with pytest.raises(WavFormatError, match=f"^TTS response is {name} audio, which the proxy does not play"):
+        framer.feed(audio[2:])
+
+
+@pytest.mark.parametrize(
+    "pcm",
+    [b"\xff\xff\xfb\xff" * 8, b"\xff\xfb\x90\x64" * 8, b"ID3!" * 8, b"RIF\x00" * 8],
+    ids=["near-silence", "mp3-frame-sync-without-id3", "id3-without-a-version", "riff-prefix-only"],
+)
+def test_framer_plays_raw_pcm_that_only_resembles_another_kind_of_audio(pcm):
+    """Only whole signatures count: near-silent PCM starts with the same bits as an MP3 frame."""
+    framer = WavFramer(WAV_FORMAT)
+
+    assert framer.feed(pcm) + framer.finish() == pcm
     assert framer.header_missing
 
 

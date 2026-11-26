@@ -1150,7 +1150,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Describe the audio bytes `_iter_tts_audio` yields for a voice."""
         if self._is_tts_voice_realtime(voice):
             return TtsAudioFormat(headerless=True, rate=REALTIME_AUDIO_RATE)
-        return TtsAudioFormat(headerless=self._get_tts_response_format() != "wav", rate=TTS_AUDIO_RATE)
+        # Whatever was requested, a backend that ignores response_format may answer with a WAV file
+        return TtsAudioFormat(headerless=self._get_tts_response_format() != "wav", rate=TTS_AUDIO_RATE, may_be_wav=True)
 
     def _is_tts_voice_streaming(self, voice_name: str) -> bool:
         """Check if a TTS voice supports streaming synthesis.
@@ -2241,9 +2242,26 @@ class OpenAIEventHandler(AsyncEventHandler):
         try:
             framer = WavFramer(audio_format)
             wrote_audio = False
-            # A backend that answers without a WAV header does so for every sentence; the one that streams
-            # reports it, the buffered ones behind it do not repeat the warning
-            log_missing_header = _LOGGER.warning if streamed else _LOGGER.debug
+            # A backend that answers in another container than requested does so for every sentence; the one that
+            # streams reports it, the buffered ones behind it do not repeat the warning
+            log_unexpected_container = _LOGGER.warning if streamed else _LOGGER.debug
+            reported_container = False
+
+            def report_container() -> None:
+                """Report, once, a response that is not the container that was requested."""
+                nonlocal reported_container
+                if reported_container:
+                    return
+                if framer.header_missing:
+                    log_unexpected_container("TTS response is not a WAV file; playing it as raw PCM")
+                elif framer.unrequested_wav:
+                    log_unexpected_container(
+                        "TTS response is a WAV file although response_format is %r; playing it by its header",
+                        self._get_tts_response_format(),
+                    )
+                else:
+                    return
+                reported_container = True
 
             async def write_audio(audio_data: bytes) -> None:
                 """Send the audio start once the format is known, then the PCM."""
@@ -2257,22 +2275,16 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             async with contextlib.aclosing(chunks) as audio_stream:
                 async for chunk in audio_stream:
-                    awaiting_header = framer.awaiting_header
                     audio_data = framer.feed(chunk)
-                    if awaiting_header and framer.header_missing:
-                        log_missing_header(
-                            "TTS response is not a WAV file; playing its first %d bytes as raw PCM",
-                            len(audio_data),
-                        )
+                    report_container()
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
                     if audio_data or (not sentence and not framer.awaiting_header):
                         await write_audio(audio_data)
 
-            if held_audio := framer.finish():
-                log_missing_header(
-                    "TTS response is not a WAV file; playing it as raw PCM"
-                )
+            held_audio = framer.finish()
+            report_container()
+            if held_audio:
                 await write_audio(held_audio)
 
             if framer.missing_bytes:
