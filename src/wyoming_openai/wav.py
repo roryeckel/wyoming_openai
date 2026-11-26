@@ -11,7 +11,6 @@ from .utilities import take_whole_frames
 
 _LOGGER = logging.getLogger(__name__)
 
-TTS_WAV_HEADER_MAX_BYTES = 65536  # Bound header buffering if a backend never yields a complete WAV header
 WAV_UNBOUNDED_SIZE = 0xFFFFFFFF  # Streaming WAV data chunk size sentinel
 # RIFF sizes that stand in for a length the writer did not know: the largest unsigned and signed 32-bit values.
 # Any other RIFF size is a real length, however large
@@ -135,6 +134,80 @@ def _parse_fmt_chunk(fmt: bytes) -> tuple[int, int, int, int]:
     return tag, channels, rate, width
 
 
+class _WavHeaderReader:
+    """
+    Reads the header of a WAV file as its bytes arrive, chunk by chunk, up to the start of the data chunk.
+
+    It holds only what it still has to read: a chunk header, or the part of the fmt chunk that describes the audio.
+    Other chunks before the audio, such as metadata or padding of any length, are dropped as they arrive.
+    """
+
+    def __init__(self) -> None:
+        self.held = b""  # Bytes not read yet; once the header is read, the start of the audio
+        self.offset = 0  # Position in the file of the first held byte
+        self.riff_size: int | None = None  # Read from the RIFF header once it has arrived
+        self._skip = 0  # Bytes of the current chunk still to drop
+        self._fmt: tuple[int, int, int, int] | None = None
+
+    @property
+    def received(self) -> int:
+        """Bytes of the file received so far."""
+        return self.offset + len(self.held)
+
+    def feed(self, data: bytes) -> WavHeader | None:
+        """
+        Take the next bytes of a file that starts with `RIFF`, and return its header once the data chunk starts.
+
+        Raises:
+            WavFormatError: The file is not a WAV file whose audio can be played.
+        """
+        self.held += data
+        if self.riff_size is None:
+            if len(self.held) < 12:
+                return None
+            if self.held[8:12] != b"WAVE":
+                raise WavFormatError(f"RIFF file of form {self.held[8:12]!r} is not WAVE audio")
+            self.riff_size = struct.unpack_from("<I", self.held, 4)[0]
+            self._consume(12)
+
+        while True:
+            if self._skip:
+                dropped = min(self._skip, len(self.held))
+                self._consume(dropped)
+                self._skip -= dropped
+                if self._skip:
+                    return None
+            if len(self.held) < 8:
+                return None
+            chunk_id = self.held[:4]
+            chunk_size = struct.unpack_from("<I", self.held, 4)[0]
+            if chunk_id == b"data":
+                if self._fmt is None:
+                    raise WavFormatError("WAV data chunk comes before any fmt chunk, so its format is unknown")
+                tag, channels, rate, width = self._fmt
+                frame_size = width * channels
+                data_size = None if chunk_size == WAV_UNBOUNDED_SIZE else chunk_size - chunk_size % frame_size
+                self._consume(8)
+                return WavHeader(rate, channels, width, self.offset, data_size, tag)
+            # RIFF pads chunks of odd length to an even one
+            padded_size = chunk_size + chunk_size % 2
+            read_size = 0
+            if chunk_id == b"fmt ":
+                # Only the first 40 bytes describe the audio, however long the chunk says it is
+                read_size = min(chunk_size, 40)
+                if len(self.held) < 8 + read_size:
+                    return None
+                self._fmt = _parse_fmt_chunk(self.held[8 : 8 + read_size])
+            else:
+                _LOGGER.debug("Skipping a %d-byte %r chunk before the WAV audio", chunk_size, chunk_id)
+            self._consume(8 + read_size)
+            self._skip = padded_size - read_size
+
+    def _consume(self, size: int) -> None:
+        self.held = self.held[size:]
+        self.offset += size
+
+
 def parse_wav_header(wav_data: bytes) -> WavHeader | None:
     """
     Parse a WAV header to find the audio format, data offset, and data size.
@@ -145,32 +218,9 @@ def parse_wav_header(wav_data: bytes) -> WavHeader | None:
     Raises:
         WavFormatError: The bytes are a RIFF file, but not a WAV file whose audio can be played.
     """
-    if len(wav_data) < 12 or wav_data[:4] != b"RIFF":
+    if not wav_data.startswith(b"RIFF"):
         return None
-    if wav_data[8:12] != b"WAVE":
-        raise WavFormatError(f"RIFF file of form {wav_data[8:12]!r} is not WAVE audio")
-
-    fmt: tuple[int, int, int, int] | None = None
-    position = 12
-    while position + 8 <= len(wav_data):
-        chunk_id = wav_data[position : position + 4]
-        chunk_size = struct.unpack_from("<I", wav_data, position + 4)[0]
-        body = position + 8
-        if chunk_id == b"data":
-            if fmt is None:
-                raise WavFormatError("WAV data chunk comes before any fmt chunk, so its format is unknown")
-            tag, channels, rate, width = fmt
-            frame_size = width * channels
-            data_size = None if chunk_size == WAV_UNBOUNDED_SIZE else chunk_size - chunk_size % frame_size
-            return WavHeader(rate, channels, width, body, data_size, tag)
-        # RIFF pads chunks of odd length to an even one
-        end = body + chunk_size + chunk_size % 2
-        if end > len(wav_data):
-            return None
-        if chunk_id == b"fmt ":
-            fmt = _parse_fmt_chunk(wav_data[body : body + chunk_size])
-        position = end
-    return None
+    return _WavHeaderReader().feed(wav_data)
 
 
 def _float_to_pcm16(audio: bytes, width: int) -> bytes:
@@ -201,7 +251,8 @@ class WavFramer:
         self.header_missing = False  # A WAV file was requested but not returned, so the bytes were played as raw PCM
         self.unrequested_wav = False  # Raw PCM was requested but a WAV file returned, which is read by its header
         self._expects_wav = not audio_format.headerless
-        self._pending = b""  # Bytes held until the header is understood
+        self._pending = b""  # The first bytes, held until they show whether the response is a WAV file
+        self._header: _WavHeaderReader | None = None  # Reading the header of a response that is a WAV file
         self._remaining: int | None = None  # Declared PCM bytes not received yet; None when unbounded
         self._partial = b""  # The start of a frame whose rest has not arrived, since chunks hold whole frames
         self._source_width = DEFAULT_AUDIO_WIDTH  # Bytes per sample in the response
@@ -223,64 +274,63 @@ class WavFramer:
         if not self.awaiting_header:
             return self._convert(self._whole_frames(self._bound(chunk)))
 
-        self._pending += chunk
-        if len(self._pending) < _SIGNATURE_BYTES:
-            return b""
-        if not self._pending.startswith(b"RIFF"):
-            _reject_foreign_audio(self._pending)
-            # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
-            # Callers report `header_missing`, once for all the responses of a synthesis
-            return self._release_pending()
+        if self._header is None:
+            self._pending += chunk
+            if not self._pending.startswith(b"RIFF"):
+                if len(self._pending) < _SIGNATURE_BYTES:
+                    return b""
+                _reject_foreign_audio(self._pending)
+                # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
+                # Callers report `header_missing`, once for all the responses of a synthesis
+                return self._release_pending()
+            self._header = _WavHeaderReader()
+            chunk, self._pending = self._pending, b""
 
         try:
-            header = parse_wav_header(self._pending)
+            header = self._header.feed(chunk)
         except UnsupportedWavFormatError as e:
             if self._expects_wav:
                 raise UnsupportedWavFormatError(f"{e}{_UNSUPPORTED_FORMAT_HINT}") from e
             raise
-        if header:
-            self.unrequested_wav = not self._expects_wav
-            self.rate, self.channels, self._source_width = header.rate, header.channels, header.width
-            data_offset, data_size = header.data_offset, header.data_size
-            self._float = header.sample_format == WAVE_FORMAT_IEEE_FLOAT
-            self.width = DEFAULT_AUDIO_WIDTH if self._float else self._source_width
-            riff_size = struct.unpack_from("<I", self._pending, 4)[0]
-            available_audio = self._pending[data_offset:]
-            self._pending = b""
-            self.awaiting_header = False
-            frame_size = self._source_width * self.channels
-            if (
-                data_size
-                and riff_size in WAV_PLACEHOLDER_RIFF_SIZES
-                and data_offset - 8 + data_size > riff_size - frame_size
-            ):
-                # A data length that fills a placeholder container was derived from it, so it is as
-                # unknown as the RIFF size. Any shorter length is a real one and still bounds the audio
-                self._remaining = None
-            elif data_size == 0 and riff_size not in WAV_PLACEHOLDER_RIFF_SIZES and 8 + riff_size > data_offset:
-                # The RIFF container goes on after an empty data chunk: an empty file, followed by metadata
-                # of whatever length the container declares
-                self._remaining = 0
-            else:
-                # A zero size is also what servers write when streaming audio of unknown length: the RIFF
-                # size is then a placeholder or covers nothing past the header
-                self._remaining = data_size or None
-            _LOGGER.debug(
-                "Detected audio format: %s%d Hz, %d channels, %d bytes/sample, header offset: %d, audio size: %s",
-                "IEEE float converted to 16-bit PCM, " if self._float else "",
-                self.rate,
-                self.channels,
-                self._source_width,
-                data_offset,
-                "unknown" if self._remaining is None else f"{self._remaining} bytes",
-            )
-            return self._convert(self._whole_frames(self._bound(available_audio)))
-
-        if len(self._pending) <= TTS_WAV_HEADER_MAX_BYTES:
+        if header is None:
             return b""
-        raise WavFormatError(
-            f"TTS response starts as a WAV file but has no data chunk in its first {TTS_WAV_HEADER_MAX_BYTES} bytes"
+
+        riff_size = self._header.riff_size or 0
+        available_audio = self._header.held
+        self._header = None
+        self.awaiting_header = False
+        self.unrequested_wav = not self._expects_wav
+        self.rate, self.channels, self._source_width = header.rate, header.channels, header.width
+        data_offset, data_size = header.data_offset, header.data_size
+        self._float = header.sample_format == WAVE_FORMAT_IEEE_FLOAT
+        self.width = DEFAULT_AUDIO_WIDTH if self._float else self._source_width
+        frame_size = self._source_width * self.channels
+        if (
+            data_size
+            and riff_size in WAV_PLACEHOLDER_RIFF_SIZES
+            and data_offset - 8 + data_size > riff_size - frame_size
+        ):
+            # A data length that fills a placeholder container was derived from it, so it is as
+            # unknown as the RIFF size. Any shorter length is a real one and still bounds the audio
+            self._remaining = None
+        elif data_size == 0 and riff_size not in WAV_PLACEHOLDER_RIFF_SIZES and 8 + riff_size > data_offset:
+            # The RIFF container goes on after an empty data chunk: an empty file, followed by metadata
+            # of whatever length the container declares
+            self._remaining = 0
+        else:
+            # A zero size is also what servers write when streaming audio of unknown length: the RIFF
+            # size is then a placeholder or covers nothing past the header
+            self._remaining = data_size or None
+        _LOGGER.debug(
+            "Detected audio format: %s%d Hz, %d channels, %d bytes/sample, header offset: %d, audio size: %s",
+            "IEEE float converted to 16-bit PCM, " if self._float else "",
+            self.rate,
+            self.channels,
+            self._source_width,
+            data_offset,
+            "unknown" if self._remaining is None else f"{self._remaining} bytes",
         )
+        return self._convert(self._whole_frames(self._bound(available_audio)))
 
     def finish(self) -> bytes:
         """
@@ -290,9 +340,9 @@ class WavFramer:
         A response that ends inside its WAV header holds no audio, like a WAV file with an empty data chunk; callers
         decide whether that skips a sentence or fails a request.
         """
-        if self.awaiting_header and self._pending.startswith(b"RIFF"):
-            _LOGGER.warning("TTS response ended after %d bytes, inside its WAV header", len(self._pending))
-            self._pending = b""
+        if self._header is not None:
+            _LOGGER.warning("TTS response ended after %d bytes, inside its WAV header", self._header.received)
+            self._header = None
             self.awaiting_header = False
             return b""
         audio = self._release_pending()

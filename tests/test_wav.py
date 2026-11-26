@@ -10,7 +10,6 @@ from wav_helpers import extensible_fmt_chunk_body, fmt_chunk_body, riff_chunk, w
 
 from wyoming_openai.utilities import take_whole_frames
 from wyoming_openai.wav import (
-    TTS_WAV_HEADER_MAX_BYTES,
     WAVE_FORMAT_IEEE_FLOAT,
     WAVE_FORMAT_PCM,
     TtsAudioFormat,
@@ -307,13 +306,21 @@ def test_framer_rejects_wav_it_cannot_play(wav, message):
         framer.feed(wav)
 
 
-def test_framer_rejects_a_wav_file_without_a_data_chunk_in_reach():
-    wav = wav_file(fmt_chunk_body(1, bits=16))[:-8]
-    padding = b"LIST" + struct.pack("<I", TTS_WAV_HEADER_MAX_BYTES) + b"\x00" * TTS_WAV_HEADER_MAX_BYTES
-    framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
+@pytest.mark.parametrize("chunk_size", [7, 2048])
+def test_framer_drops_metadata_before_the_audio_as_it_arrives(chunk_size):
+    """Metadata of any length before the data chunk, such as embedded artwork, is not held while it is skipped."""
+    artwork = riff_chunk(b"LIST", b"INFO" + bytes(200_001))
+    wav = wav_file(fmt_chunk_body(WAVE_FORMAT_PCM, bits=16), PCM, chunks=artwork)
+    framer = WavFramer(WAV_FORMAT)
+    pcm, most_held = b"", 0
+    for i in range(0, len(wav), chunk_size):
+        pcm += framer.feed(wav[i : i + chunk_size])
+        if framer._header is not None:
+            most_held = max(most_held, len(framer._header.held))
 
-    with pytest.raises(WavFormatError, match="no data chunk"):
-        framer.feed(wav + padding)
+    assert pcm + framer.finish() == PCM
+    # No more than one read and the chunk header or fmt chunk it completes
+    assert most_held < chunk_size + 48
 
 
 def test_take_whole_frames_prepends_a_carried_partial_frame():
@@ -410,8 +417,18 @@ def test_files_the_wave_module_writes_are_read_as_it_reads_them(width, channels,
         wav_file(fmt_chunk_body(1, bits=16, extra=b"\x00\x00"), PCM),
         wav_file(fmt_chunk_body(1, bits=16), PCM, before_fmt=riff_chunk(b"JUNK", bytes(28))),
         wav_file(fmt_chunk_body(1, bits=16), PCM[:-1]),
+        wav_file(fmt_chunk_body(1, bits=16, extra=bytes(100)), PCM),
+        wav_file(fmt_chunk_body(1, bits=16), PCM, chunks=riff_chunk(b"LIST", b"INFO" + bytes(100_001))),
     ],
-    ids=["extensible-stereo", "extensible-32-bit", "fmt-with-cbsize", "junk-before-fmt", "odd-data-size"],
+    ids=[
+        "extensible-stereo",
+        "extensible-32-bit",
+        "fmt-with-cbsize",
+        "junk-before-fmt",
+        "odd-data-size",
+        "long-fmt",
+        "metadata-past-64-kib",
+    ],
 )
 def test_other_files_the_wave_module_reads_are_read_as_it_reads_them(wav):
     _assert_matches_the_wave_module(wav)

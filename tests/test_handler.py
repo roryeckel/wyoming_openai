@@ -7156,22 +7156,26 @@ async def test_buffered_float_wav_sentence_is_played_as_pcm16(enhanced_handler):
 
 
 @pytest.mark.asyncio
-async def test_a_wav_header_too_long_to_buffer_fails_buffered_or_streamed_alike(
-    enhanced_handler, mock_info, mock_clients, caplog
+async def test_long_metadata_before_the_audio_plays_buffered_or_streamed_alike(
+    enhanced_handler, mock_info, mock_clients
 ):
-    """Test the 64 KiB header limit no longer depends on whether a sentence happened to be buffered whole."""
+    """Test metadata longer than the 64 KiB the header was once held to no longer stops either path."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
-    metadata = riff_chunk(b"LIST", b"\x00" * 70000)
-    wav = wav_file(fmt_chunk_body(1, bits=16), b"\x00\x01" * 240, chunks=metadata)
+    pcm = b"\x00\x01" * 240
+    wav = wav_file(fmt_chunk_body(1, bits=16), pcm, chunks=riff_chunk(b"LIST", b"\x00" * 70000))
 
-    with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
-        assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is None
-        # As httpx reads a live response
-        _mock_speech_response(tts_client, [wav[i : i + TTS_CHUNK_SIZE] for i in range(0, len(wav), TTS_CHUNK_SIZE)])
-        assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
+    def played_audio():
+        events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        enhanced_handler.write_event.reset_mock()
+        return b"".join(event.payload for event in events if event.type == "audio-chunk")
 
-    assert caplog.text.count("has no data chunk in its first 65536 bytes") == 2
+    assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is not None
+    assert played_audio() == pcm
+    # As httpx reads a live response
+    _mock_speech_response(tts_client, [wav[i : i + TTS_CHUNK_SIZE] for i in range(0, len(wav), TTS_CHUNK_SIZE)])
+    assert await _stream_whole_request(enhanced_handler, voice, "Hello") is not None
+    assert played_audio() == pcm
 
 
 @pytest.mark.asyncio
