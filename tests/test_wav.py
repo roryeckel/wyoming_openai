@@ -1,4 +1,5 @@
 import io
+import logging
 import math
 import random
 import struct
@@ -107,22 +108,22 @@ def test_framer_reports_declared_audio_that_did_not_arrive():
 def test_framer_plays_a_response_that_is_not_a_wav_file_as_raw_pcm_from_its_first_bytes():
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
 
-    # Held only until there are enough bytes to see it is not a WAV file
-    assert framer.feed(PCM[:3]) == b""
-    assert framer.feed(PCM[3:7]) == PCM[:6]
+    # Held only until there are enough bytes to see it is neither a WAV file nor audio of another kind
+    assert framer.feed(PCM[:7]) == b""
+    assert framer.feed(PCM[7:9]) == PCM[:8]
     assert framer.header_missing
     assert not framer.awaiting_header
     assert framer.rate == 24000
     # Later bytes pass straight through
-    assert framer.feed(PCM[7:]) == PCM[6:]
+    assert framer.feed(PCM[9:]) == PCM[8:]
     assert framer.finish() == b""
 
 
 def test_framer_finish_hands_back_a_response_too_short_to_be_a_wav_file():
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
 
-    assert framer.feed(PCM[:3]) == b""
-    assert framer.finish() == PCM[:2]
+    assert framer.feed(PCM[:7]) == b""
+    assert framer.finish() == PCM[:6]
     assert framer.header_missing
 
 
@@ -172,10 +173,18 @@ FOREIGN_AUDIO = [
     (b"RF64\xff\xff\xff\xffWAVEds64" + bytes(28), "RF64 WAV"),
     (b"BW64\xff\xff\xff\xffWAVEds64" + bytes(28), "BW64 WAV"),
     (b"RIFX" + _wav()[4:], "big-endian RIFX WAV"),
+    (b"FORM\x00\x00\x00\x2eAIFFCOMM" + bytes(26), "AIFF"),
+    (b"caff\x00\x01\x00\x00desc" + bytes(40), "CAF"),
+    (b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01" + bytes(24), "WebM or Matroska"),
+    (b"\x00\x00\x00\x1cftypM4A \x00\x00\x00\x00" + bytes(16), "MP4 or M4A"),
 ]
 
 
-@pytest.mark.parametrize(("audio", "name"), FOREIGN_AUDIO, ids=["mp3", "flac", "ogg", "rf64", "bw64", "rifx"])
+@pytest.mark.parametrize(
+    ("audio", "name"),
+    FOREIGN_AUDIO,
+    ids=["mp3", "flac", "ogg", "rf64", "bw64", "rifx", "aiff", "caf", "webm", "mp4"],
+)
 @pytest.mark.parametrize("audio_format", [WAV_FORMAT, SPEECH_PCM_FORMAT], ids=["wav-requested", "pcm-requested"])
 def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, audio_format):
     framer = WavFramer(audio_format)
@@ -198,12 +207,22 @@ def test_framer_plays_raw_pcm_that_only_resembles_another_kind_of_audio(pcm):
     assert framer.header_missing
 
 
-def test_framer_rejects_a_response_that_ended_inside_the_wav_header():
+@pytest.mark.parametrize(
+    "wav",
+    [_wav()[:30], wav_file(fmt_chunk_body(1, bits=16))[:-8] + riff_chunk(b"LIST", b"meta")],
+    ids=["ended-inside-the-header", "no-data-chunk"],
+)
+def test_framer_finds_no_audio_in_a_response_that_ended_inside_the_wav_header(wav, caplog):
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
 
-    assert framer.feed(_wav()[:30]) == b""
-    with pytest.raises(WavFormatError, match="ended after 30 bytes, inside its WAV header"):
-        framer.finish()
+    assert framer.feed(wav) == b""
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.wav"):
+        assert framer.finish() == b""
+
+    assert f"TTS response ended after {len(wav)} bytes, inside its WAV header" in caplog.text
+    assert not framer.awaiting_header
+    assert not framer.header_missing
+    assert framer.missing_bytes == 0
 
 
 FLOATS = [0.0, 0.5, -0.5, 1.0, -1.0, 2.0, -3.0, float("nan")]
@@ -257,6 +276,7 @@ def test_parse_wav_header_reads_extensible_pcm_and_skips_chunks_before_the_data(
         (wav_file(fmt_chunk_body(7, bits=8)), r"format 0x0007 \(mu-law\) is not supported"),
         (wav_file(fmt_chunk_body(0x1234, bits=16)), r"format 0x1234 is not supported"),
         (wav_file(fmt_chunk_body(WAVE_FORMAT_IEEE_FLOAT, bits=16)), "16-bit samples is not supported"),
+        (wav_file(fmt_chunk_body(WAVE_FORMAT_PCM, bits=40)), r"integer PCM with 40-bit samples is not supported"),
         (wav_file(extensible_fmt_chunk_body(0x55)), r"format 0x0055 \(MPEG Layer 3\) is not supported"),
         (wav_file(extensible_fmt_chunk_body(3)[:-14] + b"\x00" * 14), "extensible subformat .* is not supported"),
         (wav_file(fmt_chunk_body(1, channels=0, bits=16)), "0 channels"),
@@ -270,6 +290,7 @@ def test_parse_wav_header_reads_extensible_pcm_and_skips_chunks_before_the_data(
         "mu-law",
         "unknown-tag",
         "float16",
+        "int40",
         "extensible-mp3",
         "extensible-unknown-guid",
         "no-channels",
@@ -314,6 +335,14 @@ def test_unsupported_format_error_says_how_to_work_around_it():
 
     with pytest.raises(WavFormatError, match=r"""set TTS_EXTRA_BODY='\{"response_format": "pcm"\}'$"""):
         framer.feed(wav_file(fmt_chunk_body(7, bits=8)))
+
+
+def test_unsupported_format_error_offers_no_workaround_when_raw_pcm_was_already_requested():
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+
+    with pytest.raises(WavFormatError, match=r"format 0x0007 \(mu-law\) is not supported") as error:
+        framer.feed(wav_file(fmt_chunk_body(7, bits=8)))
+    assert "TTS_EXTRA_BODY" not in str(error.value)
 
 
 def _wave_written(width: int, channels: int, rate: int, frames: int) -> bytes:

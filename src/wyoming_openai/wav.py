@@ -22,7 +22,8 @@ WAVE_FORMAT_IEEE_FLOAT = 0x0003
 WAVE_FORMAT_EXTENSIBLE = 0xFFFE
 # The GUID of an extensible subformat is its format tag followed by these bytes
 _KSDATAFORMAT_SUFFIX = bytes.fromhex("000000001000800000aa00389b71")
-# How to get playable audio from a backend whose WAV output is in a format the proxy does not play
+# How to get playable audio from a backend whose WAV output is in a format the proxy does not play. Only given when
+# WAV was requested: a backend that answers a request for raw PCM with WAV anyway has already ignored that setting
 _UNSUPPORTED_FORMAT_HINT = (
     "; if the backend can return raw 24 kHz 16-bit mono PCM instead, "
     """set TTS_EXTRA_BODY='{"response_format": "pcm"}'"""
@@ -37,21 +38,25 @@ _WAVE_FORMAT_NAMES = {
     0x0050: "MPEG",
     0x0055: "MPEG Layer 3",
 }
-# How a response starts when it is audio of a kind the proxy does not play, named so it fails saying what it is
-# instead of playing as noise. Raw PCM starts with one of these only by a chance too small to matter. MP3 without
-# an ID3 tag is not recognized: its frame sync, eleven set bits, is also how near-silent 16-bit PCM starts
+# Where a response that is audio of a kind the proxy does not play has which bytes, named so it fails saying what it
+# is instead of playing as noise. Raw PCM has one of these only by a chance too small to matter. MP3 without an ID3
+# tag and ADTS AAC are not recognized: their frame sync, a run of set bits, is also how near-silent 16-bit PCM starts
 _FOREIGN_AUDIO_SIGNATURES = (
-    (b"RF64", "RF64 WAV"),
-    (b"BW64", "BW64 WAV"),
-    (b"RIFX", "big-endian RIFX WAV"),
-    (b"fLaC", "FLAC"),
-    (b"OggS", "Ogg (Opus or Vorbis)"),
+    (0, b"RF64", "RF64 WAV"),
+    (0, b"BW64", "BW64 WAV"),
+    (0, b"RIFX", "big-endian RIFX WAV"),
+    (0, b"FORM", "AIFF"),
+    (0, b"caff", "CAF"),
+    (0, b"fLaC", "FLAC"),
+    (0, b"OggS", "Ogg (Opus or Vorbis)"),
+    (0, b"\x1a\x45\xdf\xa3", "WebM or Matroska"),
+    (4, b"ftyp", "MP4 or M4A"),
     # An ID3v2 tag, followed by its major version
-    (b"ID3\x02", "MP3"),
-    (b"ID3\x03", "MP3"),
-    (b"ID3\x04", "MP3"),
+    (0, b"ID3\x02", "MP3"),
+    (0, b"ID3\x03", "MP3"),
+    (0, b"ID3\x04", "MP3"),
 )
-_SIGNATURE_BYTES = 4  # Enough of a response to tell a WAV file from raw PCM or another kind of audio
+_SIGNATURE_BYTES = 8  # Enough of a response to tell a WAV file from raw PCM or another kind of audio
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,10 @@ class WavFormatError(ValueError):
     """A response that starts as a WAV file but whose header cannot be read or whose audio cannot be played."""
 
 
+class UnsupportedWavFormatError(WavFormatError):
+    """A well-formed WAV file whose audio is in a format the proxy does not play, such as a compressed codec."""
+
+
 class WavHeader(NamedTuple):
     rate: int
     channels: int
@@ -80,8 +89,8 @@ class WavHeader(NamedTuple):
 
 def _reject_foreign_audio(start: bytes) -> None:
     """Raise for a response whose first bytes show it is a kind of audio the proxy does not play."""
-    for signature, name in _FOREIGN_AUDIO_SIGNATURES:
-        if start.startswith(signature):
+    for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES:
+        if start.startswith(signature, offset):
             raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only WAV and raw PCM)")
 
 
@@ -100,26 +109,29 @@ def _parse_fmt_chunk(fmt: bytes) -> tuple[int, int, int, int]:
             raise WavFormatError(f"WAV fmt chunk is {len(fmt)} bytes, too short for WAVE_FORMAT_EXTENSIBLE (needs 40)")
         subformat = fmt[24:40]
         if subformat[2:] != _KSDATAFORMAT_SUFFIX:
-            raise WavFormatError(
-                f"WAV extensible subformat {uuid.UUID(bytes_le=subformat)} is not supported{_UNSUPPORTED_FORMAT_HINT}"
+            raise UnsupportedWavFormatError(
+                f"WAV extensible subformat {uuid.UUID(bytes_le=subformat)} is not supported"
             )
         tag = struct.unpack_from("<H", subformat)[0]
     if tag not in (WAVE_FORMAT_PCM, WAVE_FORMAT_IEEE_FLOAT):
-        raise WavFormatError(
+        raise UnsupportedWavFormatError(
             f"WAV audio format {_describe_format(tag)} is not supported; "
-            f"the proxy plays integer PCM and 32- or 64-bit IEEE float WAV{_UNSUPPORTED_FORMAT_HINT}"
+            "the proxy plays integer PCM and 32- or 64-bit IEEE float WAV"
         )
     if not channels:
         raise WavFormatError("WAV header declares 0 channels")
     if not rate:
         raise WavFormatError("WAV header declares a sample rate of 0 Hz")
     if tag == WAVE_FORMAT_IEEE_FLOAT and bits not in (32, 64):
-        raise WavFormatError(
-            f"WAV IEEE float audio with {bits}-bit samples is not supported (only 32 or 64){_UNSUPPORTED_FORMAT_HINT}"
+        raise UnsupportedWavFormatError(
+            f"WAV IEEE float audio with {bits}-bit samples is not supported (only 32 or 64)"
         )
     width = (bits + 7) // 8
     if not width:
         raise WavFormatError("WAV header declares 0 bits per sample")
+    if tag == WAVE_FORMAT_PCM and width > 4:
+        # Wyoming clients play integer PCM of at most 4 bytes per sample
+        raise UnsupportedWavFormatError(f"WAV integer PCM with {bits}-bit samples is not supported (at most 32)")
     return tag, channels, rate, width
 
 
@@ -217,10 +229,15 @@ class WavFramer:
         if not self._pending.startswith(b"RIFF"):
             _reject_foreign_audio(self._pending)
             # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
-            # Callers report `header_missing`: only they know if this was a stream or a whole buffered response
+            # Callers report `header_missing`, once for all the responses of a synthesis
             return self._release_pending()
 
-        header = parse_wav_header(self._pending)
+        try:
+            header = parse_wav_header(self._pending)
+        except UnsupportedWavFormatError as e:
+            if self._expects_wav:
+                raise UnsupportedWavFormatError(f"{e}{_UNSUPPORTED_FORMAT_HINT}") from e
+            raise
         if header:
             self.unrequested_wav = not self._expects_wav
             self.rate, self.channels, self._source_width = header.rate, header.channels, header.width
@@ -270,11 +287,14 @@ class WavFramer:
         Return the bytes still held when the response ends too short to show it is a WAV file, to be played as raw
         PCM. A frame the response ends in the middle of is dropped, since its samples are incomplete.
 
-        Raises:
-            WavFormatError: The response ended inside a WAV header.
+        A response that ends inside its WAV header holds no audio, like a WAV file with an empty data chunk; callers
+        decide whether that skips a sentence or fails a request.
         """
         if self.awaiting_header and self._pending.startswith(b"RIFF"):
-            raise WavFormatError(f"TTS response ended after {len(self._pending)} bytes, inside its WAV header")
+            _LOGGER.warning("TTS response ended after %d bytes, inside its WAV header", len(self._pending))
+            self._pending = b""
+            self.awaiting_header = False
+            return b""
         audio = self._release_pending()
         if self._partial:
             _LOGGER.debug("Dropping %d bytes that end the audio in the middle of a frame", len(self._partial))

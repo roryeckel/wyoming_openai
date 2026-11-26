@@ -160,6 +160,9 @@ class _SynthesisState:
     audio_started: bool = False  # AudioStart was sent and AudioStop was not
     timestamp: float = 0  # End of the audio sent so far, in milliseconds
     skipped_speakable_sentence: bool = False  # A sentence with something to say came back without audio
+    # A response came in another container than requested, which a backend does for every sentence, so it is
+    # reported once
+    reported_container: bool = False
     failed: bool = False  # Its failure was reported to the client, or the client is gone; not reported twice
 
 
@@ -1912,7 +1915,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                     buffered_then_live(),
                     audio_format=self._get_tts_audio_format(voice),
                     text=text,
-                    streamed=True,
                     sentence=True,
                 ):
                     raise TtsStreamError("streaming its audio failed, as logged above", chunk_preview, voice.name)
@@ -2108,7 +2110,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 yield audio_data[start : start + TTS_CHUNK_SIZE]
 
         return await self._play_tts_audio(
-            buffered_response(), audio_format=audio_format, text=text, streamed=False, sentence=True
+            buffered_response(), audio_format=audio_format, text=text, sentence=True
         )
 
     async def _synthesize_non_streaming(self, text: str, voice: TtsVoiceModel) -> bool:
@@ -2212,7 +2214,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._iter_tts_audio(text, voice),
                 audio_format=self._get_tts_audio_format(voice),
                 text=text,
-                streamed=True,
                 sentence=False,
             )
 
@@ -2222,7 +2223,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         *,
         audio_format: TtsAudioFormat,
         text: str,
-        streamed: bool,
         sentence: bool,
     ) -> bool:
         """
@@ -2234,7 +2234,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             chunks (AsyncGenerator[bytes, None]): The response bytes; closed when playback ends.
             audio_format (TtsAudioFormat): How the bytes are framed, from `_get_tts_audio_format`.
             text (str): The text that was synthesized.
-            streamed (bool): Whether the bytes arrive from the backend right now, not from a buffered response.
             sentence (bool): Whether this is one sentence of a synthesis rather than a whole request. A sentence
                 without audio is skipped and leaves the stream unopened for the next one, which may have
                 another audio format; a whole request still opens the stream when there is nothing to say
@@ -2247,26 +2246,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         try:
             framer = WavFramer(audio_format)
             wrote_audio = False
-            # A backend that answers in another container than requested does so for every sentence; the one that
-            # streams reports it, the buffered ones behind it do not repeat the warning
-            log_unexpected_container = _LOGGER.warning if streamed else _LOGGER.debug
-            reported_container = False
-
-            def report_container() -> None:
-                """Report, once, a response that is not the container that was requested."""
-                nonlocal reported_container
-                if reported_container:
-                    return
-                if framer.header_missing:
-                    log_unexpected_container("TTS response is not a WAV file; playing it as raw PCM")
-                elif framer.unrequested_wav:
-                    log_unexpected_container(
-                        "TTS response is a WAV file although response_format is %r; playing it by its header",
-                        self._get_tts_response_format(),
-                    )
-                else:
-                    return
-                reported_container = True
 
             async def write_audio(audio_data: bytes) -> None:
                 """Send the audio start once the format is known, then the PCM."""
@@ -2280,15 +2259,19 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             async with contextlib.aclosing(chunks) as audio_stream:
                 async for chunk in audio_stream:
+                    undecided = framer.awaiting_header
                     audio_data = framer.feed(chunk)
-                    report_container()
+                    if undecided and not framer.awaiting_header:
+                        self._report_tts_container(framer)
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
                     if audio_data or (not sentence and not framer.awaiting_header):
                         await write_audio(audio_data)
 
+            undecided = framer.awaiting_header
             held_audio = framer.finish()
-            report_container()
+            if undecided:
+                self._report_tts_container(framer)
             if held_audio:
                 await write_audio(held_audio)
 
@@ -2318,6 +2301,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
             return False
+
+    def _report_tts_container(self, framer: WavFramer) -> None:
+        """Warn, once per synthesis, about a response that is not in the container that was requested."""
+        if self._synthesis.reported_container:
+            return
+        if framer.header_missing:
+            _LOGGER.warning("TTS response is not a WAV file; playing it as raw PCM")
+        elif framer.unrequested_wav:
+            _LOGGER.warning(
+                "TTS response is a WAV file although response_format is %r; playing it by its header",
+                self._get_tts_response_format(),
+            )
+        else:
+            return
+        self._synthesis.reported_container = True
 
     def _advance_audio_timestamp(
         self,

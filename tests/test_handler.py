@@ -16,7 +16,7 @@ import pytest
 import pytest_asyncio
 from openai import omit
 from pcm_reference import assert_samples_close, interleave_pcm, reference_resample, sine_samples
-from wav_helpers import fmt_chunk_body, riff_chunk, wav_file
+from wav_helpers import float_wav, fmt_chunk_body, riff_chunk, wav_file
 from websockets.exceptions import ConnectionClosedOK
 from websockets.frames import Close
 from wyoming.asr import Transcript, TranscriptChunk
@@ -43,6 +43,7 @@ from wyoming_openai.handler import (
     TtsStreamError,
     _AudioStreamState,
     _has_speakable_content,
+    _SynthesisState,
 )
 from wyoming_openai.utilities import (
     RealtimeAudioConverter,
@@ -6290,28 +6291,32 @@ async def test_cancelled_tts_stream_closes_the_audio_it_opened(
 
 
 @pytest.mark.asyncio
-async def test_headerless_wav_response_is_reported_by_the_path_that_saw_it(
+async def test_headerless_wav_response_is_reported_once_per_synthesis(
     enhanced_handler, mock_info, mock_clients, caplog
 ):
-    """Test raw PCM answering a WAV request warns when it is streamed, and not for every buffered sentence."""
+    """Test raw PCM answering a WAV request warns for the first sentence that shows it, buffered or streamed."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
     pcm = b"\x00\x01" * 40000
+    warning = "TTS response is not a WAV file; playing it as raw PCM"
 
     with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
         assert await _play_buffered_sentence(enhanced_handler, pcm, True, 0, WAV_AUDIO_FORMAT)
-    assert "is not a WAV file" not in caplog.text
-    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
-    assert b"".join(event.payload for event in events if event.type == "audio-chunk") == pcm
-    enhanced_handler.write_event.reset_mock()
+        assert caplog.text.count(warning) == 1
+        events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert b"".join(event.payload for event in events if event.type == "audio-chunk") == pcm
+        enhanced_handler.write_event.reset_mock()
 
-    _mock_speech_response(tts_client, [pcm[:2048], pcm[2048:]])
-    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        _mock_speech_response(tts_client, [pcm[:2048], pcm[2048:]])
         assert await _stream_whole_request(enhanced_handler, voice, "Hello", send_audio_start=True)
-    assert caplog.text.count("TTS response is not a WAV file; playing it as raw PCM") == 1
-    # Played from the first read on, not held back as if a header might still come
-    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
-    assert [event.payload for event in events if event.type == "audio-chunk"][-2:] == [pcm[:2048], pcm[2048:]]
+        assert caplog.text.count(warning) == 1
+        # Played from the first read on, not held back as if a header might still come
+        events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert [event.payload for event in events if event.type == "audio-chunk"][-2:] == [pcm[:2048], pcm[2048:]]
+
+        enhanced_handler._synthesis = _SynthesisState()
+        assert await _play_buffered_sentence(enhanced_handler, pcm, True, 0, WAV_AUDIO_FORMAT)
+        assert caplog.text.count(warning) == 2
 
 
 def test_chunk_text_for_streaming_min_words_without_max_chars(enhanced_handler):
@@ -7028,17 +7033,12 @@ async def test_realtime_transcription_times_out_when_the_commit_stalls(
     await enhanced_handler._drain_background_tasks()
 
 
-def _float_wav(samples: list[float], tag: int = 3) -> bytes:
-    """A mono 24 kHz WAV of little-endian 32-bit IEEE float samples, or of another format tag for the same bytes."""
-    return wav_file(fmt_chunk_body(tag), struct.pack(f"<{len(samples)}f", *samples))
-
-
 @pytest.mark.asyncio
 async def test_float_wav_response_is_played_as_pcm16(enhanced_handler, mock_info, mock_clients):
     """Test a backend answering with IEEE float WAV, as in issue #72, is converted rather than played as static."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
-    wav = _float_wav([0.0, 0.5, -0.5, 1.0] * 100)
+    wav = float_wav([0.0, 0.5, -0.5, 1.0] * 100)
     _mock_speech_response(tts_client, [wav[:30], wav[30:1001], wav[1001:]])
 
     assert await _stream_whole_request(enhanced_handler, voice, "Hello")
@@ -7057,7 +7057,7 @@ async def test_unplayable_wav_response_fails_with_a_descriptive_error(
     """Test a WAV response in a format the proxy cannot play fails the synthesis instead of playing noise."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
-    _mock_speech_response(tts_client, [_float_wav([0.0] * 100, tag=0x55)])
+    _mock_speech_response(tts_client, [float_wav([0.0] * 100, tag=0x55)])
 
     with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
         assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
@@ -7132,6 +7132,8 @@ async def test_buffered_sentence_is_played_in_stream_sized_pieces_that_yield_to_
         assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is not None
     finally:
         counter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await counter
 
     events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
     assert b"".join(event.payload for event in events if event.type == "audio-chunk") == pcm
@@ -7143,7 +7145,7 @@ async def test_buffered_sentence_is_played_in_stream_sized_pieces_that_yield_to_
 @pytest.mark.asyncio
 async def test_buffered_float_wav_sentence_is_played_as_pcm16(enhanced_handler):
     """Test a buffered sentence of IEEE float WAV is converted like a streamed one."""
-    wav = _float_wav([0.0, 0.5, -0.5, 1.0] * 1000)
+    wav = float_wav([0.0, 0.5, -0.5, 1.0] * 1000)
 
     assert await _play_buffered_sentence(enhanced_handler, wav, True, 0, WAV_AUDIO_FORMAT) is not None
 
@@ -7191,3 +7193,41 @@ async def test_unplayable_wav_sentence_ends_a_streaming_synthesis(enhanced_handl
     await asyncio.sleep(0)
     assert not enhanced_handler._synthesis_tasks
     await enhanced_handler._drain_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_a_sentence_whose_wav_ends_inside_its_header_is_skipped(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test a sentence whose WAV response ends inside its header is skipped like an empty one, not the synthesis."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    spoken = _pcm_wav_with_unbounded_sizes(b"\x00\x01" * 240)
+    _mock_speech_response(tts_client, lambda text: [spoken[:30] if text.startswith("Second") else spoken])
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+
+    with caplog.at_level(logging.WARNING):
+        assert await enhanced_handler._process_ready_sentences(["First one.", "Second one.", "Third one."])
+
+    assert "TTS response ended after 30 bytes, inside its WAV header" in caplog.text
+    assert "Skipping sentence without audio: Second one." in caplog.text
+    events = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+    assert [event.type for event in events] == ["audio-start", "audio-chunk", "audio-chunk"]
+    assert b"".join(event.payload for event in events[1:]) == b"\x00\x01" * 480
+    await enhanced_handler._drain_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_a_request_whose_wav_ends_inside_its_header_fails_without_audio(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test a whole request with something to say fails when its WAV response ends inside its header."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    _mock_speech_response(tts_client, [_pcm_wav_with_unbounded_sizes(b"\x00\x01" * 240)[:30]])
+
+    with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+        assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
+
+    assert "TTS backend returned no audio for: Hello" in caplog.text
+    assert not [call for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "audio-chunk"]

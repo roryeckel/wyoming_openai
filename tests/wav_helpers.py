@@ -42,3 +42,8 @@ def wav_file(
     data_header = b"data" + struct.pack("<I", len(data) if data_size is None else data_size)
     body = b"WAVE" + before_fmt + riff_chunk(b"fmt ", fmt) + chunks + data_header + data
     return b"RIFF" + struct.pack("<I", len(body) if riff_size is None else riff_size) + body
+
+
+def float_wav(samples: list[float], tag: int = 3) -> bytes:
+    """A mono 24 kHz WAV of little-endian 32-bit IEEE float samples, or of another format tag for the same bytes."""
+    return wav_file(fmt_chunk_body(tag), struct.pack(f"<{len(samples)}f", *samples))
