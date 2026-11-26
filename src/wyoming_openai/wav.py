@@ -25,7 +25,7 @@ _KSDATAFORMAT_SUFFIX = bytes.fromhex("000000001000800000aa00389b71")
 # WAV was requested: a backend that answers a request for raw PCM with WAV anyway has already ignored that setting
 _UNSUPPORTED_FORMAT_HINT = (
     "; if the backend can return raw 24 kHz 16-bit mono PCM instead, "
-    """set TTS_EXTRA_BODY='{"response_format": "pcm"}'"""
+    'add "response_format": "pcm" to TTS_EXTRA_BODY or --tts-extra-body'
 )
 # Formats seen from TTS backends, named so an error says what was received
 _WAVE_FORMAT_NAMES = {
@@ -337,14 +337,15 @@ class WavFramer:
         Return the bytes still held when the response ends too short to show it is a WAV file, to be played as raw
         PCM. A frame the response ends in the middle of is dropped, since its samples are incomplete.
 
-        A response that ends inside its WAV header holds no audio, like a WAV file with an empty data chunk; callers
-        decide whether that skips a sentence or fails a request.
+        Raises:
+            WavFormatError: The response is a WAV file that ended before its header reached the audio: it was cut off,
+                or a chunk size in its header is wrong, so the chunks after it were misread.
         """
         if self._header is not None:
-            _LOGGER.warning("TTS response ended after %d bytes, inside its WAV header", self._header.received)
-            self._header = None
-            self.awaiting_header = False
-            return b""
+            raise WavFormatError(
+                f"TTS response ended after {self._header.received} bytes, before its WAV header reached the audio; "
+                "the header is truncated or malformed"
+            )
         audio = self._release_pending()
         if self._partial:
             _LOGGER.debug("Dropping %d bytes that end the audio in the middle of a frame", len(self._partial))

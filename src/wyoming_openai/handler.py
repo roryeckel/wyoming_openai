@@ -1345,7 +1345,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._stream_audio_to_wyoming(result.audio or b"", self._get_tts_audio_format(voice), sentences[i]),
                 name=f"{task_id}_playback",
             ):
-                _LOGGER.error("Failed to stream sentence %d (%s) to Wyoming", i + 1, sentence_preview)
+                _LOGGER.error("Failed to play sentence %d (%s)", i + 1, sentence_preview)
                 return False
 
             _LOGGER.debug(

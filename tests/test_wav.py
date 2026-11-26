@@ -1,5 +1,4 @@
 import io
-import logging
 import math
 import random
 import struct
@@ -208,20 +207,22 @@ def test_framer_plays_raw_pcm_that_only_resembles_another_kind_of_audio(pcm):
 
 @pytest.mark.parametrize(
     "wav",
-    [_wav()[:30], wav_file(fmt_chunk_body(1, bits=16))[:-8] + riff_chunk(b"LIST", b"meta")],
-    ids=["ended-inside-the-header", "no-data-chunk"],
+    [
+        _wav()[:30],
+        wav_file(fmt_chunk_body(1, bits=16))[:-8] + riff_chunk(b"LIST", b"meta"),
+        # Without the pad byte after an odd-length chunk, every chunk after it is misread
+        wav_file(fmt_chunk_body(1, bits=16), PCM, chunks=b"LIST\x05\x00\x00\x00INFOx"),
+        wav_file(fmt_chunk_body(1, bits=16), PCM, chunks=b"JUNK\xff\xff\xff\xff"),
+    ],
+    ids=["ended-inside-the-header", "no-data-chunk", "unpadded-odd-chunk", "chunk-size-past-the-end"],
 )
-def test_framer_finds_no_audio_in_a_response_that_ended_inside_the_wav_header(wav, caplog):
+def test_framer_rejects_a_response_that_ends_before_its_wav_header_reaches_the_audio(wav):
+    """A response cut off or misread before its audio fails, as one cut off right after its header does."""
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
 
-    assert framer.feed(wav) == b""
-    with caplog.at_level(logging.WARNING, logger="wyoming_openai.wav"):
-        assert framer.finish() == b""
-
-    assert f"TTS response ended after {len(wav)} bytes, inside its WAV header" in caplog.text
-    assert not framer.awaiting_header
-    assert not framer.header_missing
-    assert framer.missing_bytes == 0
+    assert b"".join(framer.feed(wav[i : i + 2048]) for i in range(0, len(wav), 2048)) == b""
+    with pytest.raises(WavFormatError, match=f"ended after {len(wav)} bytes, before its WAV header reached the audio"):
+        framer.finish()
 
 
 FLOATS = [0.0, 0.5, -0.5, 1.0, -1.0, 2.0, -3.0, float("nan")]
@@ -340,7 +341,7 @@ def test_take_whole_frames_keeps_a_partial_frame_when_frames_are_single_bytes():
 def test_unsupported_format_error_says_how_to_work_around_it():
     framer = WavFramer(TtsAudioFormat(headerless=False, rate=24000))
 
-    with pytest.raises(WavFormatError, match=r"""set TTS_EXTRA_BODY='\{"response_format": "pcm"\}'$"""):
+    with pytest.raises(WavFormatError, match='add "response_format": "pcm" to TTS_EXTRA_BODY or --tts-extra-body$'):
         framer.feed(wav_file(fmt_chunk_body(7, bits=8)))
 
 
