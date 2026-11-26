@@ -75,7 +75,7 @@ class WavHeader(NamedTuple):
     width: int  # Bytes per sample in the file, before any conversion
     data_offset: int
     data_size: int | None  # Whole frames the data chunk declares; None when it uses the unbounded-size sentinel
-    sample_format: int = WAVE_FORMAT_PCM  # WAVE_FORMAT_PCM or WAVE_FORMAT_IEEE_FLOAT, after unwrapping EXTENSIBLE
+    sample_format: int  # WAVE_FORMAT_PCM or WAVE_FORMAT_IEEE_FLOAT, after unwrapping EXTENSIBLE
 
 
 def _reject_foreign_audio(start: bytes) -> None:

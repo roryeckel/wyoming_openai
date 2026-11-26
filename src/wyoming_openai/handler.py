@@ -2293,7 +2293,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await write_audio(held_audio)
 
             if framer.missing_bytes:
-                _LOGGER.warning("TTS WAV response ended with %d declared PCM bytes missing", framer.missing_bytes)
+                _LOGGER.warning("TTS WAV response ended with %d declared audio bytes missing", framer.missing_bytes)
 
             if wrote_audio:
                 return True

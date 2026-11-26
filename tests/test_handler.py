@@ -50,7 +50,7 @@ from wyoming_openai.utilities import (
     downmix_pcm_samples,
     encode_pcm16_samples,
 )
-from wyoming_openai.wav import TtsAudioFormat, WavFramer, WavHeader, parse_wav_header
+from wyoming_openai.wav import WAVE_FORMAT_PCM, TtsAudioFormat, WavFramer, WavHeader, parse_wav_header
 
 
 def _pcm_wav_with_trailing_metadata(pcm: bytes) -> bytes:
@@ -2544,7 +2544,7 @@ class TestOpenAIEventHandlerComprehensive:
         ]
         assert b"".join(event.payload for event in audio_chunk_events) == pcm[:-10]
         assert timestamp == pytest.approx(470 / 2 / 24000 * 1000)
-        assert "ended with 10 declared PCM bytes missing" in caplog.text
+        assert "ended with 10 declared audio bytes missing" in caplog.text
 
     @pytest.mark.asyncio
     async def test_stream_audio_to_wyoming_accepts_unbounded_wav_data(self, enhanced_handler, caplog):
@@ -2553,7 +2553,7 @@ class TestOpenAIEventHandlerComprehensive:
         wav_data = _pcm_wav_with_unbounded_sizes(pcm)
 
         wav_params = parse_wav_header(wav_data)
-        assert wav_params == WavHeader(24000, 1, 2, 44, None)
+        assert wav_params == WavHeader(24000, 1, 2, 44, None, WAVE_FORMAT_PCM)
 
         timestamp = await _play_buffered_sentence(
             enhanced_handler,
@@ -2574,7 +2574,7 @@ class TestOpenAIEventHandlerComprehensive:
         assert b"".join(event.payload for event in audio_chunk_events) == pcm
         assert audio_chunk_events[0].data["timestamp"] == 0
         assert timestamp == pytest.approx(10.0)
-        assert "declared PCM bytes missing" not in caplog.text
+        assert "declared audio bytes missing" not in caplog.text
         assert "ended after" not in caplog.text
 
     @pytest.mark.asyncio
@@ -2739,7 +2739,7 @@ class TestOpenAIEventHandlerComprehensive:
 
     @pytest.mark.asyncio
     async def test_stream_tts_audio_warns_for_truncated_wav(self, enhanced_handler, mock_clients, caplog):
-        """Test incremental WAV conversion reports missing declared PCM bytes."""
+        """Test incremental WAV conversion reports missing declared audio bytes."""
         _, tts_client = mock_clients
         pcm = b"\x00\x01" * 240
         wav_data = _pcm_wav_with_trailing_metadata(pcm)
@@ -2778,7 +2778,7 @@ class TestOpenAIEventHandlerComprehensive:
         ]
         assert b"".join(event.payload for event in audio_chunk_events) == pcm[:-10]
         assert timestamp == pytest.approx(470 / 2 / 24000 * 1000)
-        assert "ended with 10 declared PCM bytes missing" in caplog.text
+        assert "ended with 10 declared audio bytes missing" in caplog.text
 
     @pytest.mark.asyncio
     async def test_stream_tts_audio_accepts_unbounded_wav_data(self, enhanced_handler, mock_clients, caplog):
@@ -2824,7 +2824,7 @@ class TestOpenAIEventHandlerComprehensive:
         assert b"".join(event.payload for event in audio_chunk_events) == pcm
         assert [event.data["timestamp"] for event in audio_chunk_events] == [0, 0]
         assert timestamp == pytest.approx(10.0)
-        assert "declared PCM bytes missing" not in caplog.text
+        assert "declared audio bytes missing" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_handle_streaming_synthesis(self, enhanced_handler, mock_clients):
@@ -7170,3 +7170,24 @@ async def test_a_wav_header_too_long_to_buffer_fails_buffered_or_streamed_alike(
         assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
 
     assert caplog.text.count("has no data chunk in its first 65536 bytes") == 2
+
+
+@pytest.mark.asyncio
+async def test_unplayable_wav_sentence_ends_a_streaming_synthesis(enhanced_handler, mock_info, mock_clients, caplog):
+    """Test a sentence answered in a WAV format the proxy cannot play stops the audio once, after what played."""
+    _, tts_client = mock_clients
+    mock_info.tts[0].supports_synthesize_streaming = True
+    spoken = _pcm_wav_with_unbounded_sizes(b"\x00\x01" * 240)
+    mu_law = wav_file(fmt_chunk_body(7, bits=8), b"\xff" * 240)
+    _mock_speech_response(tts_client, lambda text: [mu_law if text.startswith("Second") else spoken])
+    assert await enhanced_handler.handle_event(SynthesizeStart(voice=SynthesizeVoice(name="alloy")).event())
+
+    with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+        assert not await enhanced_handler._process_ready_sentences(["First one.", "Second one.", "Third one."])
+
+    assert caplog.text.count("TTS backend returned audio that cannot be played: WAV audio format 0x0007 (mu-law)") == 1
+    event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
+    assert event_types == ["audio-start", "audio-chunk", "error", "audio-stop", "synthesize-stopped"]
+    await asyncio.sleep(0)
+    assert not enhanced_handler._synthesis_tasks
+    await enhanced_handler._drain_background_tasks()

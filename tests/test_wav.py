@@ -1,14 +1,17 @@
 import io
+import math
+import random
 import struct
 import wave
 
 import pytest
-from wav_helpers import extensible_fmt_chunk_body, fmt_chunk_body, wav_file
+from wav_helpers import extensible_fmt_chunk_body, fmt_chunk_body, riff_chunk, wav_file
 
 from wyoming_openai.utilities import take_whole_frames
 from wyoming_openai.wav import (
     TTS_WAV_HEADER_MAX_BYTES,
     WAVE_FORMAT_IEEE_FLOAT,
+    WAVE_FORMAT_PCM,
     TtsAudioFormat,
     WavFormatError,
     WavFramer,
@@ -30,13 +33,13 @@ def _wav(pcm: bytes = PCM, rate: int = 16000, channels: int = 1) -> bytes:
 
 
 def test_parse_wav_header_reads_format_offset_and_size():
-    assert parse_wav_header(_wav(rate=22050, channels=2)) == WavHeader(22050, 2, 2, 44, len(PCM))
+    assert parse_wav_header(_wav(rate=22050, channels=2)) == WavHeader(22050, 2, 2, 44, len(PCM), WAVE_FORMAT_PCM)
 
 
 def test_parse_wav_header_reports_an_unbounded_data_size_as_unknown():
     wav = _wav()
     unbounded = wav[:40] + struct.pack("<I", 0xFFFFFFFF) + wav[44:]
-    assert parse_wav_header(unbounded) == WavHeader(16000, 1, 2, 44, None)
+    assert parse_wav_header(unbounded) == WavHeader(16000, 1, 2, 44, None, WAVE_FORMAT_PCM)
 
 
 @pytest.mark.parametrize("data", [b"", b"RIFF", _wav()[:43], b"not a wav file at all" * 4])
@@ -244,7 +247,7 @@ def test_parse_wav_header_reads_extensible_pcm_and_skips_chunks_before_the_data(
     wav = wav_file(extensible_fmt_chunk_body(1, bits=16, channels=2), PCM, chunks=b"LIST\x03\x00\x00\x00abc\x00")
     header = parse_wav_header(wav)
 
-    assert header == WavHeader(24000, 2, 2, len(wav) - len(PCM), len(PCM))
+    assert header == WavHeader(24000, 2, 2, len(wav) - len(PCM), len(PCM), WAVE_FORMAT_PCM)
 
 
 @pytest.mark.parametrize(
@@ -311,3 +314,151 @@ def test_unsupported_format_error_says_how_to_work_around_it():
 
     with pytest.raises(WavFormatError, match=r"""set TTS_EXTRA_BODY='\{"response_format": "pcm"\}'$"""):
         framer.feed(wav_file(fmt_chunk_body(7, bits=8)))
+
+
+def _wave_written(width: int, channels: int, rate: int, frames: int) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(channels)
+        writer.setsampwidth(width)
+        writer.setframerate(rate)
+        writer.writeframes(bytes((i * 37) % 256 for i in range(frames * channels * width)))
+    return buffer.getvalue()
+
+
+def _with_chunks(wav: bytes, before_fmt: bytes = b"", before_data: bytes = b"") -> bytes:
+    """Insert chunks into a file `wave` wrote, whose fmt chunk is the plain 16-byte one."""
+    body = wav[8:12] + before_fmt + wav[12:36] + before_data + wav[36:]
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def _assert_matches_the_wave_module(wav: bytes) -> None:
+    """Check the parser and the framer read the format, data offset, size and audio that `wave` does."""
+    buffer = io.BytesIO(wav)
+    with wave.open(buffer, "rb") as reader:
+        data_offset = buffer.tell()
+        rate, channels, width, frames = (
+            reader.getframerate(),
+            reader.getnchannels(),
+            reader.getsampwidth(),
+            reader.getnframes(),
+        )
+        audio = reader.readframes(frames)
+
+    assert parse_wav_header(wav) == WavHeader(
+        rate, channels, width, data_offset, frames * channels * width, WAVE_FORMAT_PCM
+    )
+    framer = WavFramer(WAV_FORMAT)
+    assert b"".join(framer.feed(wav[i : i + 7]) for i in range(0, len(wav), 7)) + framer.finish() == audio
+    assert (framer.rate, framer.width, framer.channels) == (rate, width, channels)
+    assert framer.missing_bytes == 0
+
+
+WAVE_LAYOUTS = {
+    "plain": lambda wav: wav,
+    "list-before-fmt": lambda wav: _with_chunks(wav, before_fmt=riff_chunk(b"LIST", b"INFOISFTx\x00")),
+    "chunks-before-data": lambda wav: _with_chunks(
+        wav, before_data=riff_chunk(b"fact", struct.pack("<I", 0)) + riff_chunk(b"iXML", b"<a/> ")
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", WAVE_LAYOUTS)
+@pytest.mark.parametrize("frames", [0, 1, 37])
+@pytest.mark.parametrize("rate", [8000, 24000, 48000])
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("width", [1, 2, 3, 4])
+def test_files_the_wave_module_writes_are_read_as_it_reads_them(width, channels, rate, frames, layout):
+    """The parser replaced the stdlib `wave` module, so every integer PCM file `wave` reads must read the same."""
+    _assert_matches_the_wave_module(WAVE_LAYOUTS[layout](_wave_written(width, channels, rate, frames)))
+
+
+@pytest.mark.parametrize(
+    "wav",
+    [
+        wav_file(extensible_fmt_chunk_body(1, bits=16, channels=2), PCM),
+        wav_file(extensible_fmt_chunk_body(1, bits=32, rate=48000), PCM[:480]),
+        wav_file(fmt_chunk_body(1, bits=16, extra=b"\x00\x00"), PCM),
+        wav_file(fmt_chunk_body(1, bits=16), PCM, before_fmt=riff_chunk(b"JUNK", bytes(28))),
+        wav_file(fmt_chunk_body(1, bits=16), PCM[:-1]),
+    ],
+    ids=["extensible-stereo", "extensible-32-bit", "fmt-with-cbsize", "junk-before-fmt", "odd-data-size"],
+)
+def test_other_files_the_wave_module_reads_are_read_as_it_reads_them(wav):
+    _assert_matches_the_wave_module(wav)
+
+
+FLOAT_SAMPLES = [0.25, -0.25, 0.5, -1.0] * 300
+FLOAT_SAMPLES_AS_PCM16 = struct.pack("<4h", 8192, -8192, 16384, -32767) * 300
+PCM24 = bytes((i * 11) % 256 for i in range(6 * 200))
+LAVF_INFO = riff_chunk(b"LIST", b"INFO" + riff_chunk(b"ISFT", b"Lavf61.7.100\x00"))
+UNBOUNDED = 0xFFFFFFFF
+
+# Headers as the backends that write them produce them, each with the audio and format it should play as
+SERVER_RESPONSES = {
+    # FFmpeg writing to a pipe (Speaches, Kokoro-FastAPI through PyAV): placeholder sizes and a LIST chunk
+    "ffmpeg-pipe": (
+        wav_file(fmt_chunk_body(1, bits=16), PCM, LAVF_INFO, riff_size=UNBOUNDED, data_size=UNBOUNDED),
+        PCM,
+        (24000, 2, 1),
+    ),
+    # FFmpeg switches to WAVE_FORMAT_EXTENSIBLE above 16-bit integer samples or 48 kHz
+    "ffmpeg-extensible-24-bit": (
+        wav_file(extensible_fmt_chunk_body(1, bits=24, channels=2, rate=48000), PCM24, LAVF_INFO),
+        PCM24,
+        (48000, 3, 2),
+    ),
+    # Kokoros and Lemonade's fork: float32 with placeholder sizes, even in a complete file
+    "kokoros-float32": (
+        wav_file(
+            fmt_chunk_body(WAVE_FORMAT_IEEE_FLOAT),
+            struct.pack(f"<{len(FLOAT_SAMPLES)}f", *FLOAT_SAMPLES),
+            riff_size=UNBOUNDED,
+            data_size=UNBOUNDED,
+        ),
+        FLOAT_SAMPLES_AS_PCM16,
+        (24000, 2, 1),
+    ),
+    # OpenVINO Model Server up to 2026.4: float32 with real sizes, whatever format was requested
+    "ovms-float32": (
+        wav_file(fmt_chunk_body(WAVE_FORMAT_IEEE_FLOAT), struct.pack(f"<{len(FLOAT_SAMPLES)}f", *FLOAT_SAMPLES)),
+        FLOAT_SAMPLES_AS_PCM16,
+        (24000, 2, 1),
+    ),
+    # chatterbox-tts-api streaming: a RIFF size just short of the signed placeholder, and an unbounded data size
+    "chatterbox-stream": (
+        wav_file(fmt_chunk_body(1, bits=16), PCM, riff_size=0x7FFFFFDB, data_size=UNBOUNDED),
+        PCM,
+        (24000, 2, 1),
+    ),
+}
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 2048])
+@pytest.mark.parametrize("server", SERVER_RESPONSES)
+def test_framer_plays_wav_as_tts_servers_write_it(server, chunk_size):
+    wav, audio, audio_format = SERVER_RESPONSES[server]
+    framer = WavFramer(WAV_FORMAT)
+
+    pcm = b"".join(framer.feed(wav[i : i + chunk_size]) for i in range(0, len(wav), chunk_size)) + framer.finish()
+
+    assert pcm == audio
+    assert (framer.rate, framer.width, framer.channels) == audio_format
+    assert framer.missing_bytes == 0
+    assert not framer.header_missing
+
+
+@pytest.mark.parametrize(("code", "bits"), [("<f", 32), ("<d", 64)], ids=["float32", "float64"])
+def test_float_conversion_clips_and_rounds_every_sample(code, bits):
+    rng = random.Random(72)
+    values = [rng.uniform(-1.5, 1.5) for _ in range(2000)]
+    values += [math.inf, -math.inf, math.nan, 1.0, -1.0, 0.0, -0.0, 5e-324, 1 / 65534, -1 / 65534, 0.99999]
+    data = b"".join(struct.pack(code, x) for x in values)
+    # What the file holds, which for float32 is each value rounded to single precision
+    stored = struct.unpack(f"<{len(values)}{code[1]}", data)
+    expected = [0 if math.isnan(x) else round(32767 * max(-1.0, min(1.0, x))) for x in stored]
+    framer = WavFramer(WAV_FORMAT)
+
+    pcm = framer.feed(wav_file(fmt_chunk_body(WAVE_FORMAT_IEEE_FLOAT, bits=bits), data)) + framer.finish()
+
+    assert list(struct.unpack(f"<{len(values)}h", pcm)) == expected
