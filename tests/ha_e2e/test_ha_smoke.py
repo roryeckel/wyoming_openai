@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -624,6 +625,23 @@ async def _devices_at_once(smoke: Smoke, test: str, proxy: Proxy, commands: tupl
     return await asyncio.wait_for(asyncio.gather(*turns, return_exceptions=True), timeout=300)
 
 
+@contextlib.contextmanager
+def _summary(smoke: Smoke, test: str, proxy: Proxy, notes: dict[str, Any]) -> Iterator[TurnOutcome]:
+    """
+    A summary row for a case, recorded as failed until the checks in the block have all passed, so a case that fails
+    is not reported as a success in the run's summary.
+    """
+
+    outcome = TurnOutcome(test=test, proxy=proxy.name, phrase="(summary)", notes=notes)
+    smoke.outcomes.append(outcome)
+    try:
+        yield outcome
+    except BaseException as exc:
+        outcome.error = repr(exc)
+        raise
+    outcome.passed = True
+
+
 def _raise_first(results: list[Any]) -> None:
     errors = [result for result in results if isinstance(result, BaseException)]
     if errors:
@@ -690,13 +708,13 @@ async def test_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
     results = await _devices_at_once(smoke, "satellites", proxy, SATELLITES)
     turns = [result for result in results if isinstance(result, TurnOutcome)]
     note = {**_timing_notes(turns), "stt_waits_logged": _log_count(proxy, STT_WAIT_LOG) - waits_before}
-    smoke.outcomes.append(TurnOutcome(test="satellites", proxy=proxy.name, phrase="(summary)", passed=True, notes=note))
-    _raise_first(results)
-    if proxy.stt_limit == 0:
-        assert note["stt_waits_logged"] == 0, "a request waited for a slot on a proxy without a limit"
-    elif proxy.lane == "openai" and proxy.stt_limit == 1:
-        # A Realtime session holds its slot from audio-start, and the three start together: two must wait
-        assert note["stt_waits_logged"] >= 1, "no Realtime session waited for the only STT slot"
+    with _summary(smoke, "satellites", proxy, note):
+        _raise_first(results)
+        if proxy.stt_limit == 0:
+            assert note["stt_waits_logged"] == 0, "a request waited for a slot on a proxy without a limit"
+        elif proxy.lane == "openai" and proxy.stt_limit == 1:
+            # A Realtime session holds its slot from audio-start, and the three start together: two must wait
+            assert note["stt_waits_logged"] >= 1, "no Realtime session waited for the only STT slot"
 
 
 @pytest.mark.asyncio
@@ -1038,15 +1056,17 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
         "stop_seconds": None if stop_seconds is None else round(stop_seconds, 2),
         "stt_requests_cancelled_by_stop": _log_count(proxy, STT_CANCEL_LOG) - cancels_before,
     }
-    smoke.outcomes.append(TurnOutcome(test="restart", proxy=proxy.name, phrase="(summary)", passed=True, notes=note))
-    assert exit_code == 0, f"the proxy exited with {exit_code}"
-    assert stop_seconds is not None and stop_seconds < 8, f"stopping the proxy took {stop_seconds}s"
-    not_ended = [result for result in results if not isinstance(result, AssistRunResult)]
-    assert not not_ended, f"a pipeline did not end after the proxy stopped: {not_ended!r}"
-    for result in ended:
-        assert result.events[-1].get("type") == "run-end", f"a pipeline did not reach run-end: {result.events[-1]}"
-    assert by_stop, "no turn failed after the stop began: it did not hit their traffic"
-    assert ha_errors >= 1, f"Home Assistant logged no {HA_SHUTDOWN_LOG!r}: the stop did not answer a turn"
+    with _summary(smoke, "restart", proxy, note):
+        assert exit_code == 0, f"the proxy exited with {exit_code}"
+        assert stop_seconds is not None and stop_seconds < 8, f"stopping the proxy took {stop_seconds}s"
+        not_ended = [result for result in results if not isinstance(result, AssistRunResult)]
+        assert not not_ended, f"a pipeline did not end after the proxy stopped: {not_ended!r}"
+        for result in ended:
+            assert result.events[-1].get("type") == "run-end", (
+                f"a pipeline did not reach run-end: {result.events[-1]}"
+            )
+        assert by_stop, "no turn failed after the stop began: it did not hit their traffic"
+        assert ha_errors >= 1, f"Home Assistant logged no {HA_SHUTDOWN_LOG!r}: the stop did not answer a turn"
 
     await asyncio.to_thread(_prepare, smoke, SATELLITES[:1])
     await _device_turn(smoke, "after-restart", proxy, SATELLITES[0], VOICES[3])
@@ -1067,10 +1087,10 @@ async def test_eight_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
         "stt_waits_logged": _log_count(proxy, STT_WAIT_LOG) - waits_before,
         "slow_client_failures": _log_count(proxy, SLOW_CLIENT_LOG) - slow_before,
     }
-    smoke.outcomes.append(TurnOutcome(test="eight", proxy=proxy.name, phrase="(summary)", passed=True, notes=note))
-    _raise_first(results)
-    assert note["slow_client_failures"] == 0, "a Home Assistant connection met the client write limit"
-    if proxy.stt_limit == 0:
-        assert note["stt_waits_logged"] == 0, "a request waited for a slot on a proxy without a limit"
-    elif proxy.stt_limit == 1:
-        assert note["stt_waits_logged"] >= 1, "none of eight transcriptions at once waited for the only STT slot"
+    with _summary(smoke, "eight", proxy, note):
+        _raise_first(results)
+        assert note["slow_client_failures"] == 0, "a Home Assistant connection met the client write limit"
+        if proxy.stt_limit == 0:
+            assert note["stt_waits_logged"] == 0, "a request waited for a slot on a proxy without a limit"
+        elif proxy.stt_limit == 1:
+            assert note["stt_waits_logged"] >= 1, "none of eight transcriptions at once waited for the only STT slot"
