@@ -707,6 +707,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                 audio_channels,
                 audio_width,
             )
+        except asyncio.CancelledError:
+            # Cancelled while it opened, by stop() or with the handler: what it opened is closed here, so neither
+            # the session nor its slot outlives it, even if stop() is itself cancelled before it cleans up
+            await self._cleanup_realtime_transcription()
+            raise
         except Exception as err:
             # A server error may arrive before session.update fails on the closed socket. Preserve that cause
             # before cleanup discards the future; exception() still includes the startup exception's traceback.
@@ -1004,13 +1009,18 @@ class OpenAIEventHandler(AsyncEventHandler):
             raise asyncio.CancelledError
 
     async def _fail_stt_request(self) -> None:
-        """Report an STT request that ended cancelled although nobody cancelled it, as other failed requests are."""
-        self._is_recording = False
-        if self._audio_stream is not None:
-            # A Realtime session that did not open: its audio is dropped, and its audio-stop closes the connection
-            self._audio_stream.failed = True
+        """
+        Report an STT request that ended cancelled although nobody cancelled it, as other failed requests are, unless
+        it had already answered. The session is closed first, so no late delta follows the error; the failure is then
+        marked and its error queued with no await between, so stop() either sees it or answers in its place.
+        """
         await self._cleanup_realtime_transcription()
-        await self._report_stt_failure()
+        audio_stream = self._audio_stream
+        if audio_stream is not None and not audio_stream.failed:
+            # A Realtime session that did not open: its audio is dropped, and its audio-stop closes the connection
+            await self._fail_realtime_audio_stream(audio_stream)
+        elif self._stt_answer_owed:
+            await self._report_stt_failure()
 
     async def _cancel_stt_request(self) -> None:
         """
@@ -1165,8 +1175,11 @@ class OpenAIEventHandler(AsyncEventHandler):
                     # Closed however it ends, as when stop() cancels the request, so the response does not stay open
                     # after its slot is released
                     async with transcription:
+                        # Reading the response is backend work too, so none of it starts once stop() has begun
+                        self._check_stt_not_stopping()
                         await self.write_event(TranscriptStart().event())
                         async for chunk in transcription:
+                            self._check_stt_not_stopping()
                             if chunk.type == "transcript.text.delta":
                                 if chunk.delta:
                                     full_text += chunk.delta
