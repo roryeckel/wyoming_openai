@@ -484,11 +484,13 @@ class _FakeClient:
 
 
 class _CapturingServer:
-    def __init__(self):
+    def __init__(self, connections=1):
         self.handlers = []
+        self.connections = connections
 
     async def run(self, handler_factory):
-        self.handlers.append(handler_factory(Mock(name="reader"), Mock(name="writer")))
+        for _ in range(self.connections):
+            self.handlers.append(handler_factory(Mock(name="reader"), Mock(name="writer")))
 
 
 @pytest.mark.asyncio
@@ -1215,6 +1217,34 @@ async def test_main_cli_stt_concurrent_requests_zero_overrides_env_limit(monkeyp
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--stt-concurrent-requests", "0")
 
     assert handler_kwargs["stt_limit"].limit == 0
+
+
+@pytest.mark.asyncio
+async def test_main_gives_every_connection_the_same_stt_limit(monkeypatch):
+    """The handler factory hands each connection's handler the one server-wide limit, not a copy of its own."""
+    server = _CapturingServer(connections=2)
+
+    async def fake_factory(*args, **kwargs):
+        return _FakeClient()
+
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI,
+        "create_autodetected_factory",
+        staticmethod(lambda: fake_factory),
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    for env_var in ("TTS_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES", "STT_CONCURRENT_REQUESTS"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1", "--stt-concurrent-requests", "1"]
+    )
+
+    await main()
+
+    first, second = server.handlers
+    assert first._stt_limit is second._stt_limit
+    assert first._stt_limit.limit == 1
 
 
 @pytest.mark.asyncio

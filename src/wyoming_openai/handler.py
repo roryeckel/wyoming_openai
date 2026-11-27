@@ -304,6 +304,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._audio_stream: _AudioStreamState | None = None  # Between audio-start and audio-stop
         self._shutdown_reported = False  # stop() told the client its transcription was cut short
         self._stopping = False  # stop() was called; STT events are ignored from then on
+        self._stopped = asyncio.Event()  # The first stop() has finished, which a repeated one waits for
         self._stt_request: asyncio.Task[Any] | None = None  # The backend part of an STT request, which stop() cancels
         self._stt_answer_owed = False  # An audio-stop has not queued its transcript or error yet
 
@@ -414,20 +415,32 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
+        if self._stopping:
+            # A repeated stop(), as for a second SIGTERM, waits for the first instead of cancelling its work again
+            await self._stopped.wait()
+            return
         # Set before the first await, so no STT request starts from here on
         self._stopping = True
         try:
+            await self._shut_down()
+        finally:
+            self._stopped.set()
+
+    async def _shut_down(self) -> None:
+        """The work of stop(), done once."""
+        try:
+            # The STT request in flight is cancelled and the Realtime receiver stopped first, so no request is
+            # admitted while the synthesis stops, and nothing of a request is written after the shutdown error. A
+            # request that queued its answer before stands
+            await self._cancel_stt_request()
+            await self._cleanup_realtime_transcription()
             # The client is still connected, so it is told about a synthesis or a transcription cut short before the
             # writer is closed: a stream being recorded, or an audio-stop that has not queued its transcript or error.
             # Once it has, the client has its response, and a shutdown error would be a second one
             await self._stop_sentence_playback(SHUTDOWN_ERROR if self._is_synthesis_in_flight() else None)
-            # The STT request in flight is cancelled, and the Realtime receiver stopped, before the decision, so
-            # nothing of the request is written after the error. A request that queued its answer meanwhile stands
-            await self._cancel_stt_request()
-            await self._cleanup_realtime_transcription()
+            # Decided after the last await, so a stream that reported its own failure meanwhile gets no second error
             recording = self._audio_stream is not None and not self._audio_stream.failed
-            # Sent once, also when stop() is called again while the first error is still being written
-            if not self._shutdown_reported and (recording or self._stt_answer_owed):
+            if recording or self._stt_answer_owed:
                 self._shutdown_reported = True
                 await self._write_event_bounded(Error(text=SHUTDOWN_ERROR).event())
         finally:
@@ -752,11 +765,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         connection = self._realtime_connection
         if not self._is_recording or connection is None:
             _LOGGER.warning("Received realtime audio stop event without recording")
+            # Nothing is sent, so nothing is owed
+            self._stt_answer_owed = False
             await self._cleanup_realtime_transcription()
             return True
 
         self._is_recording = False
-        self._stt_answer_owed = True
         # Captured before the flush append awaits, since stop() can clear the handler's attributes meanwhile
         transcript_future = self._realtime_transcript_future
 
@@ -944,14 +958,17 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._stt_request = None
 
     async def _cancel_stt_request(self) -> None:
-        """Cancel the STT request in flight, if any, and wait for it to end, as stop() does before it answers."""
+        """
+        Cancel the STT request in flight, if any, and wait for it to end, as stop() does before it answers. As for
+        the synthesis requests stop() cancels, the wait has no time limit: a request that ended can write nothing
+        after the shutdown error, and a cancelled one ends once its cleanup has run.
+        """
         task = self._stt_request
         if task is None or task.done():
             return
         _LOGGER.info("Cancelling the STT request in flight: the server is shutting down")
         task.cancel()
-        # Bounded like the drain of background cleanup, so a request that does not end cannot hold up shutdown
-        await asyncio.wait([task], timeout=SHUTDOWN_DRAIN_TIMEOUT)
+        await asyncio.wait([task])
 
     async def _write_transcript(self, text: str) -> None:
         """Write the transcript of an audio-stop, which is its answer as soon as it is queued."""
@@ -960,40 +977,49 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task, and release the STT slot the session held."""
-        if (slot := self._realtime_stt_slot) is not None:
+        # Detached before the first await, so a cleanup that overlaps this one finds nothing left to close or release
+        slot, self._realtime_stt_slot = self._realtime_stt_slot, None
+        receive_task, self._realtime_receive_task = self._realtime_receive_task, None
+        transcript_future, self._realtime_transcript_future = self._realtime_transcript_future, None
+        connection_manager, self._realtime_connection_manager = self._realtime_connection_manager, None
+        connection, self._realtime_connection = self._realtime_connection, None
+
+        if slot is not None:
             # The session has ended. As for Realtime TTS, the limit counts requests rather than sockets, so the next
             # session may open while this one's closing handshake is still running
-            self._realtime_stt_slot = None
             slot.release()
 
-        receive_task = self._realtime_receive_task
-        self._realtime_receive_task = None
-        if receive_task and not receive_task.done():
-            receive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await receive_task
+        try:
+            if receive_task and not receive_task.done():
+                # Stopped before the session closes, and before this returns, so no late delta follows what the
+                # caller writes next
+                receive_task.cancel()
+                try:
+                    await receive_task
+                except asyncio.CancelledError:
+                    # The receiver ends cancelled. A cancellation of the task cleaning up, as at Ctrl+C or when stop()
+                    # cancels the request, goes on once the session is closed below
+                    if (current_task := asyncio.current_task()) is not None and current_task.cancelling():
+                        raise
+        finally:
+            if transcript_future is not None:
+                if not transcript_future.done():
+                    # Failed rather than cancelled, so an audio-stop waiting on it ends through the failure path and is
+                    # logged, instead of ending as a cancelled task
+                    transcript_future.set_exception(
+                        RealtimeTranscriptionError("Realtime transcription session was closed")
+                    )
+                if not transcript_future.cancelled():
+                    # Read, so the failure of a stream that is dropped is not logged later as never retrieved
+                    transcript_future.exception()
 
-        transcript_future = self._realtime_transcript_future
-        self._realtime_transcript_future = None
-        if transcript_future is not None:
-            if not transcript_future.done():
-                # Failed rather than cancelled, so an audio-stop waiting on it, as when stop() interrupts one, ends
-                # through the failure path and is logged, instead of ending as a cancelled task
-                transcript_future.set_exception(RealtimeTranscriptionError("Realtime transcription session was closed"))
-            if not transcript_future.cancelled():
-                # Read, so the failure of a stream that is dropped is not logged later as never retrieved
-                transcript_future.exception()
-
-        connection_manager = self._realtime_connection_manager
-        connection = self._realtime_connection
-        self._realtime_connection_manager = None
-        self._realtime_connection = None
-
-        # As with Realtime TTS, the closing handshake must not hold up the Wyoming client
-        if connection_manager is not None:
-            self._run_in_background(connection_manager.__aexit__(None, None, None), name="openai_realtime_stt_close")
-        elif connection is not None:
-            self._run_in_background(connection.close(), name="openai_realtime_stt_close")
+            # As with Realtime TTS, the closing handshake must not hold up the Wyoming client
+            if connection_manager is not None:
+                self._run_in_background(
+                    connection_manager.__aexit__(None, None, None), name="openai_realtime_stt_close"
+                )
+            elif connection is not None:
+                self._run_in_background(connection.close(), name="openai_realtime_stt_close")
 
     async def _handle_audio_stop(self) -> bool:
         """Handle end of audio stream and perform transcription. Returns False to close a connection it failed on."""
@@ -1006,23 +1032,27 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Its error was sent when it failed; closing the connection ends the request for clients that ignore it
             return False
 
+        # Owed a transcript or an error until one is queued. Marked before the request is scheduled, so stop() also
+        # answers one it cancels before it has started
+        self._stt_answer_owed = True
         if audio_stream.realtime:
             request = self._handle_realtime_audio_stop(audio_stream)
         else:
             request = self._handle_http_audio_stop(audio_stream)
-        # None when stop() cancelled the request: it answers the client, and the connection closes
         result = await self._run_stt_request(request)
-        return result if result is not None else False
+        # None when stop() cancelled the request. The connection stays open for stop(), which answers the client
+        # and then closes it
+        return True if result is None else result
 
     async def _handle_http_audio_stop(self, audio_stream: _AudioStreamState) -> bool:
         """Send a /v1/audio/transcriptions recording and emit its transcription. Returns False to close on failure."""
         if not self._is_recording or not self._wav_buffer:
             _LOGGER.warning("Received audio stop event without recording")
+            # Nothing is sent, so nothing is owed
+            self._stt_answer_owed = False
             return True
 
         self._is_recording = False
-        # Owed a transcript or an error until one is queued; stop() answers a request it cancels before that
-        self._stt_answer_owed = True
 
         transcript_sent = False
         try:
