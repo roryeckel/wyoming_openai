@@ -15,10 +15,10 @@ services:
       # Qwen3-ASR takes the prompt as context, with far more room than Whisper's 223 tokens, so the names
       # from Home Assistant or transcribe can have more of it (0 sends every name)
       STT_PROMPT_MAX_TOKENS: "1000"
-      # STT_HASS_TOKEN: "your_home_assistant_long_lived_access_token"
-      # STT_HASS_URL: "http://homeassistant.local:8123"
       # Qwen3-ASR doesn't provide TTS capabilities, only transcription
       # You can combine this with other services for TTS if needed
+    env_file:
+      - .env
     depends_on:
       vllm:
         condition: service_healthy

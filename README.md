@@ -425,6 +425,8 @@ For users who want local speech recognition from a model built on a language mod
 
 - **Docker Compose Configuration**: Use the `docker-compose.qwen3-asr.yml` template which includes configuration for both the Wyoming OpenAI proxy and the vLLM service.
 
+- **Environment Variables**: Create a `.env` file; vLLM needs no API key. To bias transcription toward your Home Assistant names, set `STT_HASS_TOKEN` and `STT_HASS_URL` in it, as in `.env.example`.
+
 - **Command**:
 
   ```bash
