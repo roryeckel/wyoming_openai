@@ -1585,14 +1585,29 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._track_task(coro, name=name, tasks=self._background_tasks, log_failure=True)
 
     async def _drain_background_tasks(self, timeout: float | None = None) -> None:
-        """Wait for pending background cleanup; what a timeout leaves unfinished is cancelled."""
+        """
+        Wait for pending background cleanup. What a timeout leaves unfinished is cancelled and given as long again to
+        end, so a close that ignores its cancellation cannot hold up shutdown; what still runs then is left to the
+        event loop. A drain that is itself cancelled cancels what it was waiting for, which is not left without one.
+        """
         if not self._background_tasks:
             return
-        _, pending = await asyncio.wait(self._background_tasks, timeout=timeout)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        tasks = set(self._background_tasks)
+        try:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            if pending:
+                _, pending = await asyncio.wait(pending, timeout=timeout)
+                if pending:
+                    _LOGGER.warning(
+                        "%d background cleanup task(s) did not end once cancelled; leaving them to the event loop",
+                        len(pending),
+                    )
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            raise
 
     async def _close_writer(self) -> None:
         """

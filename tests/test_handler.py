@@ -6696,6 +6696,98 @@ async def test_cancelled_stop_and_disconnect_leave_no_realtime_session_behind(
 
 
 @pytest.mark.asyncio
+async def test_background_drain_is_bounded_when_a_close_ignores_its_cancellation(enhanced_handler, caplog):
+    """A cleanup task that catches its cancellation and keeps going cannot hold a bounded drain up past its limit."""
+    handler = enhanced_handler
+    loop = asyncio.get_running_loop()
+    may_end = asyncio.Event()
+    # Ends on its own after a while, so a drain that waits for it unbounded makes this test fail rather than hang
+    loop.call_later(0.5, may_end.set)
+
+    async def stubborn_close():
+        while not may_end.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await may_end.wait()
+
+    handler._run_in_background(stubborn_close(), name="stubborn_close")
+    try:
+        started = loop.time()
+        with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+            await handler._drain_background_tasks(0.01)
+        assert loop.time() - started < 0.3
+        assert "did not end once cancelled" in caplog.text
+    finally:
+        await asyncio.wait_for(handler._drain_background_tasks(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_background_drain_cancels_what_it_waited_for(enhanced_handler):
+    """A drain that is itself cancelled cancels the cleanup it was waiting for instead of leaving it to nobody."""
+    handler = enhanced_handler
+    close_cancelled = asyncio.Event()
+
+    async def slow_close():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            close_cancelled.set()
+            raise
+
+    handler._run_in_background(slow_close(), name="slow_close")
+    draining = asyncio.create_task(handler._drain_background_tasks())
+    await _settle()
+    draining.cancel()
+    await asyncio.gather(draining, return_exceptions=True)
+    await _settle()
+
+    assert close_cancelled.is_set()
+    assert not handler._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancelled_twice_leaves_no_websocket_close_behind(enhanced_handler, mock_info, mock_clients):
+    """
+    A disconnect() cancelled again while it waits for the websocket close its cleanup started cancels that close
+    rather than leaving it to nobody.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    # A closing handshake that never finishes on its own
+    manager = _GatedCloseManager(_FakeRealtimeConnection([]), asyncio.Event())
+    stt_client.realtime.connect = Mock(return_value=manager)
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    client_closed = asyncio.Event()
+
+    async def wait_closed():
+        await client_closed.wait()
+
+    handler.writer.wait_closed = AsyncMock(side_effect=wait_closed)
+
+    await handler.handle_event(REALTIME_AUDIO_START)
+    # As in the test above: stop() is cancelled before it closes the session, and disconnect() while it waits
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    stopping = asyncio.create_task(handler.stop())
+    await asyncio.sleep(0)
+    stopping.cancel()
+    assert await asyncio.wait_for(audio_stop, timeout=1) is False
+    await _settle()
+    disconnecting = asyncio.create_task(handler.disconnect())
+    await _settle()
+    disconnecting.cancel()
+    await _settle()
+    assert not disconnecting.done()  # Waiting for the held websocket close
+
+    disconnecting.cancel()
+    await asyncio.gather(disconnecting, return_exceptions=True)
+    await _settle()
+
+    assert not handler._background_tasks
+    assert not limit.full
+    client_closed.set()
+    await asyncio.gather(stopping, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_no_read_of_a_streamed_response_starts_after_a_transcript_start_that_outlived_the_shutdown(
     enhanced_handler, mock_clients
 ):
