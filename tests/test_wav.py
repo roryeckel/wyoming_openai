@@ -351,6 +351,15 @@ def test_unsupported_format_error_offers_no_workaround_when_raw_pcm_was_already_
     with pytest.raises(WavFormatError, match=r"format 0x0007 \(mu-law\) is not supported") as error:
         framer.feed(wav_file(fmt_chunk_body(7, bits=8)))
     assert "TTS_EXTRA_BODY" not in str(error.value)
+    assert str(error.value).endswith("; the backend returned WAV although raw PCM was requested")
+
+
+def test_truncated_wav_error_says_raw_pcm_was_requested():
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+
+    assert framer.feed(_wav()[:30]) == b""
+    with pytest.raises(WavFormatError, match="malformed; the backend returned WAV although raw PCM was requested$"):
+        framer.finish()
 
 
 def _wave_written(width: int, channels: int, rate: int, frames: int) -> bytes:

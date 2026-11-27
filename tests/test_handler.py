@@ -7157,6 +7157,27 @@ async def test_buffered_float_wav_sentence_is_played_as_pcm16(enhanced_handler):
 
 
 @pytest.mark.asyncio
+async def test_container_warning_is_logged_when_the_response_then_fails(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test a response played as raw PCM still says so when it fails midway, since that may explain the static."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+
+    async def respond(text):
+        # MP3 frames without an ID3 tag, which cannot be told from raw PCM
+        yield b"\xff\xfb\x90\x64" * 512
+        raise RuntimeError("read timed out")
+
+    _mock_speech_response(tts_client, respond)
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
+
+    assert "Error streaming TTS audio: read timed out" in caplog.text
+    assert caplog.text.count("TTS response is not a WAV file; playing it as raw PCM") == 1
+
+
+@pytest.mark.asyncio
 async def test_long_metadata_before_the_audio_plays_buffered_or_streamed_alike(
     enhanced_handler, mock_info, mock_clients
 ):

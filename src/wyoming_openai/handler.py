@@ -2243,8 +2243,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             bool: True if the audio was played or skipped, False on error. A stream left open by a failure
                 or a cancellation is closed by `_stop_sentence_playback`, not here.
         """
+        framer = WavFramer(audio_format)
         try:
-            framer = WavFramer(audio_format)
             wrote_audio = False
 
             async def write_audio(audio_data: bytes) -> None:
@@ -2266,8 +2266,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                         await write_audio(audio_data)
 
             held_audio = framer.finish()
-            # Once the response has ended, by when its first bytes have shown what it is
-            self._report_tts_container(framer)
             if held_audio:
                 await write_audio(held_audio)
 
@@ -2297,6 +2295,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
             return False
+        finally:
+            # Also when the response failed or was cancelled midway: a response played as raw PCM that then
+            # failed still needs its warning, which may be the only clue to why it sounded like static
+            self._report_tts_container(framer)
 
     def _report_tts_container(self, framer: WavFramer) -> None:
         """Warn, once per synthesis, about a response that is not in the container that was requested."""

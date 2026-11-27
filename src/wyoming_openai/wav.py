@@ -82,7 +82,7 @@ class WavHeader(NamedTuple):
     channels: int
     width: int  # Bytes per sample in the file, before any conversion
     data_offset: int
-    data_size: int | None  # Whole frames the data chunk declares; None when it uses the unbounded-size sentinel
+    data_size: int | None  # Bytes the data chunk declares, rounded down to whole frames; None when unbounded
     sample_format: int  # WAVE_FORMAT_PCM or WAVE_FORMAT_IEEE_FLOAT, after unwrapping EXTENSIBLE
 
 
@@ -289,9 +289,9 @@ class WavFramer:
 
         try:
             header = self._header.feed(chunk)
-        except UnsupportedWavFormatError as e:
-            if self._expects_wav:
-                raise UnsupportedWavFormatError(f"{e}{_UNSUPPORTED_FORMAT_HINT}") from e
+        except WavFormatError as e:
+            if note := self._error_note(unsupported_format=isinstance(e, UnsupportedWavFormatError)):
+                raise type(e)(f"{e}{note}") from e
             raise
         if header is None:
             return b""
@@ -345,13 +345,20 @@ class WavFramer:
         if self._header is not None:
             raise WavFormatError(
                 f"TTS response ended after {self._header.received} bytes, before its WAV header reached the audio; "
-                "the header is truncated or malformed"
+                f"the header is truncated or malformed{self._error_note()}"
             )
         audio = self._release_pending()
         if self._partial:
             _LOGGER.debug("Dropping %d bytes that end the audio in the middle of a frame", len(self._partial))
             self._partial = b""
         return audio
+
+    def _error_note(self, *, unsupported_format: bool = False) -> str:
+        """What to add to an error about a WAV response, given what was requested."""
+        if not self._expects_wav:
+            # The backend ignores response_format, so asking for raw PCM is not a way around the error
+            return "; the backend returned WAV although raw PCM was requested"
+        return _UNSUPPORTED_FORMAT_HINT if unsupported_format else ""
 
     def _release_pending(self) -> bytes:
         """Give up on a WAV header and release the bytes held for it as raw PCM."""
