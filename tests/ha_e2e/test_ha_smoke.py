@@ -577,6 +577,7 @@ async def _device_turn(
             conversation_id=conversation_id,
             event_timeout=120,
             tts_timeout=120,
+            stop_fetch_on_error=True,
         )
         outcome.total_seconds = time.monotonic() - started
         outcome.stt_seconds = _stage_seconds(result, "stt-start", "stt-end")
@@ -665,7 +666,9 @@ async def test_streamed_llm_style_reply(smoke: Smoke, proxy: Proxy) -> None:
     audio = await asyncio.to_thread(smoke.audio, outcome.phrase, VOICES[1])
     started = time.monotonic()
     try:
-        result = await run_assist(smoke.settings, smoke.stack, smoke.scripted[proxy.name], audio, tts_timeout=300)
+        result = await run_assist(
+            smoke.settings, smoke.stack, smoke.scripted[proxy.name], audio, tts_timeout=300, stop_fetch_on_error=True
+        )
         outcome.total_seconds = time.monotonic() - started
         outcome.stt_seconds = _stage_seconds(result, "stt-start", "stt-end")
         outcome.first_audio_seconds = _first_audio_seconds(result)

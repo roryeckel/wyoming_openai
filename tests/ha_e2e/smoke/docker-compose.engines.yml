@@ -47,6 +47,8 @@ services:
     volumes:
       - localai-models:/models
       - localai-config:/config
+      # The backends init-localai installs, kept between runs
+      - localai-backends:/backends
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 10s
@@ -54,9 +56,15 @@ services:
       retries: 30
       start_period: 60s
 
-  # One-shot: installs the models localai.env uses, following each install job to its end, so a failed download
-  # fails it at once, then checks LocalAI lists them by their config names. Run it with:
+  # One-shot: installs what localai.env needs, following each install job to its end, so a failed download fails it
+  # at once, then checks LocalAI lists the models by their config names:
+  # - the whisper and piper backends, which current LocalAI images do not ship;
+  # - the models, from LocalAI's gallery;
+  # - the voices' configs pointed at cpu-piper: on the NVIDIA image, LocalAI maps the piper backend the gallery
+  #   names to an empty path ("received empty target"), and LocalAI reads the edited configs only after a restart.
+  # Run it, then restart LocalAI:
   #   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile localai run --rm init-localai
+  #   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile localai restart localai
   init-localai:
     profiles: [localai]
     image: alpine:latest
@@ -64,7 +72,10 @@ services:
     restart: "no"
     environment:
       LOCALAI_URL: http://localai:8080
+      BACKENDS: whisper piper
       MODELS: whisper-base voice-en-us-amy-low voice-en-us-ryan-medium
+    volumes:
+      - localai-models:/models
     depends_on:
       localai:
         condition: service_healthy
@@ -73,26 +84,34 @@ services:
       - -c
       - |
         apk add --no-cache curl jq > /dev/null
-        for model in $$MODELS; do
-          uuid=$$(curl -sf "$$LOCALAI_URL/models/apply" -H "Content-Type: application/json" \
-            -d "{\"id\": \"localai@$$model\"}" | jq -r '.uuid // empty')
-          [ -n "$$uuid" ] || { echo "LocalAI did not start installing $$model"; exit 1; }
+        # install <kind> <name>: start the install and follow its job to the end
+        install() {
+          id=$$(curl -sf "$$LOCALAI_URL/$$1/apply" -H "Content-Type: application/json" \
+            -d "{\"id\": \"$$2\"}" | jq -r '.id // .uuid // empty')
+          [ -n "$$id" ] || { echo "LocalAI did not start installing $$2"; exit 1; }
           processed=false
           for attempt in $$(seq 180); do
-            job=$$(curl -sf "$$LOCALAI_URL/models/jobs/$$uuid")
+            job=$$(curl -sf "$$LOCALAI_URL/$$1/jobs/$$id")
             processed=$$(echo "$$job" | jq -r '.processed')
             [ "$$processed" = true ] && break
             sleep 5
           done
           error=$$(echo "$$job" | jq -r '.error // empty')
-          [ "$$processed" = true ] && [ -z "$$error" ] || { echo "$$model: $${error:-not installed in 15 minutes}"; exit 1; }
-          echo "installed $$model"
+          [ "$$processed" = true ] && [ -z "$$error" ] || { echo "$$2: $${error:-not installed in 15 minutes}"; exit 1; }
+          echo "installed $$2"
+        }
+        for backend in $$BACKENDS; do install backends "$$backend"; done
+        for model in $$MODELS; do install models "localai@$$model"; done
+        sed -i 's/^backend: piper$$/backend: cpu-piper/' /models/voice-en-us-*.yaml
+        for model in $$MODELS; do
+          case "$$model" in voice-*) ;; *) continue ;; esac
+          grep -qx 'backend: cpu-piper' "/models/$$model.yaml" || { echo "$$model: backend not set to cpu-piper"; exit 1; }
         done
         listed=$$(curl -sf "$$LOCALAI_URL/v1/models" | jq -r '.data[].id')
         for model in $$MODELS; do
           echo "$$listed" | grep -qx "$$model" || { echo "LocalAI does not list $$model"; exit 1; }
         done
-        echo "LocalAI lists every model"
+        echo "LocalAI lists every model; restart it to load the voices' configs"
 
   openai-edge-tts:
     profiles: [openai-edge-tts]
@@ -147,4 +166,5 @@ networks:
 volumes:
   localai-models:
   localai-config:
+  localai-backends:
   chatterbox-models:

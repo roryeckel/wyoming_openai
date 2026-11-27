@@ -140,13 +140,16 @@ async def run_assist(
     allow_tts_error: bool = False,
     stop_after_tts_bytes: int | None = None,
     on_tts_bytes: Callable[[TtsProgress], Awaitable[None]] | None = None,
+    stop_fetch_on_error: bool = False,
 ) -> AssistRunResult:
     """Run one Assist pipeline turn and collect every event.
 
     The TTS URL is available in the run-start event, before the pipeline's tts
     stage finishes.  Fetching it immediately makes the measured time to first
     audio real, and lets the failure lane stop the proxy while audio is still
-    streaming.
+    streaming.  With ``stop_fetch_on_error``, a run that reported an error does
+    not wait for its TTS audio: Home Assistant keeps the URL open for audio
+    that will not come, until ``tts_timeout``.
     """
 
     run_started_at = time.monotonic()
@@ -251,7 +254,14 @@ async def run_assist(
                 # HA emits run-end before the TTS URL has finished streaming.
                 # Keep the stop watcher alive while the audio download completes,
                 # then wait for any callback it started.
-                if fetch_task is not None and progress is not None:
+                if stop_fetch_on_error and any(event.get("type") == "error" for event in events):
+                    for task in (watcher_task, fetch_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        *(task for task in (watcher_task, fetch_task) if task is not None), return_exceptions=True
+                    )
+                elif fetch_task is not None and progress is not None:
                     fetch_timed_out = False
                     try:
                         await asyncio.wait_for(fetch_task, timeout=tts_timeout)
@@ -376,7 +386,12 @@ async def run_assist_text(
                     elif event.get("type") == "run-end":
                         break
                 if fetch_task is not None:
-                    await asyncio.wait_for(fetch_task, timeout=tts_timeout)
+                    if any(event.get("type") == "error" for event in events):
+                        # The run failed: its TTS audio will not come, so the fetch is not waited for
+                        fetch_task.cancel()
+                        await asyncio.gather(fetch_task, return_exceptions=True)
+                    else:
+                        await asyncio.wait_for(fetch_task, timeout=tts_timeout)
             finally:
                 if fetch_task is not None and not fetch_task.done():
                     fetch_task.cancel()
