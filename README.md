@@ -252,6 +252,8 @@ python -m wyoming_openai \
 
 You can deploy the Wyoming OpenAI proxy server in different environments depending on whether you are using official OpenAI services or a local alternative like Speaches. You can even run multiple wyoming_openai instances on different ports for different purposes. Below are example scenarios:
 
+Every example reads a `.env` file next to its compose file into the proxy, so create one before starting, even an empty one. It holds API keys and optional settings such as the [Home Assistant names](#biasing-speech-recognition-toward-names); `.env.example` lists them.
+
 #### 1. Deploying with Official OpenAI Services
 
 To set up the Wyoming OpenAI proxy to work with official OpenAI APIs, follow these steps:
@@ -425,7 +427,7 @@ For users who want local speech recognition from a model built on a language mod
 
 - **Docker Compose Configuration**: Use the `docker-compose.qwen3-asr.yml` template which includes configuration for both the Wyoming OpenAI proxy and the vLLM service.
 
-- **Environment Variables**: Create a `.env` file; vLLM needs no API key. To bias transcription toward your Home Assistant names, set `STT_HASS_TOKEN` and `STT_HASS_URL` in it, as in `.env.example`.
+- **Environment Variables**: vLLM needs no API key, so `.env` can stay empty. To bias transcription toward your Home Assistant names, set `STT_HASS_TOKEN` and `STT_HASS_URL` in it, as in `.env.example`.
 
 - **Command**:
 
@@ -523,7 +525,7 @@ The names are sent to your STT provider with every transcription, including any 
 To use the Home Assistant names:
 
 1. In Home Assistant, open your user profile, go to **Security**, and create a **long-lived access token**. The user must be an administrator, since Home Assistant only lists the exposed entities to administrators.
-2. Set `STT_HASS_TOKEN` and `STT_HASS_URL`, the URL of your Home Assistant, such as `http://homeassistant.local:8123`. A URL ending in `/api`, as wyoming-faster-whisper's `--hass-api` takes, works too. The connection does not go through a proxy set in `HTTP_PROXY` or `HTTPS_PROXY`.
+2. Set `STT_HASS_TOKEN` and `STT_HASS_URL`, the URL of your Home Assistant, such as `http://homeassistant.local:8123`; with the Docker Compose examples, set them in `.env`. A URL ending in `/api`, as wyoming-faster-whisper's `--hass-api` takes, works too. The connection does not go through a proxy set in `HTTP_PROXY` or `HTTPS_PROXY`.
 
 Only entities exposed to Assist (**Settings** > **Voice assistants** > **Expose**) are used, with their aliases, plus the names and aliases of areas and floors, in this order:
 
