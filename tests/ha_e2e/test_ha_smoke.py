@@ -956,16 +956,16 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
         assert _log_count(proxy, IDLE_LOG) == idle_before, "the silent client was failed before the satellite spoke"
         waits_before = _log_count(proxy, STT_WAIT_LOG)
         freed = asyncio.create_task(_when_logged(proxy, IDLE_LOG, idle_before, 30))
-        outcome = await _device_turn(smoke, "silent-client", proxy, CONVERSATION[0], VOICES[2])
-        await freed  # The idle failure has been logged
-        # In one snapshot of the log, the satellite's session waited for the slot before the idle limit freed it
-        lines = container_logs(proxy.container).splitlines()
-        waited_line = _nth_line(lines, lambda line: STT_WAIT_LOG in line, waits_before + 1)
-        freed_line = _nth_line(lines, lambda line: IDLE_LOG in line, idle_before + 1)
-        assert waited_line is not None and freed_line is not None, "the proxy's log misses a line"
-        assert waited_line < freed_line, "the satellite's session did not wait for the slot the silent client held"
-        logs = container_logs(proxy.container)
-        outcome.notes["log"] = next(line for line in logs.splitlines()[::-1] if IDLE_LOG in line)[-120:]
+        with _summary(smoke, "silent-client", proxy, {}) as summary:
+            await _device_turn(smoke, "silent-client", proxy, CONVERSATION[0], VOICES[2])
+            await freed  # The idle failure has been logged
+            # In one snapshot of the log, the satellite's session waited for the slot before the idle limit freed it
+            lines = container_logs(proxy.container).splitlines()
+            waited_line = _nth_line(lines, lambda line: STT_WAIT_LOG in line, waits_before + 1)
+            freed_line = _nth_line(lines, lambda line: IDLE_LOG in line, idle_before + 1)
+            assert waited_line is not None and freed_line is not None, "the proxy's log misses a line"
+            assert waited_line < freed_line, "the satellite's session did not wait for the slot the silent client held"
+            summary.notes["log"] = lines[freed_line][-120:]
     finally:
         await _reap(freed)
         await _finish(idle)
