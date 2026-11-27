@@ -6,9 +6,9 @@
 #   SMOKE_PROVIDER=<name> docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
 #   HA_SMOKE_PROVIDER=<name> pytest -m ha_smoke -v -k provider
 #
-# Whatever a provider file leaves unset comes from providers/_speaches.env, the stack's own Speaches. Every request
-# to a paid provider is billed to its key, so the port is published on 127.0.0.1 only. Remove the proxy, and any key
-# with it, by project name, which needs no variables:
+# Whatever a provider file leaves unset comes from providers/defaults/speaches.env, the fallback for the side a
+# preset doesn't serve: the stack's own Speaches. Every request to a paid provider is billed to its key, so the port
+# is published on 127.0.0.1 only. Remove the proxy, and any key with it, by project name, which needs no variables:
 #
 #   docker compose -p ha_smoke_provider down
 name: ha_smoke_provider
@@ -24,7 +24,8 @@ services:
     ports:
       - "127.0.0.1:10406:10300"
     env_file:
-      - providers/_speaches.env
+      # The fallback for the side the preset doesn't serve, then the preset
+      - providers/defaults/speaches.env
       - providers/${SMOKE_PROVIDER:?Set SMOKE_PROVIDER to the name of a file in tests/ha_e2e/smoke/providers}.env
     environment:
       WYOMING_URI: tcp://0.0.0.0:10300
