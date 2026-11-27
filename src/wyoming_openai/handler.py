@@ -132,6 +132,7 @@ TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests 
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
 SHUTDOWN_CLOSE_TIMEOUT = 2.0  # Seconds stop() waits for a client connection to finish closing before aborting it
+REALTIME_STT_CLOSE_TIMEOUT = 5.0  # Seconds a Realtime STT websocket may take to close before it is aborted
 # Sent as a Wyoming error event; the cause is in the log
 TTS_FAILED_ERROR = "Text-to-speech synthesis failed"
 STT_FAILED_ERROR = "Speech-to-text transcription failed"
@@ -206,6 +207,10 @@ class RealtimeTranscriptionError(Exception):
 
 class RealtimeSynthesisError(Exception):
     """Raised when OpenAI Realtime speech synthesis fails."""
+
+
+class SttShutdownError(Exception):
+    """Raised for an STT request that is not started because the server is shutting down."""
 
 
 class OpenAIEventHandler(AsyncEventHandler):
@@ -670,10 +675,16 @@ class OpenAIEventHandler(AsyncEventHandler):
                 audio_width,
             )
         except Exception as err:
-            # A server error may arrive before session.update fails on the closed socket. Preserve that cause
-            # before cleanup discards the future; exception() still includes the startup exception's traceback.
-            failure = self._get_realtime_transcription_failure()
-            _LOGGER.exception("Error starting realtime transcription: %s", failure if failure is not None else err)
+            if isinstance(err, SttShutdownError):
+                # Not a backend failure, and nothing was opened
+                _LOGGER.info("%s", err)
+            else:
+                # A server error may arrive before session.update fails on the closed socket. Preserve that cause
+                # before cleanup discards the future; exception() still includes the startup exception's traceback.
+                failure = self._get_realtime_transcription_failure()
+                _LOGGER.exception(
+                    "Error starting realtime transcription: %s", failure if failure is not None else err
+                )
             await self._cleanup_realtime_transcription()
             await self._fail_realtime_audio_stream(audio_stream)
 
@@ -770,6 +781,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.info("Successfully transcribed realtime stream: %s", truncate_for_log(transcript))
             else:
                 _LOGGER.warning("Received empty realtime transcription result")
+            # The session has delivered all it will, so it closes before the final events are written: a client
+            # slow to take them does not keep it, and the STT slot it holds, from the next request
+            await self._cleanup_realtime_transcription()
             await self.write_event(Transcript(text=transcript).event())
             transcript_sent = True
             await self.write_event(TranscriptStop().event())
@@ -907,21 +921,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         Wait for one of the STT request slots the server's connections share, unless there is no limit.
 
         Raises:
-            RuntimeError: When stop() has been called, before or while waiting: the request must not reach the
-                backend once the server is shutting down, which the caller reports as a failed transcription.
+            SttShutdownError: When stop() has been called, before or while waiting: the request must not reach the
+                backend once the server is shutting down. stop() has already told the client.
         """
         semaphore = self._stt_semaphore
         if semaphore is None or self._stt_slot is not None:
             return
         if self._stopping:
-            raise RuntimeError(f"Not starting an STT request: {SHUTDOWN_ERROR}")
+            raise SttShutdownError("Not starting an STT request: the server is shutting down")
         if semaphore.locked():
             _LOGGER.info("Waiting for a free STT request slot: STT_CONCURRENT_REQUESTS requests are in flight")
         await semaphore.acquire()
         if self._stopping:
             # stop() ran while this request was waiting, as the handlers it stops give their slots back
             semaphore.release()
-            raise RuntimeError(f"Not starting an STT request: {SHUTDOWN_ERROR}")
+            raise SttShutdownError("Not starting an STT request: the server is shutting down")
         self._stt_slot = transport
 
     def _take_stt_slot(self, transport: _SttSlot) -> Callable[[], None] | None:
@@ -961,6 +975,27 @@ class OpenAIEventHandler(AsyncEventHandler):
             if release_slot is not None:
                 release_slot()
 
+    async def _bounded_realtime_close(self, close: Coroutine[Any, Any, Any], connection: Any) -> None:
+        """
+        Close a Realtime transcription websocket within REALTIME_STT_CLOSE_TIMEOUT. The closing handshake waits for
+        the server to read, which websockets does not bound as a whole, so a server that stops reading would keep
+        the session's STT slot forever; past the timeout the socket's transport is aborted instead.
+        """
+        try:
+            async with asyncio.timeout(REALTIME_STT_CLOSE_TIMEOUT):
+                await close
+        except TimeoutError:
+            _LOGGER.warning(
+                "Realtime transcription websocket did not close within %g seconds; aborting it",
+                REALTIME_STT_CLOSE_TIMEOUT,
+            )
+            # The websocket of the SDK connection, when it exposes one; without it the socket is left to the SDK
+            websocket = getattr(connection, "_connection", None)
+            transport = getattr(websocket, "transport", None)
+            abort = getattr(transport, "abort", None)
+            if callable(abort):
+                abort()
+
     async def _close_realtime_transcription(self, release_slot: Callable[[], None] | None) -> None:
         """
         Stop the receive task and close the Realtime session; once the websocket is closed, release_slot is called.
@@ -999,7 +1034,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             if release_slot is not None:
                 release_slot()
             return
-        close_task = self._run_in_background(close, name="openai_realtime_stt_close")
+        close_task = self._run_in_background(
+            self._bounded_realtime_close(close, connection), name="openai_realtime_stt_close"
+        )
         if release_slot is not None:
             # A done callback rather than a finally, so the slot is released even when the task is cancelled
             # before it starts, as a drain that times out at shutdown may do
@@ -1068,28 +1105,27 @@ class OpenAIEventHandler(AsyncEventHandler):
             if extra_body:
                 transcription_kwargs["extra_body"] = extra_body
 
-            # Held until the response, streamed or not, has been read, and not while the final events are written
-            # to a client that may be slow to take them; the finally below releases it on failure
+            # Held until the response, streamed or not, has been read and closed, and not while the final events
+            # are written to a client that may be slow to take them; the finally below releases it on failure
             await self._acquire_stt_slot("http")
             transcription = await self._stt_client.audio.transcriptions.create(**transcription_kwargs)
-            if not isinstance(transcription, AsyncStream):
-                self._release_stt_slot("http")
-
-            await self.write_event(TranscriptStart().event())
 
             if isinstance(transcription, AsyncStream):
                 _LOGGER.debug("Handling streaming transcription response")
                 full_text = ""
-                async for chunk in transcription:
-                    if chunk.type == "transcript.text.delta":
-                        if chunk.delta:
-                            full_text += chunk.delta
-                            _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
-                            # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
-                            await self.write_event(TranscriptChunk(text=full_text).event())
-                    elif chunk.type == "transcript.text.done":
-                        full_text = _final_transcript(chunk.text, full_text)
-                # The stream is read to its end, which closes the response
+                # Closed however it ends, as when the client goes away mid-stream, so the response does not stay
+                # open after its slot is released
+                async with transcription:
+                    await self.write_event(TranscriptStart().event())
+                    async for chunk in transcription:
+                        if chunk.type == "transcript.text.delta":
+                            if chunk.delta:
+                                full_text += chunk.delta
+                                _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
+                                # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
+                                await self.write_event(TranscriptChunk(text=full_text).event())
+                        elif chunk.type == "transcript.text.done":
+                            full_text = _final_transcript(chunk.text, full_text)
                 self._release_stt_slot("http")
                 if full_text:
                     _LOGGER.info("Successfully transcribed stream: %s", truncate_for_log(full_text))
@@ -1102,7 +1138,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await self.write_event(Transcript(text=full_text).event())
 
             elif isinstance(transcription, TranscriptionCreateResponse):
-                # Handle non-streaming response
+                # Handle non-streaming response, which is read whole by create()
+                self._release_stt_slot("http")
+                await self.write_event(TranscriptStart().event())
                 _LOGGER.debug("Handling non-streaming transcription response")
                 if transcription.text:
                     _LOGGER.info("Successfully transcribed: %s", truncate_for_log(transcription.text))
@@ -1117,7 +1155,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self.write_event(TranscriptStop().event())
 
         except Exception as e:
-            _LOGGER.exception("Error during transcription: %s", e)
+            if isinstance(e, SttShutdownError):
+                # Not a backend failure: nothing was sent, and stop() has told the client
+                _LOGGER.info("%s", e)
+            else:
+                _LOGGER.exception("Error during transcription: %s", e)
             # As on the Realtime path, the client is told instead of waiting for a transcript
             if not transcript_sent:
                 await self._report_stt_failure()

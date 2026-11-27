@@ -211,6 +211,18 @@ def _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name="gpt
     return stt_client
 
 
+class _FakeTranscriptionStream:
+    """Base of the stand-ins for openai.AsyncStream, which the handler closes as a context manager."""
+
+    closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.closed = True
+
+
 class _FakeRealtimeServerEvent:
     def __init__(self, event_type, **kwargs):
         self.type = event_type
@@ -257,6 +269,7 @@ class _FakeRealtimeConnection:
         self.input_audio_buffer = _FakeRealtimeInputAudioBuffer(self)
         self.response = _FakeRealtimeResponse(self)
         self.closed = False
+        self._connection: Mock | None = None  # The websocket an SDK connection keeps
 
     async def __aiter__(self):
         # An async generator, as in the SDK, so cancelling a pending event closes the iterator
@@ -2054,7 +2067,7 @@ class TestOpenAIEventHandlerComprehensive:
         """SSE deltas become replaceable snapshots; final text can correct them or arrive without deltas."""
         stt_client, _ = mock_clients
 
-        class _Stream:
+        class _Stream(_FakeTranscriptionStream):
             async def __aiter__(self):
                 for delta in deltas:
                     yield Mock(type="transcript.text.delta", delta=delta)
@@ -2084,7 +2097,7 @@ class TestOpenAIEventHandlerComprehensive:
         """A transcription stream that fails midway ends with an error event and a closed connection."""
         stt_client, _ = mock_clients
 
-        class _FailingStream:
+        class _FailingStream(_FakeTranscriptionStream):
             def __aiter__(self):
                 return self._events()
 
@@ -2092,13 +2105,39 @@ class TestOpenAIEventHandlerComprehensive:
                 yield Mock(type="transcript.text.delta", delta="Hel")
                 raise RuntimeError("stream reset")
 
-        stt_client.audio.transcriptions.create = AsyncMock(return_value=_FailingStream())
+        stream = _FailingStream()
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=stream)
 
         with patch("wyoming_openai.handler.AsyncStream", _FailingStream):
             assert await self._record_and_stop(enhanced_handler) is False
 
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
         assert event_types == ["transcript-start", "transcript-chunk", "error"]
+        assert stream.closed
+
+    @pytest.mark.asyncio
+    async def test_transcription_stream_is_closed_when_the_client_goes_away(self, enhanced_handler, mock_clients):
+        """A client that disconnects mid-stream does not leave the response open."""
+        stt_client, _ = mock_clients
+
+        class _Stream(_FakeTranscriptionStream):
+            async def __aiter__(self):
+                yield Mock(type="transcript.text.delta", delta="Hel")
+                yield Mock(type="transcript.text.delta", delta="lo")
+
+        stream = _Stream()
+        stt_client.audio.transcriptions.create = AsyncMock(return_value=stream)
+
+        async def write_event(event):
+            if event.type == "transcript-chunk":
+                raise ConnectionResetError("client went away")
+
+        enhanced_handler.write_event = AsyncMock(side_effect=write_event)
+
+        with patch("wyoming_openai.handler.AsyncStream", _Stream):
+            assert await self._record_and_stop(enhanced_handler) is False
+
+        assert stream.closed
 
     @pytest.mark.asyncio
     async def test_transcription_without_asr_model_reports_the_failure(self, enhanced_handler, mock_info, mock_clients):
@@ -2123,7 +2162,8 @@ class TestOpenAIEventHandlerComprehensive:
         assert await self._record_and_stop(enhanced_handler) is False
 
         event_types = [call.args[0].type for call in enhanced_handler.write_event.call_args_list]
-        assert event_types == ["transcript-start", "error"]
+        # No transcript is opened for a response that cannot be read
+        assert event_types == ["error"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("width,channels", [(1, 1), (2, 1), (3, 1), (4, 1), (1, 2), (2, 2), (3, 2), (4, 2)])
@@ -5357,7 +5397,7 @@ async def test_stt_semaphore_realtime_slot_is_released_when_its_close_is_cancell
 @pytest.mark.asyncio
 @pytest.mark.parametrize("realtime", [False, True])
 async def test_stt_request_waiting_for_a_slot_is_not_sent_after_stop(
-    enhanced_handler, mock_info, mock_clients, realtime
+    enhanced_handler, mock_info, mock_clients, caplog, realtime
 ):
     """A request still queued when the server stops gives back the slot it gets and never reaches the backend."""
     from openai.types.audio.transcription import Transcription
@@ -5382,10 +5422,14 @@ async def test_stt_request_waiting_for_a_slot_is_not_sent_after_stop(
     await _settle()
     assert not request.done()
 
-    await handler.stop()
-    semaphore.release()  # The other connection is stopped too
-    await asyncio.wait_for(request, timeout=1)
+    with caplog.at_level(logging.INFO, logger="wyoming_openai.handler"):
+        await handler.stop()
+        semaphore.release()  # The other connection is stopped too
+        await asyncio.wait_for(request, timeout=1)
 
+    # A request the shutdown cut short is not a backend failure
+    assert "Not starting an STT request" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
     stt_client.realtime.connect.assert_not_called()
     stt_client.audio.transcriptions.create.assert_not_called()
     assert "transcript" not in _written_event_types(handler)
@@ -5402,7 +5446,7 @@ async def test_stt_semaphore_http_slot_is_released_before_the_transcript_is_writ
 
     stt_client, _ = mock_clients
 
-    class _Stream:
+    class _Stream(_FakeTranscriptionStream):
         async def __aiter__(self):
             yield Mock(type="transcript.text.delta", delta="Hi")
             yield Mock(type="transcript.text.done", text="Hi")
@@ -5428,6 +5472,64 @@ async def test_stt_semaphore_http_slot_is_released_before_the_transcript_is_writ
         await asyncio.wait_for(request, timeout=1)
 
     assert _written_transcripts(handler) == ["Hi"]
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+async def test_completed_realtime_session_closes_before_the_transcript_is_written(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A client slow to take the transcript does not keep the finished session, or its slot, open."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    completed = _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
+    manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([completed]))
+    stt_client.realtime.connect = Mock(return_value=manager)
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if Transcript.is_type(event.type):
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    request = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await _settle()
+
+    assert not request.done()
+    assert manager.exited
+    assert not semaphore.locked()
+
+    client_reads.set()
+    assert await asyncio.wait_for(request, timeout=1)
+    assert _written_event_types(handler) == ["transcript-start", "transcript", "transcript-stop"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_close_that_stalls_is_aborted_and_frees_its_slot(
+    enhanced_handler, mock_info, mock_clients, monkeypatch, caplog
+):
+    """A server that never finishes the closing handshake has its socket aborted, and the slot comes back."""
+    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_CLOSE_TIMEOUT", 0.01)
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    connection = _FakeRealtimeConnection([])
+    transport = Mock()
+    connection._connection = Mock(transport=transport)
+    stt_client.realtime.connect = Mock(return_value=_GatedCloseManager(connection, asyncio.Event()))
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        await handler._cleanup_realtime_transcription()
+        await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
+
+    transport.abort.assert_called_once()
+    assert "did not close within" in caplog.text
     assert not semaphore.locked()
 
 
