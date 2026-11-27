@@ -5567,6 +5567,122 @@ async def test_stop_adds_no_second_response_while_the_final_write_drains(
     assert written.count("transcript") == (1 if terminal == "transcript" else 0)
 
 
+def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients):
+    """
+    Hold the backend's answer to an audio-stop: returns (entered, respond), set once the request reached the
+    backend, and to let a successful "Hi" through.
+    """
+    from openai.types.audio.transcription import Transcription
+
+    entered = asyncio.Event()
+    respond = asyncio.Event()
+    if realtime:
+        _use_realtime_stt_model(handler, mock_info, mock_clients)
+        connection = _FakeRealtimeConnection([])
+
+        async def commit():
+            entered.set()
+            await respond.wait()
+            await connection.events.put(
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
+            )
+
+        connection.input_audio_buffer.commit = commit
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    else:
+
+        async def create(**kwargs):
+            entered.set()
+            await respond.wait()
+            return Transcription(text="Hi")
+
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
+    return entered, respond
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime", [False, True])
+async def test_stop_that_answers_first_drops_the_late_transcript(
+    enhanced_handler, mock_info, mock_clients, realtime
+):
+    """A shutdown error queued while the backend works is the only response: its late transcript is dropped."""
+    stt_client, _ = mock_clients
+    handler = enhanced_handler
+    entered, respond = _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients)
+    error_queued = asyncio.Event()
+    client_reads = asyncio.Event()
+    written = []
+
+    async def write_event(event):
+        written.append(event.type)
+        if event.type == "error":
+            # The shutdown error is queued, and its drain waits on a client slow to read
+            error_queued.set()
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    stopping = asyncio.create_task(handler.stop())
+    await asyncio.wait_for(error_queued.wait(), timeout=1)
+    respond.set()
+    assert await asyncio.wait_for(audio_stop, timeout=1) is False
+    client_reads.set()
+    await asyncio.wait_for(stopping, timeout=3)
+
+    assert written.count("error") == 1
+    assert "transcript" not in written
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime", [False, True])
+async def test_stop_decides_after_stopping_tts_so_a_transcript_queued_meanwhile_stands(
+    enhanced_handler, mock_info, mock_clients, realtime
+):
+    """A transcript queued while stop() waits on the synthesis is the response; stop() adds no error after it."""
+    stt_client, _ = mock_clients
+    handler = enhanced_handler
+    entered, respond = _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients)
+    playback_stopping = asyncio.Event()
+    playback_stopped = asyncio.Event()
+
+    async def stop_sentence_playback(error=None):
+        playback_stopping.set()
+        await playback_stopped.wait()
+        return True
+
+    handler._stop_sentence_playback = stop_sentence_playback
+    transcript_queued = asyncio.Event()
+    written = []
+
+    async def write_event(event):
+        written.append(event.type)
+        if Transcript.is_type(event.type):
+            transcript_queued.set()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    stopping = asyncio.create_task(handler.stop())
+    await asyncio.wait_for(playback_stopping.wait(), timeout=1)
+    respond.set()
+    await asyncio.wait_for(transcript_queued.wait(), timeout=1)
+    assert await asyncio.wait_for(audio_stop, timeout=1)
+    playback_stopped.set()
+    await asyncio.wait_for(stopping, timeout=3)
+
+    assert written.count("transcript") == 1
+    assert "error" not in written
+
+
 @pytest.mark.asyncio
 async def test_stop_reports_an_http_request_still_waiting_for_its_response(enhanced_handler, mock_clients):
     """An audio-stop whose backend has not answered yet is told about the shutdown."""

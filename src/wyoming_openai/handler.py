@@ -413,11 +413,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             # The client is still connected, so it is told about a synthesis or a transcription cut short before the
             # writer is closed: a stream being recorded, or an audio-stop that has not queued its transcript or error.
             # Once it has, the client has its response, and a shutdown error would be a second one
-            transcribing = (
-                self._audio_stream is not None and not self._audio_stream.failed
-            ) or self._stt_response_pending
             await self._stop_sentence_playback(SHUTDOWN_ERROR if self._is_synthesis_in_flight() else None)
-            if transcribing:
+            # Decided after that await, during which an audio-stop may have queued its own response. Claimed, so an
+            # audio-stop still running drops its transcript rather than sending it after this error
+            recording = self._audio_stream is not None and not self._audio_stream.failed
+            if recording or self._claim_stt_response():
                 self._shutdown_reported = True
                 await self._write_event_bounded(Error(text=SHUTDOWN_ERROR).event())
             # The server stops handlers while an audio-stop may still be sending their recording, so that is left
@@ -784,7 +784,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             # The session has delivered all it will, so it closes before the final events are written: a client
             # slow to take them does not keep it, and the STT slot it holds, from the next request
             await self._cleanup_realtime_transcription()
-            self._stt_response_queued()
+            if self._shutdown_answered_stt():
+                return False
             await self.write_event(Transcript(text=transcript).event())
             transcript_sent = True
             await self.write_event(TranscriptStop().event())
@@ -793,7 +794,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             if not transcript_sent:
                 # The receiver is stopped first, so no late delta follows the error
                 await self._cleanup_realtime_transcription()
-                self._stt_response_queued()
+                # Not needed to decide: _report_stt_failure() already writes nothing after a shutdown error
+                self._claim_stt_response()
                 await self._report_stt_failure()
                 return False
         finally:
@@ -1059,9 +1061,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Its error was sent when it failed; closing the connection ends the request for clients that ignore it
             return False
 
-        # The client is owed a transcript or an error until one is queued (_stt_response_queued). stop() checks this
-        # rather than the session or recording, which are cleaned up before the final events are written
-        self._stt_response_pending = True
+        # The client is owed a transcript or an error until one is queued (_claim_stt_response). stop() checks this
+        # rather than the session or recording, which are cleaned up before the final events are written. After a
+        # shutdown error the client has its answer already, so nothing is owed
+        self._stt_response_pending = not self._shutdown_reported
         try:
             if audio_stream.realtime:
                 return await self._handle_realtime_audio_stop(audio_stream)
@@ -1069,13 +1072,29 @@ class OpenAIEventHandler(AsyncEventHandler):
         finally:
             self._stt_response_pending = False
 
-    def _stt_response_queued(self) -> None:
+    def _claim_stt_response(self) -> bool:
         """
-        Called right before an audio-stop writes its transcript or failure error. Wyoming queues the whole event
-        before it waits for the client to take it, so from then on the client has its response, even while that
-        write waits: stop() must not add a shutdown error as a second one.
+        Claim the one transcript or error an audio-stop owes the client, for whichever of the audio-stop and stop()
+        writes it first; the other then writes nothing. Returns whether the caller got it.
+
+        The audio-stop claims it right before it writes its transcript or failure error: Wyoming queues the whole
+        event before it waits for the client to take it, so from then on the client has its response, even while
+        that write waits.
         """
+        if not self._stt_response_pending:
+            return False
         self._stt_response_pending = False
+        return True
+
+    def _shutdown_answered_stt(self) -> bool:
+        """
+        Claim the response right before an audio-stop writes its transcript. Returns True when stop() has already
+        answered the client with its shutdown error, and the transcript is dropped instead.
+        """
+        if self._claim_stt_response():
+            return False
+        _LOGGER.info("Dropping the transcript: the client was already told the server is shutting down")
+        return True
 
     async def _handle_http_audio_stop(self, audio_stream: _AudioStreamState) -> bool:
         """Send a /v1/audio/transcriptions recording and emit its transcription. Returns False to close on failure."""
@@ -1158,7 +1177,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                         " If this is unexpected, please check your"
                         " STT_STREAMING_MODELS configuration."
                     )
-                self._stt_response_queued()
+                if self._shutdown_answered_stt():
+                    return False
                 await self.write_event(Transcript(text=full_text).event())
 
             elif isinstance(transcription, TranscriptionCreateResponse):
@@ -1170,7 +1190,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                     _LOGGER.info("Successfully transcribed: %s", truncate_for_log(transcription.text))
                 else:
                     _LOGGER.warning("Received empty transcription result")
-                self._stt_response_queued()
+                if self._shutdown_answered_stt():
+                    return False
                 await self.write_event(Transcript(text=transcription.text).event())
 
             else:
@@ -1189,7 +1210,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             self._release_stt_slot("http")
             # As on the Realtime path, the client is told instead of waiting for a transcript
             if not transcript_sent:
-                self._stt_response_queued()
+                self._claim_stt_response()
                 await self._report_stt_failure()
                 return False
         finally:
