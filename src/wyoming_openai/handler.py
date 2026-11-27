@@ -142,7 +142,9 @@ CLIENT_WRITE_TIMEOUT = 10.0
 REALTIME_STT_IDLE_TIMEOUT = 10.0
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
-SHUTDOWN_CLOSE_TIMEOUT = 2.0  # Seconds stop() waits for a client connection to finish closing before aborting it
+# Seconds a closed client connection may take to send what is left in it before it is aborted, at disconnect and
+# at stop()
+SHUTDOWN_CLOSE_TIMEOUT = 2.0
 # Sent as a Wyoming error event; the cause is in the log
 TTS_FAILED_ERROR = "Text-to-speech synthesis failed"
 STT_FAILED_ERROR = "Speech-to-text transcription failed"
@@ -456,7 +458,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         finally:
             # Closed before the drain so the client is not kept waiting on websocket closing handshakes
             self.writer.close()
-            await self._drain_background_tasks()
+            try:
+                # A client that stopped reading, as one whose request failed for not taking its events, would keep the
+                # closed connection open on data it never takes, and with it the server's shutdown, which waits for
+                # every connection: as at stop(), it is aborted
+                await self._close_writer()
+            finally:
+                await self._drain_background_tasks()
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
@@ -1746,9 +1754,9 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _close_writer(self) -> None:
         """
-        Wait for the writer closed by stop() to finish flushing, then abort a connection a client that stopped
-        reading left open. Python 3.12 and later wait for every client transport at server shutdown, so one that
-        never takes its remaining audio would hold the process up until it is forced shut.
+        Wait for the closed writer to finish flushing, then abort a connection a client that stopped reading left
+        open. Python 3.12 and later wait for every client transport at server shutdown, also one whose handler has
+        ended, so one that never takes the rest of its data would hold the process up until it is forced shut.
         """
         wait_closed = asyncio.create_task(self.writer.wait_closed(), name="wyoming_writer_close")
         try:
@@ -1758,7 +1766,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await asyncio.shield(wait_closed)
         except TimeoutError:
             _LOGGER.warning(
-                "Client did not take its remaining audio within %g seconds; aborting its connection to shut down",
+                "Client did not take the rest of its data within %g seconds; aborting its connection",
                 SHUTDOWN_CLOSE_TIMEOUT,
             )
             self.writer.transport.abort()
