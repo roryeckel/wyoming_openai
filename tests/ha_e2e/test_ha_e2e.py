@@ -15,6 +15,7 @@ instance and stored under tests/ha_e2e/.state (gitignored).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -559,11 +560,13 @@ async def test_reads_exposed_names_from_home_assistant(settings: HaE2ESettings, 
         )
         await until(lambda: entity not in names.names)
     finally:
-        await names.aclose()
-        if helper_id is not None:
-            ws.command("input_boolean/delete", input_boolean_id=helper_id)
-        if area_id is not None:
-            ws.command("config/area_registry/delete", area_id=area_id)
-        if floor_id is not None:
-            ws.command("config/floor_registry/delete", floor_id=floor_id)
-        ws.close()
+        # Each step runs even when one before it fails, so the shared instance keeps nothing of this test
+        with contextlib.ExitStack() as cleanup:
+            cleanup.callback(ws.close)
+            if floor_id is not None:
+                cleanup.callback(ws.command, "config/floor_registry/delete", floor_id=floor_id)
+            if area_id is not None:
+                cleanup.callback(ws.command, "config/area_registry/delete", area_id=area_id)
+            if helper_id is not None:
+                cleanup.callback(ws.command, "input_boolean/delete", input_boolean_id=helper_id)
+            await names.aclose()

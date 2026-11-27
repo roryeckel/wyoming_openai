@@ -41,6 +41,8 @@ from .const import (
     OPENAI_KEYWORD_STT_MODEL_PREFIXES,
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
     OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES,
+    OPENAI_PROMPTLESS_STT_MODEL_PREFIXES,
+    PROMPTLESS_STT_MODEL_NAME_PARTS,
     REALTIME_AUDIO_FORMAT,
     REALTIME_AUDIO_RATE,
     REALTIME_AUDIO_WIDTH,
@@ -564,6 +566,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         current_model = audio_stream.model.name if audio_stream.model else None
         if (model.name, language) == (current_model, audio_stream.language):
+            if self._current_bias_names != audio_stream.bias_names:
+                _LOGGER.warning(
+                    "Transcribe with other names arrived during a Realtime recording, whose session already has its "
+                    "prompt or keywords. Send transcribe before audio-start; the names apply from the next audio stream"
+                )
             return
         _LOGGER.warning(
             "Transcribe for model %s, language %s arrived during a %s recording, which keeps model %s, language %s. "
@@ -829,8 +836,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         The STT prompt and keywords of a stream: STT_PROMPT, followed by the names sent with transcribe and the names
         read from Home Assistant. OpenAI models that take keywords get the names there instead, and STT_PROMPT alone as
         the prompt, as OpenAI keeps the prompt for context and keywords for the terms to expect. A prompt, or keywords,
-        in the extra body of the stream's transport replace the proxy's, so the names are left out of that field then;
-        OpenAI's Realtime sessions for some models take no prompt, so it is None for those.
+        in the extra body of the stream's transport replace the proxy's, so the names are left out of that field then.
+        OpenAI's Realtime sessions for some models take no prompt, so it is None for those, and other models that take
+        no prompt get STT_PROMPT as configured, without the names.
         """
         model = audio_stream.model
         if model is None:
@@ -853,6 +861,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             if self._stt_prompt is not None or groups:
                 _LOGGER.debug("Leaving out the STT prompt: %s does not support one", model.name)
             return None, None
+        if self._takes_no_stt_prompt(model.name):
+            if groups:
+                _LOGGER.debug("Leaving the names out of the STT prompt: %s takes no prompt", model.name)
+            return self._stt_prompt, None
         prompt = build_prompt(self._stt_prompt, groups, self._stt_prompt_max_tokens)
         if groups:
             _LOGGER.debug("STT prompt: %s", prompt)
@@ -1189,6 +1201,13 @@ class OpenAIEventHandler(AsyncEventHandler):
         if self._stt_client is None or self._stt_client.backend != OpenAIBackend.OPENAI:
             return False
         return model_name.startswith(prefixes)
+
+    def _takes_no_stt_prompt(self, model_name: str) -> bool:
+        """Check if an ASR model takes no prompt, on any transport, so the names are not added to one."""
+        name = model_name.casefold()
+        return any(part in name for part in PROMPTLESS_STT_MODEL_NAME_PARTS) or self._is_openai_stt_model(
+            model_name, OPENAI_PROMPTLESS_STT_MODEL_PREFIXES
+        )
 
     def _uses_plural_stt_languages(self, model_name: str) -> bool:
         """Check if an ASR model takes a `languages` list instead of the singular `language` field."""

@@ -7168,6 +7168,60 @@ async def test_http_transcription_keeps_the_names_in_the_prompt_for_models_witho
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "backend"),
+    [
+        # Mistral's API takes no prompt, and vLLM's Voxtral ignores one, whatever name it is served under
+        ("voxtral-mini-latest", OpenAIBackend.OPENAI),
+        ("mistralai/Voxtral-Mini-3B-2507", OpenAIBackend.SPEACHES),
+        # OpenAI's diarizing model takes no prompt
+        ("gpt-4o-transcribe-diarize", OpenAIBackend.OPENAI),
+    ],
+)
+async def test_http_transcription_adds_no_names_for_models_that_take_no_prompt(
+    enhanced_handler, mock_info, mock_clients, model_name, backend
+):
+    """Test a model that takes no prompt gets STT_PROMPT as configured, without the names."""
+    stt_client, _ = mock_clients
+    stt_client.backend = backend
+    mock_info.asr[0].models[0].name = model_name
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, model_name)
+
+    assert call_args["prompt"] == "Test prompt"
+    assert call_args["keywords"] is omit
+
+
+@pytest.mark.asyncio
+async def test_a_transcribe_with_other_names_during_a_realtime_recording_is_reported(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test names a Realtime session can no longer take are reported, and kept for the next audio stream."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name="gpt-live-transcribe")
+    stt_client.backend = OpenAIBackend.OPENAI
+    enhanced_handler._stt_transcript_names = True
+    connection = _FakeRealtimeConnection([])
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+    def transcribe(*names):
+        return Event(type="transcribe", data={"name": "gpt-live-transcribe", "transcript_names": list(names)})
+
+    assert await enhanced_handler.handle_event(transcribe("Ecobee"))
+    await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        # The names the session already has are no news
+        assert await enhanced_handler.handle_event(transcribe("Ecobee"))
+        assert "Transcribe with other names" not in caplog.text
+        assert await enhanced_handler.handle_event(transcribe("Rory"))
+
+    assert caplog.text.count("Transcribe with other names arrived during a Realtime recording") == 1
+    assert enhanced_handler._current_bias_names == (("Rory",),)
+    await enhanced_handler._drop_audio_stream()
+    await enhanced_handler._drain_background_tasks()
+
+
+@pytest.mark.asyncio
 async def test_home_assistant_names_are_not_added_when_the_extra_body_sets_the_prompt(
     enhanced_handler, mock_info, mock_clients
 ):

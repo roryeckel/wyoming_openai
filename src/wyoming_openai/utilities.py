@@ -1,4 +1,5 @@
 import argparse
+import functools
 import html.entities
 import json
 import logging
@@ -388,6 +389,35 @@ def estimate_prompt_tokens(text: str) -> int:
     return tokens
 
 
+# The fewest estimated tokens a name can take in the prompt: one for the name, and two for the separator after it
+_MIN_NAME_TOKENS = 3
+
+
+def _prompt_head(prefix: str | None) -> str:
+    """The prefix as it starts the prompt: stripped, and ended with a "." unless it already ends a sentence."""
+    head = (prefix or "").strip()
+    if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
+        head += "."
+    return head
+
+
+def prompt_has_room_for_names(prefix: str | None, max_tokens: int) -> bool:
+    """Whether the prefix leaves room in max_tokens estimated tokens for at least one name; always, when it is 0."""
+    return not max_tokens or estimate_prompt_tokens(_prompt_head(prefix)) + _MIN_NAME_TOKENS <= max_tokens
+
+
+@functools.lru_cache(maxsize=8192)
+def _name_cost(name: str) -> tuple[str, int] | None:
+    """
+    A name cleaned for the prompt and its estimated tokens with the separator after it, or None when it is blank. The
+    same names come with every transcription, so each is cleaned and estimated once.
+    """
+    cleaned = clean_name(name)
+    if cleaned is None:
+        return None
+    return cleaned, estimate_prompt_tokens(cleaned) + 2
+
+
 def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: int) -> str | None:
     """
     The STT prompt: the prefix (STT_PROMPT) first, then the name groups that fit in max_tokens estimated tokens (see
@@ -396,10 +426,7 @@ def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: in
     Names already added, compared case-insensitively, are skipped. The prefix is never shortened, and when no names
     fit, or there are none, the prompt is the prefix exactly as given.
     """
-    head = (prefix or "").strip()
-    if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
-        head += "."
-
+    head = _prompt_head(prefix)
     chosen = select_names(groups, max_tokens, used_tokens=estimate_prompt_tokens(head))
     if not chosen:
         return prefix
@@ -431,20 +458,22 @@ def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int 
     seen: set[str] = set()
     chosen: list[str] = []
     for group in groups:
-        unique: dict[str, str] = {}
+        if max_tokens and max_tokens - tokens < _MIN_NAME_TOKENS:
+            break  # No name fits in what is left
+        unique: dict[str, tuple[str, int]] = {}
         for name in group:
-            cleaned = clean_name(name)
-            if cleaned is not None and (key := cleaned.casefold()) not in seen:
-                unique.setdefault(key, cleaned)
+            if isinstance(name, str) and (named := _name_cost(name)) is not None:
+                if (key := named[0].casefold()) not in seen:
+                    unique.setdefault(key, named)
         if not unique:
             continue
-        cost = sum(estimate_prompt_tokens(name) + 2 for name in unique.values())
+        cost = sum(name_tokens for _, name_tokens in unique.values())
         if max_tokens and tokens + cost > max_tokens:
             # In order, so the most useful names are kept and the names are the same for the same groups
             continue
         tokens += cost
         seen.update(unique)
-        chosen.extend(unique.values())
+        chosen.extend(name for name, _ in unique.values())
     return chosen
 
 

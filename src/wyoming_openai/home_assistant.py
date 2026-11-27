@@ -40,8 +40,9 @@ class HomeAssistantError(Exception):
 
 class HomeAssistantAuthError(HomeAssistantError):
     """
-    Raised when Home Assistant rejects the access token. Home Assistant counts each attempt as a failed login, which
-    it reports and can answer by banning the address, so a rejected token is not tried again.
+    Raised when Home Assistant rejects the access token, or refuses a command to it, so it is not tried again: Home
+    Assistant counts a rejected token as a failed login, which it reports and can answer by banning the address, and
+    logs an error for each command it refuses to a user who is not an administrator.
     """
 
 
@@ -159,9 +160,10 @@ class HomeAssistantNames:
     connection.
 
     The names are read when the connection opens, again whenever the entity, device, area or floor registry changes,
-    which includes exposing an entity to Assist or hiding it, and again every refresh_seconds for changes no registry
-    event reports. A connection that fails or closes is opened again after a while; meanwhile the names read before
-    are used, or none when none were ever read. A rejected access token is not tried again.
+    which includes exposing an entity to Assist or hiding it, again when Home Assistant finishes starting, for a
+    connection opened while it started, and again every refresh_seconds for changes no event reports. A connection
+    that fails or closes is opened again after a while; meanwhile the names read before are used, or none when none
+    were ever read. An access token that is rejected, or that is not an administrator's, is not tried again.
     """
 
     def __init__(
@@ -242,8 +244,8 @@ class HomeAssistantNames:
                         self._names = names
             except HomeAssistantAuthError as err:
                 _LOGGER.error(
-                    "%s. Not connecting to Home Assistant at %s again, since each attempt counts as a failed login; "
-                    "using %s until the token is fixed and the server restarted",
+                    "%s. Not connecting to Home Assistant at %s again; using %s until the token is fixed and the "
+                    "server restarted",
                     err,
                     self.websocket_url,
                     "the names read before" if self._names else "no Home Assistant names",
@@ -272,8 +274,9 @@ def _describe(err: Exception) -> str:
 
 def _changes_names(event: dict[str, Any]) -> bool:
     """
-    Whether a registry event can change the names: one that creates or removes an entry, or updates a field the names
-    come from, such as a device's firmware version does not. An event of an unexpected shape is taken to.
+    Whether an event can change the names: a registry event that creates or removes an entry, or updates a field the
+    names come from, such as a device's firmware version does not, and the end of Home Assistant's startup. An event of
+    an unexpected shape is taken to.
     """
     fields = HASS_NAME_EVENTS.get(event.get("event_type", ""))
     data = event.get("data") or {}
@@ -286,8 +289,8 @@ def _changes_names(event: dict[str, Any]) -> bool:
 class _Session:
     """
     One websocket connection to Home Assistant, iterated for the names: once it opens, then each time the registries
-    change, and every refresh_seconds without a change. A single reader takes every message in order: command
-    results, and the registry change events it subscribes to, which mark the names as changed.
+    change or Home Assistant finishes starting, and every refresh_seconds without a change. A single reader takes every
+    message in order: command results, and the events it subscribes to, which mark the names as changed.
     """
 
     def __init__(
@@ -363,12 +366,17 @@ class _Session:
         message = await self._receive()
         if message.get("type") == "auth_invalid":
             raise HomeAssistantAuthError(
-                f"Home Assistant rejected the access token: {message.get('message', 'no reason given')}"
+                f"Home Assistant rejected the access token: {message.get('message', 'no reason given')}. It counts "
+                "each attempt as a failed login"
             )
         if message.get("type") != "auth_ok":
             raise HomeAssistantError(f"Expected auth_ok from Home Assistant, got {message.get('type')}")
 
-    async def _command(self, command_type: str, **fields: Any) -> Any:
+    async def _command(self, command_type: str, *, optional: bool = False, **fields: Any) -> Any:
+        """
+        The result of a command. An optional command that this Home Assistant does not have, such as one added in a
+        later release, returns None.
+        """
         message_id = next(self._message_ids)
         await self._websocket.send(json.dumps({"id": message_id, "type": command_type, **fields}))
         while (message := await self._receive()).get("id") != message_id or message.get("type") != "result":
@@ -376,10 +384,12 @@ class _Session:
         if message.get("success"):
             return message.get("result")
         error = message.get("error") or {}
+        if optional and error.get("code") == "unknown_command":
+            return None
         if error.get("code") == "unauthorized":
-            raise HomeAssistantError(
+            raise HomeAssistantAuthError(
                 f"{command_type} was refused as unauthorized: the access token must belong to a Home Assistant "
-                "administrator"
+                "administrator. Home Assistant logs an error for each attempt"
             )
         raise HomeAssistantError(f"{command_type} failed: {error.get('message') or error}")
 
@@ -394,5 +404,6 @@ class _Session:
         needs_devices = any(entry and entry.get("device_id") and not entry.get("area_id") for entry in entries.values())
         devices = await self._command("config/device_registry/list") if needs_devices else []
         areas = await self._command("config/area_registry/list")
-        floors = await self._command("config/floor_registry/list")
+        # Floors came in Home Assistant 2024.4; an older one has none
+        floors = await self._command("config/floor_registry/list", optional=True) or []
         return parse_hass_names(exposed_ids, states, entries, devices, areas, floors)

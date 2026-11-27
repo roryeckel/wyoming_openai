@@ -271,6 +271,7 @@ async def test_reads_names_when_connected(fake_hass, watch, caplog):
         "device_registry_updated",
         "area_registry_updated",
         "floor_registry_updated",
+        "homeassistant_started",
     ]
     read = [command for command in fake_hass.commands if command["type"] != "subscribe_events"]
     assert [command["type"] for command in read] == list(RESULTS)
@@ -302,6 +303,33 @@ async def test_reads_names_again_when_a_registry_changes(fake_hass, watch):
     assert fake_hass.reads() == 2
 
 
+@pytest.mark.asyncio
+async def test_reads_names_again_when_home_assistant_finishes_starting(fake_hass, watch):
+    """Test a read made while Home Assistant was starting is made again once it has, as no registry event reports
+    the entities that come up meanwhile."""
+    names = watch()
+    await until(lambda: names.names == EXPECTED_NAMES)
+
+    fake_hass.results["config/area_registry/list"] = [{"area_id": "garage", "name": "Garage", "aliases": []}]
+    await fake_hass.change("homeassistant_started")
+
+    await until(lambda: ("Garage",) in names.names)
+    assert fake_hass.reads() == 2
+
+
+@pytest.mark.asyncio
+async def test_reads_names_from_a_home_assistant_without_floors(fake_hass, watch):
+    """Test Home Assistant before 2024.4, which has no floor registry, gets every name but the floors'."""
+    fake_hass.errors["config/floor_registry/list"] = {"code": "unknown_command", "message": "Unknown command."}
+
+    names = watch()
+    await until(lambda: names.names != ())
+
+    floors = {("Ground Floor",), ("Upstairs",), ("Basement",)}
+    assert names.names == tuple(group for group in EXPECTED_NAMES if group not in floors)
+    assert fake_hass.logins == 1
+
+
 def _update(event_type, *fields):
     return {"event_type": event_type, "data": {"action": "update", "changes": dict.fromkeys(fields)}}
 
@@ -322,6 +350,8 @@ def _update(event_type, *fields):
         ({"event_type": "device_registry_updated", "data": {"action": "remove", "device_id": "dev1"}}, True),
         (_update("area_registry_updated", "icon"), True),
         (_update("floor_registry_updated", "level"), True),
+        # The end of Home Assistant's startup, when the entities still loading at the read have come up
+        ({"event_type": "homeassistant_started", "data": {}}, True),
         # An event of an unexpected shape is taken to change them
         ({"event_type": "entity_registry_updated", "data": {"action": "update"}}, True),
         ({"event_type": "entity_registry_updated"}, True),
@@ -479,15 +509,29 @@ async def test_stops_after_a_rejected_token(fake_hass, watch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_stops_after_a_token_that_is_not_an_administrators(fake_hass, watch, caplog):
+    fake_hass.errors["homeassistant/expose_entity/list"] = {"code": "unauthorized", "message": "Unauthorized"}
+
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.home_assistant"):
+        names = watch()
+        await until(lambda: "must belong to a Home Assistant administrator" in caplog.text)
+        # Home Assistant logs an error for each command it refuses
+        await asyncio.sleep(0.1)
+
+    assert fake_hass.logins == 1
+    assert names.names == ()
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(errors) == 1
+    assert "Not connecting to Home Assistant at" in errors[0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("command_type", "error", "message"),
     [
-        (
-            "homeassistant/expose_entity/list",
-            {"code": "unauthorized", "message": "Unauthorized"},
-            "must belong to a Home Assistant administrator",
-        ),
         ("get_states", {"code": "unknown_error", "message": "Boom"}, "get_states failed: Boom"),
+        # A command only an optional read may be missing
+        ("get_states", {"code": "unknown_command", "message": "Unknown command."}, "Unknown command."),
     ],
 )
 async def test_reports_a_failed_command(fake_hass, watch, caplog, command_type, error, message):

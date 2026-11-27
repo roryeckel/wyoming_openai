@@ -15,7 +15,8 @@ services:
       TTS_VOICES: "en-US-AnaNeural en-US-AndrewMultilingualNeural en-US-AndrewNeural en-US-AriaNeural en-US-AvaMultilingualNeural en-US-AvaNeural en-US-BrianMultilingualNeural en-US-BrianNeural en-US-ChristopherNeural en-US-EmmaMultilingualNeural en-US-EmmaNeural en-US-EricNeural en-US-GuyNeural en-US-JennyNeural en-US-MichelleNeural en-US-RogerNeural en-US-SteffanNeural"
       TTS_SPEED: "1.0"
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       openai-edge-tts:
         condition: service_healthy

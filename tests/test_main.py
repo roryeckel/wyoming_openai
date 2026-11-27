@@ -978,12 +978,17 @@ async def test_main_passes_stt_realtime_extra_body(monkeypatch, caplog):
     assert "STT extra body is set but unused" in caplog.text
 
 
-async def _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args):
-    """Run main() against fake backends and return the keyword arguments the handler factory was configured with."""
+async def _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args, backend=None):
+    """
+    Run main() against fake backends, detected as backend, and return the keyword arguments the handler factory was
+    configured with.
+    """
     created = []
 
     async def fake_factory(*args, **kwargs):
-        return _FakeClient()
+        client = _FakeClient()
+        client.backend = backend
+        return client
 
     monkeypatch.setattr(
         main_module.CustomAsyncOpenAI,
@@ -1312,6 +1317,64 @@ async def test_main_reads_home_assistant_settings_from_env(monkeypatch):
     assert names._token == "env-token"
     assert names.websocket_url == "wss://ha.example.com/api/websocket"
     assert max_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_main_warns_of_a_home_assistant_url_without_a_token(monkeypatch, caplog):
+    monkeypatch.delenv("STT_HASS_TOKEN", raising=False)
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+
+    with caplog.at_level(logging.WARNING):
+        names, _, started = await _capture_hass_settings(monkeypatch, "--stt-hass-url", "http://ha:8123")
+
+    assert names is None
+    assert started == []
+    assert "is set without --stt-hass-token (STT_HASS_TOKEN)" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("names_on", "warned"), [(True, True), (False, False)])
+async def test_main_warns_of_names_for_a_distil_whisper_model(monkeypatch, caplog, names_on, warned):
+    """Test a prompt of names is reported as unhelpful for Distil-Whisper, as wyoming-faster-whisper does."""
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    cli_args = ["--stt-models", "Systran/faster-distil-whisper-small.en"]
+
+    with caplog.at_level(logging.WARNING):
+        await _run_main_and_capture_handler_kwargs(
+            monkeypatch, *cli_args, *(["--stt-transcript-names"] if names_on else [])
+        )
+
+    assert ("looks like a Distil-Whisper model" in caplog.text) is warned
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cli_args", "backend", "warned"),
+    [
+        # STT_PROMPT alone takes the whole budget
+        (["--stt-prompt-max-tokens", "10"], None, True),
+        # No limit, or a budget with room left
+        (["--stt-prompt-max-tokens", "0"], None, False),
+        (["--stt-prompt-max-tokens", "200"], None, False),
+        # Keywords, which leave STT_PROMPT out of their budget, are the only place the names go
+        (["--stt-prompt-max-tokens", "10", "--stt-models", "gpt-transcribe"], "OPENAI", False),
+        (["--stt-prompt-max-tokens", "10", "--stt-models", "gpt-transcribe", "whisper-1"], "OPENAI", True),
+    ],
+)
+async def test_main_warns_when_stt_prompt_leaves_no_room_for_names(monkeypatch, caplog, cli_args, backend, warned):
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    prompt = ["--stt-prompt", "Smart home commands for the house."]
+
+    with caplog.at_level(logging.WARNING):
+        await _run_main_and_capture_handler_kwargs(
+            monkeypatch,
+            "--stt-transcript-names",
+            *prompt,
+            *cli_args,
+            backend=main_module.OpenAIBackend[backend] if backend else None,
+        )
+
+    assert ("leaves no room for names" in caplog.text) is warned
 
 
 @pytest.mark.asyncio

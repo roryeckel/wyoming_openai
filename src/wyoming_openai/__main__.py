@@ -25,6 +25,8 @@ from .const import (
     DEFAULT_LOG_MAX_BYTES,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_STT_PROMPT_MAX_TOKENS,
+    DISTIL_WHISPER_MODEL_NAME_PART,
+    OPENAI_KEYWORD_STT_MODEL_PREFIXES,
     REALTIME_TTS_MAX_SPEED,
     REALTIME_TTS_MIN_SPEED,
     __version__,
@@ -41,6 +43,7 @@ from .utilities import (
     parse_non_negative_int,
     parse_positive_int,
     parse_voice_labels,
+    prompt_has_room_for_names,
     validate_realtime_stt_extra_body,
     validate_realtime_tts_extra_body,
     validate_stt_extra_body,
@@ -417,6 +420,20 @@ async def main():
 
     if args.stt_hass_token and not stt_requested:
         _logger.warning("A Home Assistant token is set but unused: no STT models are configured")
+    if args.stt_hass_url and not args.stt_hass_token and stt_requested:
+        _logger.warning(
+            "--stt-hass-url (STT_HASS_URL) is set without --stt-hass-token (STT_HASS_TOKEN), so no Home Assistant "
+            "names are read"
+        )
+    stt_model_names = {*args.stt_models, *args.stt_streaming_models, *args.stt_realtime_models}
+    names_on = hass_names is not None or args.stt_transcript_names
+    for model_name in sorted(stt_model_names):
+        if names_on and DISTIL_WHISPER_MODEL_NAME_PART in model_name.casefold():
+            _logger.warning(
+                "STT model %s looks like a Distil-Whisper model, which a prompt does not help: the names in it are "
+                "ignored, or truncate or repeat the transcript. Use a standard Whisper model for names",
+                model_name,
+            )
 
     if not stt_requested and not tts_requested:
         _logger.error("No STT or TTS models specified. Exiting.")
@@ -432,6 +449,22 @@ async def main():
 
         stt_client = await stt_factory(api_key=args.stt_openai_key, base_url=args.stt_openai_url)
         _logger.debug("Detected STT backend: %s", stt_client.backend)
+
+        # Keywords leave STT_PROMPT out of their budget, so only a model that gets the names in its prompt can lose them
+        keyword_models_only = stt_client.backend == OpenAIBackend.OPENAI and all(
+            model_name.startswith(OPENAI_KEYWORD_STT_MODEL_PREFIXES) for model_name in stt_model_names
+        )
+        if (
+            names_on
+            and not keyword_models_only
+            and not prompt_has_room_for_names(args.stt_prompt, args.stt_prompt_max_tokens)
+        ):
+            _logger.warning(
+                "--stt-prompt (STT_PROMPT) leaves no room for names in the %d estimated tokens of "
+                "--stt-prompt-max-tokens (STT_PROMPT_MAX_TOKENS), so no names are added to the STT prompt; raise it, "
+                "or set it to 0 for no limit",
+                args.stt_prompt_max_tokens,
+            )
 
     tts_client: CustomAsyncOpenAI | None = None
     if tts_requested:

@@ -252,7 +252,7 @@ python -m wyoming_openai \
 
 You can deploy the Wyoming OpenAI proxy server in different environments depending on whether you are using official OpenAI services or a local alternative like Speaches. You can even run multiple wyoming_openai instances on different ports for different purposes. Below are example scenarios:
 
-Every example reads a `.env` file next to its compose file into the proxy, so create one before starting, even an empty one. It holds API keys and optional settings such as the [Home Assistant names](#biasing-speech-recognition-toward-names); `.env.example` lists them.
+Every example reads secrets into the proxy from a `.env` file next to its compose file: the API keys, and `STT_HASS_TOKEN` for the [Home Assistant names](#biasing-speech-recognition-toward-names), as `.env.example` lists. The examples for hosted APIs need it for their key; the local ones read it when it is there. Every other setting goes in the compose file's `environment`, which wins over `.env`.
 
 #### 1. Deploying with Official OpenAI Services
 
@@ -278,6 +278,7 @@ If you prefer using a local service like Speaches instead of official OpenAI ser
   - The Speaches container is configured with specific model settings (`Systran/faster-distil-whisper-large-v3` for STT and `speaches-ai/Kokoro-82M-v1.0-ONNX` for TTS).
   - It uses a local port (8000) to expose the Speaches service.
   - NVIDIA GPU support is enabled, so ensure your system has an appropriate setup if you plan to utilize GPU resources.
+  - The example's Distil-Whisper model is not helped by a prompt, so switch to a standard Whisper model, such as `Systran/faster-whisper-large-v3`, for [Home Assistant names](#biasing-speech-recognition-toward-names)
   - Note: wyoming_openai disables Speaches VAD (Voice Activity Detection) by default, as it is not yet compatible with the Wyoming protocol.
   - [Learn more about Speaches](https://speaches.ai/)
 
@@ -418,16 +419,16 @@ For users who want to use Groq's fast inference cloud API, this setup provides a
 For users who want local speech recognition from a model built on a language model, vLLM serves Qwen3-ASR with an OpenAI-compatible transcription endpoint.
 
 - **vLLM Setup**:
-  - Serves `Qwen/Qwen3-ASR-1.7B` as `qwen3-asr`, downloading it on first start, which can take several minutes
+  - Serves `Qwen/Qwen3-ASR-1.7B` as `qwen3-asr`, downloading its 4.7 GB on first start; the proxy waits up to 30 minutes for that
   - Requires an NVIDIA GPU; vLLM reserves 85% of its memory (`--gpu-memory-utilization`), so lower that to share the GPU with other services
-  - Limits the context to 8,192 tokens (`--max-model-len`) to save memory, plenty for voice commands
+  - Limits the context to 8,192 tokens (`--max-model-len`) to save memory, plenty for voice commands and the prompt of names
   - STT-only service (no TTS capabilities - combine with other services for TTS)
-  - Sets `STT_PROMPT_MAX_TOKENS` to 1,000, since Qwen3-ASR takes the prompt as context with far more room than Whisper; it matters once [names are turned on](#biasing-speech-recognition-toward-names)
+  - Sets `STT_PROMPT_MAX_TOKENS` to 1,000 in the compose file, since Qwen3-ASR takes the prompt as context with far more room than Whisper; it matters once [names are turned on](#biasing-speech-recognition-toward-names). With `0`, every name must fit in `--max-model-len` along with the audio and the transcript, or vLLM rejects the request
   - [Learn more about Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) and [vLLM](https://docs.vllm.ai/)
 
 - **Docker Compose Configuration**: Use the `docker-compose.qwen3-asr.yml` template which includes configuration for both the Wyoming OpenAI proxy and the vLLM service.
 
-- **Environment Variables**: vLLM needs no API key, so `.env` can stay empty. To bias transcription toward your Home Assistant names, set `STT_HASS_TOKEN` and `STT_HASS_URL` in it, as in `.env.example`.
+- **Environment Variables**: vLLM needs no API key, so `.env` is optional. To bias transcription toward your Home Assistant names, put `STT_HASS_TOKEN` in it and set `STT_HASS_URL` in the compose file.
 
 - **Command**:
 
@@ -525,7 +526,7 @@ The names are sent to your STT provider with every transcription, including any 
 To use the Home Assistant names:
 
 1. In Home Assistant, open your user profile, go to **Security**, and create a **long-lived access token**. The user must be an administrator, since Home Assistant only lists the exposed entities to administrators.
-2. Set `STT_HASS_TOKEN` and `STT_HASS_URL`, the URL of your Home Assistant, such as `http://homeassistant.local:8123`; with the Docker Compose examples, set them in `.env`. A URL ending in `/api`, as wyoming-faster-whisper's `--hass-api` takes, works too. The connection does not go through a proxy set in `HTTP_PROXY` or `HTTPS_PROXY`.
+2. Set `STT_HASS_TOKEN` and `STT_HASS_URL`, the URL of your Home Assistant, such as `http://homeassistant.local:8123`. With the Docker Compose examples, the token goes in `.env` and the URL in the compose file, where it is commented out. A URL ending in `/api`, as wyoming-faster-whisper's `--hass-api` takes, works too. The connection does not go through a proxy set in `HTTP_PROXY` or `HTTPS_PROXY`.
 
 Only entities exposed to Assist (**Settings** > **Voice assistants** > **Expose**) are used, with their aliases, plus the names and aliases of areas and floors, in this order:
 
@@ -535,15 +536,15 @@ Only entities exposed to Assist (**Settings** > **Voice assistants** > **Expose*
 4. Every other exposed entity, mostly sensors
 5. Entities that are unavailable, so they are the first left out
 
-Names are added in this order while they fit in `STT_PROMPT_MAX_TOKENS`, keeping each entity, area or floor whole with its aliases, and skipping a name already added. One that does not fit is left out, and a shorter one after it can still take the room left. `STT_PROMPT` always comes first and is never shortened, giving a prompt like `Smart home commands. Living Room, Kitchen, Ecobee, Thermostat.`. Without any names, the prompt is `STT_PROMPT` as given. The prompt sent is logged at the `DEBUG` level.
+Names are added in this order while they fit in `STT_PROMPT_MAX_TOKENS`, keeping each entity, area or floor whole with its aliases, and skipping a name already added. One that does not fit is left out, and a shorter one after it can still take the room left. `STT_PROMPT` always comes first and is never shortened, giving a prompt like `Smart home commands. Living Room, Kitchen, Ecobee, Thermostat.`. Without any names, the prompt is `STT_PROMPT` as given. The prompt sent is logged at the `DEBUG` level, and a warning at startup says when `STT_PROMPT` alone leaves no room for names.
 
-The default of 200 is sized for Whisper, which most servers run and which has room for 223 prompt tokens: faster-whisper (Speaches) and whisper.cpp drop the start of a longer prompt, and vLLM rejects a Whisper request whose prompt does not leave room for the transcript in 448 tokens. Models built on a language model take the prompt as context with room for many thousands of tokens, such as Qwen3-ASR served by vLLM; for those, raise `STT_PROMPT_MAX_TOKENS`, to `1000` for instance, or set it to `0` to send every name. Each name is still one more the model can write without hearing it.
+The default of 200 is sized for Whisper, which most servers run and which has room for 223 prompt tokens: faster-whisper (Speaches) and whisper.cpp drop the start of a longer prompt, and vLLM rejects a Whisper request whose prompt does not leave room for the transcript in 448 tokens. Models built on a language model take the prompt as context with room for many thousands of tokens, such as Qwen3-ASR served by vLLM; for those, raise `STT_PROMPT_MAX_TOKENS`, to `1000` for instance, or set it to `0` to send every name. With `0`, the server's context must hold every name along with the audio and the transcript, such as vLLM's `--max-model-len`, or each request fails. Each name is still one more the model can write without hearing it.
 
 On the `OPENAI` backend, `gpt-transcribe` and `gpt-live-transcribe` get the names in `keywords` instead, the field OpenAI provides for terms to expect, and `STT_PROMPT` alone as the prompt, which OpenAI keeps for context about the recording. The names are picked in the same order, within `STT_PROMPT_MAX_TOKENS` for the names alone, and characters OpenAI rejects in a keyword (`<`, `>` and line breaks) are left out. `keywords` set in `STT_EXTRA_BODY` or `STT_REALTIME_EXTRA_BODY` replaces them. Other backends, and other OpenAI models, get the names in the prompt. The keywords sent are logged at the `DEBUG` level.
 
-The proxy keeps one websocket connection open to Home Assistant, opened in the background at startup. It reads the names when it connects, logging how many it read, and again a second after a registry change that can affect them: an entity, device, area or floor that is added, removed or renamed, an entity or device moved to another area, or an entity exposed to Assist or hidden from it. A steady stream of changes delays the read by 10 seconds at most. Other changes, such as a device's firmware version, do not cause a read. What no registry event reports, such as an entity becoming unavailable, a name set in `customize`, or a change to an entity that is not in the entity registry, such as one set up in YAML without a unique id, is picked up within 5 minutes, when the names are read again anyway. When the connection fails or closes, as when Home Assistant restarts, the names read before are used, or none if none were ever read, and transcription goes on; a warning is logged once per outage, and the proxy connects again every 30 seconds. A token that Home Assistant rejects is not tried again, since Home Assistant counts each attempt as a failed login and can ban the address after a few; fix it and restart the proxy.
+The proxy keeps one websocket connection open to Home Assistant, opened in the background at startup. It reads the names when it connects, logging how many it read, again once Home Assistant finishes starting, for a connection made while it started, and again a second after a registry change that can affect them: an entity, device, area or floor that is added, removed or renamed, an entity or device moved to another area, or an entity exposed to Assist or hidden from it. A steady stream of changes delays the read by 10 seconds at most. Other changes, such as a device's firmware version, do not cause a read. What no registry event reports, such as an entity becoming unavailable, a name set in `customize`, or a change to an entity that is not in the entity registry, such as one set up in YAML without a unique id, is picked up within 5 minutes, when the names are read again anyway. When the connection fails or closes, as when Home Assistant restarts, the names read before are used, or none if none were ever read, and transcription goes on; a warning is logged once per outage, and the proxy connects again every 30 seconds. A token that Home Assistant rejects is not tried again, since Home Assistant counts each attempt as a failed login and can ban the address after a few, and neither is the token of a user who is not an administrator, since Home Assistant logs an error for each attempt; fix it and restart the proxy. Home Assistant before 2024.4 has no floors, so its names come without them.
 
-How much a prompt helps depends on the model; a model that ignores the prompt is not affected. A model that does take it can also write a name it did not hear, most often for silence or noise, so check the transcripts after turning names on. Names are not added when the prompt would not reach the model: `gpt-realtime-whisper` Realtime sessions on the `OPENAI` backend take no prompt, so prefer `gpt-live-transcribe` or a `/v1/audio/transcriptions` model; and a `prompt` set in `STT_EXTRA_BODY` or `STT_REALTIME_EXTRA_BODY` replaces the proxy's prompt for the models on that transport (`{"prompt": null}` in `STT_REALTIME_EXTRA_BODY` drops it).
+How much a prompt helps depends on the model; a model that ignores the prompt is not affected. A model that does take it can also write a name it did not hear, most often for silence or noise, so check the transcripts after turning names on. Distil-Whisper models, such as `Systran/faster-distil-whisper-large-v3`, are not helped by a prompt: wyoming-faster-whisper measured `distil-large-v3` ignoring the names and `distil-small.en` truncating or repeating the transcript, so a warning at startup suggests a standard Whisper model. Names are not added when the prompt would not reach the model: `gpt-realtime-whisper` Realtime sessions on the `OPENAI` backend take no prompt, so prefer `gpt-live-transcribe` or a `/v1/audio/transcriptions` model; Voxtral takes none, as Mistral's API biases with its own `context_bias` field, which the proxy does not send, and vLLM's Voxtral ignores the prompt; `gpt-4o-transcribe-diarize` on the `OPENAI` backend takes none; and a `prompt` set in `STT_EXTRA_BODY` or `STT_REALTIME_EXTRA_BODY` replaces the proxy's prompt for the models on that transport (`{"prompt": null}` in `STT_REALTIME_EXTRA_BODY` drops it).
 
 #### Failed Speech Synthesis in Home Assistant
 

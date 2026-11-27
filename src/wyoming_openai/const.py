@@ -26,8 +26,16 @@ OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES = ("gpt-transcribe", "gpt-live-transcr
 # OpenAI STT models whose Realtime sessions do not support a `prompt`
 OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES = ("gpt-realtime-whisper",)
 # OpenAI STT models that take `keywords`, literal terms to expect, alongside `prompt`, which OpenAI keeps for context;
-# the names that bias STT go there instead of into the prompt
-OPENAI_KEYWORD_STT_MODEL_PREFIXES = ("gpt-transcribe", "gpt-live-transcribe")
+# the names that bias STT go there instead of into the prompt. The same family as the plural `languages` models
+OPENAI_KEYWORD_STT_MODEL_PREFIXES = OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES
+# OpenAI STT models that take no prompt, so the names are not added to one; STT_PROMPT is still sent as configured
+OPENAI_PROMPTLESS_STT_MODEL_PREFIXES = ("gpt-4o-transcribe-diarize",)
+# STT models that take no prompt on any backend, matched anywhere in the model name, case-insensitively, so the names
+# are not added to one: Voxtral, whose Mistral API biases with `context_bias` instead and whose vLLM model ignores it
+PROMPTLESS_STT_MODEL_NAME_PARTS = ("voxtral",)
+# Distil-Whisper models, matched the same way, which a prompt does not help: wyoming-faster-whisper measured
+# distil-large-v3 ignoring one, and distil-small.en truncating or looping the transcript from about 52 prompt tokens
+DISTIL_WHISPER_MODEL_NAME_PART = "distil"
 
 # Realtime models are conversational, so TTS over Realtime has to tell the model to read rather than reply
 REALTIME_TTS_INSTRUCTIONS = (
@@ -75,8 +83,9 @@ HASS_CHANGE_MAX_WAIT_SECONDS = 10.0  # Longest a burst of registry changes can p
 # Seconds after which the names are read again without a registry change, for what no registry event reports: the
 # state that makes an entity unavailable, a name set by an integration or customize, or an entity outside the registry
 HASS_REFRESH_SECONDS = 300.0
-# The registry events that can change the names, with the fields whose update can, or None when any change can. An
-# entity's exposure to Assist is kept in its options; a device's name is part of its entities' displayed names
+# The events that can change the names, with the fields of a registry update that can, or None when any such event
+# can. An entity's exposure to Assist is kept in its options; a device's name is part of its entities' displayed names.
+# homeassistant_started ends Home Assistant's startup: names read while it started can lack the entities still loading
 HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
     "entity_registry_updated": frozenset(
         {
@@ -94,6 +103,7 @@ HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
     "device_registry_updated": frozenset({"area_id", "name", "name_by_user"}),
     "area_registry_updated": None,
     "floor_registry_updated": None,
+    "homeassistant_started": None,
 }
 # Entities in these domains are named first, since they are the ones spoken commands control; the domains take turns,
 # so a home with many lights still gets its locks, switches and scenes into a short prompt

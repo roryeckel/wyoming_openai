@@ -12,6 +12,8 @@ services:
       STT_OPENAI_URL: https://api.groq.com/openai/v1
       STT_MODELS: "whisper-large-v3"
       STT_BACKEND: "OPENAI"
+      # Home Assistant names for the STT prompt: set STT_HASS_TOKEN in .env, then this
+      # STT_HASS_URL: "http://homeassistant.local:8123"
       TTS_OPENAI_URL: https://api.groq.com/openai/v1
       TTS_MODELS: "canopylabs/orpheus-v1-english"
       TTS_BACKEND: "OPENAI"

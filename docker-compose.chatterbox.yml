@@ -15,7 +15,8 @@ services:
       TTS_VOICES: "default"
       TTS_SPEED: "1.0"
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       chatterbox-tts:
         condition: service_healthy

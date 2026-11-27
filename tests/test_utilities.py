@@ -30,6 +30,7 @@ from wyoming_openai.utilities import (
     parse_finite_float,
     parse_non_negative_int,
     parse_voice_labels,
+    prompt_has_room_for_names,
     strip_ssml,
     validate_audio_format,
     validate_realtime_stt_extra_body,
@@ -673,6 +674,26 @@ def test_build_prompt_and_keywords_take_every_name_with_no_limit():
     names = [f"Light {number}" for number in range(1000)]
     assert build_prompt("Commands.", groups, 0) == f"Commands. {', '.join(names)}."
     assert build_keywords(groups, 0) == names
+
+
+@pytest.mark.parametrize(
+    ("prefix", "max_tokens", "has_room"),
+    [
+        # The smallest name takes 3: one token, and two for the separator after it
+        (None, 3, True),
+        (None, 2, False),
+        # "Smart home commands." takes 10
+        ("Smart home commands.", 13, True),
+        ("Smart home commands.", 12, False),
+        # The "." a prefix is ended with counts too
+        ("Smart home commands", 12, False),
+        ("A long prompt", 0, True),
+    ],
+)
+def test_prompt_has_room_for_names(prefix, max_tokens, has_room):
+    assert prompt_has_room_for_names(prefix, max_tokens) is has_room
+    # It agrees with the prompt that is built
+    assert (build_prompt(prefix, [("A",)], max_tokens) != prefix) is has_room
 
 
 @pytest.mark.parametrize("prefix", ["A long prompt that does not leave room for any name ", None])

@@ -13,6 +13,8 @@ services:
       STT_STREAMING_MODELS: "gpt-transcribe"
       STT_REALTIME_MODELS: "gpt-live-transcribe gpt-realtime-whisper"
       STT_BACKEND: "OPENAI"
+      # Home Assistant names for the STT prompt: set STT_HASS_TOKEN in .env, then this
+      # STT_HASS_URL: "http://homeassistant.local:8123"
       TTS_OPENAI_URL: https://api.openai.com/v1
       TTS_MODELS: "gpt-4o-mini-tts"
       # TTS_REALTIME_MODELS: "gpt-realtime-2.1-mini"

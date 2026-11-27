@@ -13,12 +13,16 @@ services:
       STT_MODELS: "qwen3-asr"
       STT_BACKEND: "OPENAI"
       # Qwen3-ASR takes the prompt as context, with far more room than Whisper's 223 tokens, so the names
-      # from Home Assistant or transcribe can have more of it (0 sends every name)
+      # from Home Assistant or transcribe can have more of it. 0 sends every name, which must then fit in
+      # vLLM's --max-model-len along with the audio and the transcript
       STT_PROMPT_MAX_TOKENS: "1000"
+      # Home Assistant names for the STT prompt: set STT_HASS_TOKEN in .env, then this
+      # STT_HASS_URL: "http://homeassistant.local:8123"
       # Qwen3-ASR doesn't provide TTS capabilities, only transcription
       # You can combine this with other services for TTS if needed
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       vllm:
         condition: service_healthy
@@ -37,7 +41,8 @@ services:
       # vLLM reserves this share of the GPU's memory; lower it to share the GPU with other services
       - --gpu-memory-utilization
       - "0.85"
-      # Room for the audio, the prompt and the transcript; the model supports 65536, which needs more memory
+      # Room for the audio, the prompt with its names and the transcript; the model supports 65536, which needs
+      # more memory
       - --max-model-len
       - "8192"
     healthcheck:
@@ -45,7 +50,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 300s  # The first start downloads the model
+      # The first start downloads 4.7 GB of model weights, which takes 10 minutes at 60 Mbps
+      start_period: 1800s
     volumes:
       - huggingface-hub:/root/.cache/huggingface/hub
       - vllm-cache:/root/.cache/vllm
