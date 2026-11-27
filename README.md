@@ -21,6 +21,7 @@ This project features a variety of examples for using cutting-edge models in bot
 - **`gpt-4o-mini-tts`**: A compact and efficient text-to-speech model from OpenAI, perfect for responsive vocalization.
 - **`gpt-realtime-2.1-mini`**: OpenAI's stated replacement for its text-to-speech models, used here for [speech synthesis over the Realtime API](#openai-model-deprecations).
 - **`voxtral-mini-latest`**: Mistral AI's multilingual Voxtral ASR, built for long-form audio (32k token context) and tested on up to ~30 minutes per file, available via [Mistral AI](#5-deploying-with-mistral-ai-voxtral) or self-hosted open weights.
+- **`Qwen3-ASR`**: The Qwen team's open-weights speech recognition built on a Qwen3 language model, for 30 languages and 22 Chinese dialects, available for local deployment via [vLLM](#9-deploying-qwen3-asr-with-vllm).
 - **`kokoro`**: A high-quality, open-source text-to-speech model, available for local deployment via [Speaches](#2-deploying-with-speaches-local-service) and [Kokoro-FastAPI](#4-deploying-with-kokoro-fastapi-and-speaches-local-services).
 - **`piper`**: Fast, local neural text-to-speech system with multiple high-quality voices, available for local deployment via [LocalAI](#3-deploying-with-localai-local-service).
 - **`whisper`**: The original renowned open-source transcription model from OpenAI, widely used for its accuracy and versatility.
@@ -410,7 +411,27 @@ For users who want to use Groq's fast inference cloud API, this setup provides a
   docker compose -f docker-compose.groq.yml up -d
   ```
 
-#### 9. Development with Docker
+#### 9. Deploying Qwen3-ASR with vLLM
+
+For users who want local speech recognition from a model built on a language model, vLLM serves Qwen3-ASR with an OpenAI-compatible transcription endpoint.
+
+- **vLLM Setup**:
+  - Serves `Qwen/Qwen3-ASR-1.7B` as `qwen3-asr`, downloading it on first start, which can take several minutes
+  - Requires an NVIDIA GPU; vLLM reserves 85% of its memory (`--gpu-memory-utilization`), so lower that to share the GPU with other services
+  - Limits the context to 8,192 tokens (`--max-model-len`) to save memory, plenty for voice commands
+  - STT-only service (no TTS capabilities - combine with other services for TTS)
+  - Sets `STT_PROMPT_MAX_TOKENS` to 1,000, since Qwen3-ASR takes the prompt as context with far more room than Whisper; it matters once [names are turned on](#biasing-speech-recognition-toward-names)
+  - [Learn more about Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) and [vLLM](https://docs.vllm.ai/)
+
+- **Docker Compose Configuration**: Use the `docker-compose.qwen3-asr.yml` template which includes configuration for both the Wyoming OpenAI proxy and the vLLM service.
+
+- **Command**:
+
+  ```bash
+  docker compose -f docker-compose.qwen3-asr.yml up -d
+  ```
+
+#### 10. Development with Docker
 
 If you are developing the Wyoming OpenAI proxy server and want to build it from source, use the `docker-compose.dev.yml` file along with the base configuration.
 
@@ -420,9 +441,9 @@ If you are developing the Wyoming OpenAI proxy server and want to build it from 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 10. Example: Development with Additional Local Service
+#### 11. Example: Development with Additional Local Service
 
-For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, and `docker-compose.chatterbox.yml`.
+For a development setup using the Speaches local service, combine `docker-compose.speaches.yml` and `docker-compose.dev.yml`. This also works for `docker-compose.kokoro-fastapi.yml`, `docker-compose.localai.yml`, `docker-compose.voxtral.yml`, `docker-compose.openai-edge-tts.yml`, `docker-compose.groq.yml`, `docker-compose.chatterbox.yml`, and `docker-compose.qwen3-asr.yml`.
 
 - **Command**:
   
@@ -430,7 +451,7 @@ For a development setup using the Speaches local service, combine `docker-compos
   docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
   ```
 
-#### 11. Docker Tags
+#### 12. Docker Tags
 
 We follow specific tagging conventions for our Docker images. These tags help in identifying the version and branch of the code that a particular Docker image is based on.
 
@@ -444,7 +465,7 @@ We follow specific tagging conventions for our Docker images. These tags help in
 
 - **`pr-{number}`**: Pull request tags (e.g., `pr-123`) are automatically created for each pull request to allow testing of proposed changes before they are merged. These tags are automatically cleaned up when the pull request is closed or merged.
 
-#### 12. Pull Request Docker Images
+#### 13. Pull Request Docker Images
 
 For contributors and maintainers who want to test changes from pull requests before they are merged, we automatically build and push Docker images for each pull request.
 

@@ -1,0 +1,62 @@
+services:
+  wyoming_openai:
+    image: ghcr.io/roryeckel/wyoming_openai:latest
+    container_name: wyoming_openai
+    ports:
+      - "10300:10300"
+    restart: unless-stopped
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
+      STT_OPENAI_URL: http://vllm:8000/v1
+      STT_MODELS: "qwen3-asr"
+      STT_BACKEND: "OPENAI"
+      # Qwen3-ASR takes the prompt as context, with far more room than Whisper's 223 tokens, so the names
+      # from Home Assistant or transcribe can have more of it (0 sends every name)
+      STT_PROMPT_MAX_TOKENS: "1000"
+      # STT_HASS_TOKEN: "your_home_assistant_long_lived_access_token"
+      # STT_HASS_URL: "http://homeassistant.local:8123"
+      # Qwen3-ASR doesn't provide TTS capabilities, only transcription
+      # You can combine this with other services for TTS if needed
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+  vllm:
+    container_name: vllm
+    image: vllm/vllm-openai:v0.33.0
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    command:
+      - --model
+      - Qwen/Qwen3-ASR-1.7B
+      - --served-model-name
+      - qwen3-asr
+      # vLLM reserves this share of the GPU's memory; lower it to share the GPU with other services
+      - --gpu-memory-utilization
+      - "0.85"
+      # Room for the audio, the prompt and the transcript; the model supports 65536, which needs more memory
+      - --max-model-len
+      - "8192"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s  # The first start downloads the model
+    volumes:
+      - huggingface-hub:/root/.cache/huggingface/hub
+      - vllm-cache:/root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [ gpu ]
+    runtime: nvidia
+
+volumes:
+  huggingface-hub:
+  vllm-cache:
