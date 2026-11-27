@@ -7361,6 +7361,42 @@ async def test_disconnect_waits_for_the_websocket_close_the_idle_failure_starts_
 
 
 @pytest.mark.asyncio
+async def test_drain_that_cancels_the_idle_failure_ends_with_its_websocket_closed(
+    enhanced_handler, mock_info, mock_clients
+):
+    """
+    A drain whose time runs out while the idle failure waits for the receiver cancels it, and ends with the
+    session's websocket closed: the close runs in the idle failure's own task, which the drain waits for after that.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    receiver_cancelled = asyncio.Event()
+
+    class _MultiStepCloseManager(_FakeRealtimeConnectionManager):
+        """A closing handshake that takes a few turns of the event loop, as a real one does."""
+
+        async def __aexit__(self, exc_type, exc, tb):
+            for _ in range(10):
+                await asyncio.sleep(0)
+            await super().__aexit__(exc_type, exc, tb)
+
+    manager = _MultiStepCloseManager(_slow_to_stop_realtime_connection(receiver_cancelled, asyncio.Event()))
+    stt_client.realtime.connect = Mock(return_value=manager)
+    handler = enhanced_handler
+    await handler.handle_event(REALTIME_AUDIO_START)
+    await _settle()  # The receiver waits for events
+    audio_stream = handler._audio_stream
+    assert audio_stream is not None
+
+    handler._on_realtime_idle(audio_stream)
+    await asyncio.wait_for(receiver_cancelled.wait(), timeout=1)
+    # As stop()'s drain: the close starts only when the drain cancels the idle failure
+    await asyncio.wait_for(handler._drain_background_tasks(0.01), timeout=1)
+
+    assert manager.exited
+    assert not handler._background_tasks
+
+
+@pytest.mark.asyncio
 async def test_idle_limit_does_not_end_a_realtime_session_waiting_for_its_transcript(
     enhanced_handler, mock_info, mock_clients, monkeypatch
 ):

@@ -797,8 +797,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         try:
             await self._fail_realtime_audio_stream(audio_stream)
         finally:
-            # Also when cancelled during the error write: nothing else owns the detached session
-            await self._close_realtime_session(session)
+            # Also when cancelled during the error write: nothing else owns the detached session. Closed in this
+            # task, which drains wait for and cancel, rather than in one started while they may already be ending
+            await self._close_realtime_session(session, in_background=False)
 
     async def _report_stt_failure(self) -> None:
         """
@@ -1140,8 +1141,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             session.receive_task.cancel()
         return session
 
-    async def _close_realtime_session(self, session: _DetachedRealtimeSession) -> None:
-        """Wait for a detached session's receiver to stop, then close its connection in the background."""
+    async def _close_realtime_session(self, session: _DetachedRealtimeSession, *, in_background: bool = True) -> None:
+        """
+        Wait for a detached session's receiver to stop, then close its connection: in the background, or, for a
+        caller that is background cleanup itself, in its own task, so whoever waits for or cancels that task has the
+        close too.
+        """
         cleaner = asyncio.current_task()
         cancels_before = cleaner.cancelling() if cleaner is not None else 0
         try:
@@ -1168,12 +1173,18 @@ class OpenAIEventHandler(AsyncEventHandler):
                     transcript_future.exception()
 
             # As with Realtime TTS, the closing handshake must not hold up the Wyoming client
+            close = None
             if session.connection_manager is not None:
-                self._run_in_background(
-                    session.connection_manager.__aexit__(None, None, None), name="openai_realtime_stt_close"
-                )
+                close = session.connection_manager.__aexit__(None, None, None)
             elif session.connection is not None:
-                self._run_in_background(session.connection.close(), name="openai_realtime_stt_close")
+                close = session.connection.close()
+            if close is not None and in_background:
+                self._run_in_background(close, name="openai_realtime_stt_close")
+            elif close is not None:
+                try:
+                    await close
+                except Exception as err:
+                    _LOGGER.debug("Closing the Realtime transcription websocket failed: %s", err)
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task, and release the STT slot the session held."""
