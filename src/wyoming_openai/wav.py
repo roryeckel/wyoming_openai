@@ -62,7 +62,7 @@ _SIGNATURE_BYTES = 8  # Enough of a response to tell a WAV file from raw PCM or 
 class TtsAudioFormat:
     """How the audio bytes a voice's transport yields are framed."""
 
-    headerless: bool  # Raw PCM16 mono rather than a WAV file
+    headerless: bool  # Raw PCM16 mono was requested, or is all the transport carries, rather than a WAV file
     rate: int  # Hz; for WAV only a fallback until the header is parsed
     # Whether a headerless response may be a WAV file anyway, from a backend that ignores response_format, and is
     # then read by its header. True for /v1/audio/speech; never for Realtime, which only carries raw PCM
@@ -210,10 +210,11 @@ class _WavHeaderReader:
 
 def parse_wav_header(wav_data: bytes) -> WavHeader | None:
     """
-    Parse a WAV header to find the audio format, data offset, and data size.
+    Parse the WAV header at the start of a buffer to find the audio format, data offset, and data size.
 
-    Returns None while the bytes could still be the start of a WAV header that has not fully arrived, and for
-    bytes that are not a RIFF file at all, which callers may play as raw PCM.
+    Returns None for bytes that are not a RIFF file, and while a WAV header has not fully arrived. Unlike
+    `WavFramer`, it does not look for other kinds of audio such as FLAC or MP3, so None does not mean the bytes
+    are raw PCM.
 
     Raises:
         WavFormatError: The bytes are a RIFF file, but not a WAV file whose audio can be played.

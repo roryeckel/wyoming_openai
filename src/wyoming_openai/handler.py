@@ -2259,19 +2259,15 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             async with contextlib.aclosing(chunks) as audio_stream:
                 async for chunk in audio_stream:
-                    undecided = framer.awaiting_header
                     audio_data = framer.feed(chunk)
-                    if undecided and not framer.awaiting_header:
-                        self._report_tts_container(framer)
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
                     if audio_data or (not sentence and not framer.awaiting_header):
                         await write_audio(audio_data)
 
-            undecided = framer.awaiting_header
             held_audio = framer.finish()
-            if undecided:
-                self._report_tts_container(framer)
+            # Once the response has ended, by when its first bytes have shown what it is
+            self._report_tts_container(framer)
             if held_audio:
                 await write_audio(held_audio)
 
