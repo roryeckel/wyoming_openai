@@ -1,4 +1,5 @@
 import io
+import logging
 import math
 import random
 import struct
@@ -361,6 +362,31 @@ def test_framer_rejects_wav_it_cannot_play(wav, message):
 
     with pytest.raises(WavFormatError, match=message):
         framer.feed(wav)
+
+
+def test_framer_counts_the_chunks_it_skips_instead_of_logging_each(caplog):
+    """A header misread into silence finds an empty chunk in every 8 zero bytes; a count, not a log flood, shows it."""
+    # Without the pad byte after the odd-length LIST chunk, the reader lands inside the data chunk's header
+    wav = wav_file(fmt_chunk_body(WAVE_FORMAT_PCM, bits=16), bytes(48000), chunks=b"LIST\x05\x00\x00\x00INFOx")
+    framer = WavFramer(WAV_FORMAT)
+
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.wav"):
+        for i in range(0, len(wav), 2048):
+            assert framer.feed(wav[i : i + 2048]) == b""
+        with pytest.raises(WavFormatError, match=r"reached the audio \(\d{4,} other chunks skipped\); the header is"):
+            framer.finish()
+
+    assert not caplog.records
+
+
+def test_framer_logs_how_many_chunks_came_before_the_audio(caplog):
+    wav = wav_file(fmt_chunk_body(WAVE_FORMAT_PCM, bits=16), PCM, chunks=riff_chunk(b"LIST", b"INFOx"))
+    framer = WavFramer(WAV_FORMAT)
+
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.wav"):
+        assert framer.feed(wav) == PCM
+
+    assert "1 other chunk skipped" in caplog.text
 
 
 @pytest.mark.parametrize("chunk_size", [7, 2048])

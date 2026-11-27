@@ -187,6 +187,9 @@ class _WavHeaderReader:
         self.riff_size: int | None = None  # Read from the RIFF header once it has arrived and named WAVE
         self._skip = 0  # Bytes of the current chunk still to drop
         self._fmt: tuple[int, int, int, int] | None = None
+        # Chunks other than fmt dropped on the way to the audio. Counted rather than logged one by one: a header
+        # misread into silence finds an empty chunk in every 8 zero bytes, and a count that high shows the misread
+        self.skipped_chunks = 0
 
     @property
     def received(self) -> int:
@@ -238,13 +241,17 @@ class _WavHeaderReader:
                     return None
                 self._fmt = _parse_fmt_chunk(self.held[8 : 8 + read_size])
             else:
-                _LOGGER.debug("Skipping a %d-byte %r chunk before the WAV audio", chunk_size, chunk_id)
+                self.skipped_chunks += 1
             self._consume(8 + read_size)
             self._skip = padded_size - read_size
 
     def _consume(self, size: int) -> None:
         self.held = self.held[size:]
         self.offset += size
+
+
+def _other_chunks(count: int) -> str:
+    return f"{count} other chunk{'' if count == 1 else 's'} skipped"
 
 
 def parse_wav_header(wav_data: bytes) -> WavHeader | None:
@@ -354,6 +361,7 @@ class WavFramer:
 
         riff_size = self._header.riff_size or 0
         available_audio = self._header.held
+        skipped_chunks = self._header.skipped_chunks
         self._header = None
         self.awaiting_header = False
         self.unrequested_wav = not self._expects_wav
@@ -379,12 +387,13 @@ class WavFramer:
             # size is then a placeholder or covers nothing past the header
             self._remaining = data_size or None
         _LOGGER.debug(
-            "Detected audio format: %s%d Hz, %d channels, %d bytes/sample, header offset: %d, audio size: %s",
+            "Detected audio format: %s%d Hz, %d channels, %d bytes/sample, header offset: %d, %s, audio size: %s",
             "IEEE float converted to 16-bit PCM, " if self._float else "",
             self.rate,
             self.channels,
             self._source_width,
             data_offset,
+            _other_chunks(skipped_chunks),
             "unknown" if self._remaining is None else f"{self._remaining} bytes",
         )
         return self._convert(self._whole_frames(self._bound(available_audio)))
@@ -392,8 +401,8 @@ class WavFramer:
     def _finish(self) -> bytes:
         if self._header is not None:
             raise WavFormatError(
-                f"TTS response ended after {self._header.received} bytes, before its WAV header reached the audio; "
-                "the header is truncated or malformed"
+                f"TTS response ended after {self._header.received} bytes, before its WAV header reached the audio "
+                f"({_other_chunks(self._header.skipped_chunks)}); the header is truncated or malformed"
             )
         audio = self._release_pending()
         if self._partial:
