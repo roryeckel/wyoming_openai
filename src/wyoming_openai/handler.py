@@ -311,6 +311,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._audio_stream: _AudioStreamState | None = None  # Between audio-start and audio-stop
         self._shutdown_reported = False  # stop() told the client its transcription was cut short
         self._stopping = False  # stop() was called; no STT request is started from then on
+        self._stt_response_pending = False  # An audio-stop has not written its transcript or error yet
 
         # State for realtime transcription
         self._realtime_connection_manager: Any | None = None
@@ -413,6 +414,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             # writer is closed: a stream being recorded, or an audio-stop waiting for its transcript
             transcribing = (
                 (self._audio_stream is not None and not self._audio_stream.failed)
+                or self._stt_response_pending
                 or self._realtime_transcript_future is not None
                 or self._wav_buffer is not None
             )
@@ -1057,9 +1059,18 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Its error was sent when it failed; closing the connection ends the request for clients that ignore it
             return False
 
-        if audio_stream.realtime:
-            return await self._handle_realtime_audio_stop(audio_stream)
+        # The client is owed a transcript or an error until one is written. stop() checks this rather than the
+        # session or recording, which are cleaned up before the final events are written
+        self._stt_response_pending = True
+        try:
+            if audio_stream.realtime:
+                return await self._handle_realtime_audio_stop(audio_stream)
+            return await self._handle_http_audio_stop(audio_stream)
+        finally:
+            self._stt_response_pending = False
 
+    async def _handle_http_audio_stop(self, audio_stream: _AudioStreamState) -> bool:
+        """Send a /v1/audio/transcriptions recording and emit its transcription. Returns False to close on failure."""
         if not self._is_recording or not self._wav_buffer:
             _LOGGER.warning("Received audio stop event without recording")
             return True

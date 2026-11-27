@@ -5467,6 +5467,90 @@ async def test_overlapping_realtime_cleanups_keep_the_slot_with_the_socket(
     assert not semaphore.locked()
 
 
+def _record_client_io(handler):
+    """Record, in order, the event types the handler writes and when it closes its writer."""
+    io_log = []
+
+    async def write_event(event):
+        io_log.append(event.type)
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    handler.writer.close = Mock(side_effect=lambda: io_log.append("close"))
+    return io_log
+
+
+@pytest.mark.asyncio
+async def test_stop_reports_a_realtime_failure_that_is_still_cleaning_up(enhanced_handler, mock_info, mock_clients):
+    """stop() during the cleanup of a failed commit still sends its error before closing the connection."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    connection = _FakeRealtimeConnection([])
+    connection.input_audio_buffer.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    handler = enhanced_handler
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+
+    # A receive task slow to stop, so the failed audio-stop is still in its cleanup when stop() runs
+    receiver_stops = asyncio.Event()
+    original_receive_task = handler._realtime_receive_task
+    assert original_receive_task is not None
+    original_receive_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await original_receive_task
+
+    async def slow_receiver():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await receiver_stops.wait()
+            raise
+
+    handler._realtime_receive_task = asyncio.create_task(slow_receiver())
+    io_log = _record_client_io(handler)
+
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await _settle()
+    assert not audio_stop.done()
+    stopping = asyncio.create_task(handler.stop())
+    await _settle()
+    receiver_stops.set()
+    await asyncio.wait_for(asyncio.gather(audio_stop, stopping), timeout=1)
+
+    assert "error" in io_log
+    assert io_log.index("error") < io_log.index("close")
+    assert "transcript" not in io_log
+
+
+@pytest.mark.asyncio
+async def test_stop_reports_shutdown_while_the_final_transcript_write_is_blocked(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A Realtime session already closed for its final events still counts as a transcription stop() reports."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    handler = enhanced_handler
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    client_reads = asyncio.Event()
+    written = []
+
+    async def write_event(event):
+        written.append(event.type)
+        if Transcript.is_type(event.type):
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await _settle()
+    assert written[-1] == "transcript"
+    assert handler._realtime_transcript_future is None  # Cleaned up before the final write
+
+    stopping = asyncio.create_task(handler.stop())
+    await _settle()
+    assert "error" in written
+    client_reads.set()
+    await asyncio.wait_for(asyncio.gather(audio_stop, stopping, return_exceptions=True), timeout=3)
+
+
 @pytest.mark.asyncio
 async def test_stt_semaphore_http_slot_is_released_before_the_error_is_written(mock_info, mock_clients):
     """A failed request frees its slot even while a client is slow to take the error."""
