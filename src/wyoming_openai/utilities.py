@@ -353,8 +353,9 @@ NameGroup = tuple[str, ...]
 # A prefix that already ends a sentence or a list, in ASCII or full-width punctuation, is not given another period
 _PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?", "。", "．", "：", "，", "、", "；", "！", "？")
 _WHITESPACE = re.compile(r"\s+")
-# The pieces a prompt is counted in: a word of ASCII letters, a number, or any other character on its own
-_PROMPT_TOKEN_PIECES = re.compile(r"(?P<word>[A-Za-z]+)|(?P<number>[0-9]+)|\S")
+# The pieces a prompt is counted in, each with the whitespace before it: a word of ASCII letters, a number, or any
+# other character on its own
+_PROMPT_TOKEN_PIECES = re.compile(r"(?P<space>\s*)(?:(?P<run>[A-Za-z]+|[0-9]+)|(?P<other>\S))")
 # OpenAI rejects a whole transcription request, or session update, with a keyword that holds one of these
 _KEYWORD_REJECTED_CHARACTERS = re.compile(r"[<>\r\n]")
 
@@ -368,20 +369,22 @@ def clean_name(name: object) -> str | None:
 
 def estimate_prompt_tokens(text: str) -> int:
     """
-    An estimate of how many tokens Whisper's tokenizer makes of a prompt, which errs high so a prompt within a budget
-    stays within Whisper's limit: a word of ASCII letters is a token per 4 letters, a number a token per 2 digits, and
-    any other character a token. A letter outside ASCII is a token of its own, so a word in a script such as Cyrillic
-    or Chinese counts at least as many tokens as Whisper makes of it, and usually more.
+    A high estimate of how many tokens Whisper's tokenizer makes of a prompt, so a prompt within a budget stays within
+    Whisper's limit. The tokenizer is byte-level and never makes more tokens than a text has bytes, so any character
+    other than an ASCII letter or digit counts as many tokens as it has UTF-8 bytes, with the whitespace before it: one
+    for ASCII punctuation, two for a Cyrillic letter, three for most Chinese characters, four for an emoji. For text
+    outside ASCII the count is an upper bound. A word of ASCII letters, or a number, counts a token per 2 characters,
+    the estimate wyoming-faster-whisper uses without a tokenizer: about twice what Whisper makes of an English word,
+    and still more than it makes of most brand names and model numbers. A single space before it joins it, as in
+    Whisper's tokenizer, and more whitespace counts its bytes.
     """
     tokens = 0
     for piece in _PROMPT_TOKEN_PIECES.finditer(text):
-        length = len(piece.group())
-        if piece.lastgroup == "word":
-            tokens += -(-length // 4)
-        elif piece.lastgroup == "number":
-            tokens += -(-length // 2)
+        space = len(piece.group("space").encode("utf-8"))
+        if (run := piece.group("run")) is not None:
+            tokens += max(0, space - 1) + -(-len(run) // 2)
         else:
-            tokens += 1
+            tokens += space + len(piece.group("other").encode("utf-8"))
     return tokens
 
 
@@ -422,8 +425,8 @@ def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int 
     A group goes in whole or not at all; one that does not fit is left out, and a later, shorter one can still take the
     room left. Names already chosen, compared case-insensitively, are skipped.
     """
-    # The estimate of a joined prompt is the sum of its parts: each name adds its own tokens, and one for the ", " or
-    # the "." after it
+    # The estimate of a joined prompt is at most the sum of its parts: each name adds its own tokens, and two for the
+    # ", " after it, which also covers the "." that ends the list and the space between the prefix and the names
     tokens = used_tokens
     seen: set[str] = set()
     chosen: list[str] = []
@@ -435,7 +438,7 @@ def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int 
                 unique.setdefault(key, cleaned)
         if not unique:
             continue
-        cost = sum(estimate_prompt_tokens(name) + 1 for name in unique.values())
+        cost = sum(estimate_prompt_tokens(name) + 2 for name in unique.values())
         if tokens + cost > max_tokens:
             # In order, so the most useful names are kept and the names are the same for the same groups
             continue

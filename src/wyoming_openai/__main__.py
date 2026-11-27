@@ -187,7 +187,8 @@ async def main():
         help=(
             "Estimated tokens the names sent with transcribe and read from Home Assistant may bring the STT prompt "
             "to; names that do not fit are left out, while --stt-prompt is always kept whole. The estimate errs high, "
-            f"so the prompt stays within Whisper's 223 tokens (default: {DEFAULT_STT_PROMPT_MAX_TOKENS})"
+            "counting the UTF-8 bytes of characters outside ASCII and a token per 2 ASCII letters, so the prompt "
+            f"stays within Whisper's 223 tokens (default: {DEFAULT_STT_PROMPT_MAX_TOKENS})"
         ),
     )
     parser.add_argument(

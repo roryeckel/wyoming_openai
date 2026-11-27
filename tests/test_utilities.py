@@ -1,5 +1,7 @@
 import argparse
+import itertools
 import math
+import re
 from enum import Enum
 from io import BytesIO
 
@@ -658,29 +660,34 @@ def test_build_prompt_skips_names_added_before():
 
 
 def test_build_prompt_leaves_out_a_group_that_does_not_fit_and_goes_on():
-    # Kitchen costs 3 estimated tokens, Ecobee and Thermostat 7 together, and Lamp 2
+    # With 2 for the separator after each name: Kitchen costs 6, Ecobee and Thermostat 12 together, and Lamp 4
     groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("Lamp",), ("Ecobee",)]
     # The group after Kitchen does not fit whole, but the shorter ones after it do, even a name of the group left out
-    assert build_prompt(None, groups, 8) == "Kitchen, Lamp, Ecobee."
-    assert build_prompt(None, groups, 10) == "Kitchen, Ecobee, Thermostat."
+    assert build_prompt(None, groups, 15) == "Kitchen, Lamp, Ecobee."
+    assert build_prompt(None, groups, 18) == "Kitchen, Ecobee, Thermostat."
 
 
 @pytest.mark.parametrize("prefix", ["A long prompt that does not leave room for any name ", None])
 def test_build_prompt_keeps_stt_prompt_as_given_when_no_names_fit(prefix):
-    assert build_prompt(prefix, [("Kitchen",)], 2) == prefix
+    assert build_prompt(prefix, [("Kitchen",)], 5) == prefix
     assert build_prompt(prefix, [], 200) == prefix
 
 
 @pytest.mark.parametrize(
     ("text", "tokens"),
     [
-        ("Kitchen, Ecobee.", 6),
+        # A token per 2 ASCII letters or digits, and one per ASCII punctuation mark
+        ("Kitchen, Ecobee.", 9),
         ("RT-AX82U-0F90", 9),
-        ("Smart home commands.", 6),
-        # A letter outside ASCII is a token of its own
-        ("Küche", 3),
-        ("Кухня", 5),
-        ("厨房, 客厅.", 6),
+        ("Smart home commands.", 10),
+        # Every other character counts its UTF-8 bytes, with the whitespace before it
+        ("Küche", 5),
+        ("Кухня", 10),
+        ("厨房, 客厅.", 15),
+        ("Mustang RC (❄|☀)", 15),
+        ("😀", 4),
+        # More than one space before a word counts the spaces beyond the first
+        ("a  b", 3),
         ("", 0),
     ],
 )
@@ -688,14 +695,23 @@ def test_estimate_prompt_tokens(text, tokens):
     assert estimate_prompt_tokens(text) == tokens
 
 
+@pytest.mark.parametrize(
+    "text", ["厨房, 客厅.", "Кухня, Гостиная.", "Küche, Wohnzimmer.", "😀 ❄", "家庭命令。 厨房, 客厅."]
+)
+def test_estimate_prompt_tokens_is_at_least_the_bytes_outside_ascii(text):
+    """Test text outside ASCII counts at least its UTF-8 bytes, the most tokens Whisper's byte-level tokenizer makes."""
+    ascii_runs = sum(len(run) for run in re.findall(r"[A-Za-z0-9]+", text))
+    assert estimate_prompt_tokens(text) >= len(text.encode("utf-8")) - ascii_runs
+
+
 def test_build_prompt_counts_the_budget_in_tokens_for_any_script():
-    """Test a prompt of names in a script that takes a token per character stays within the budget."""
-    groups = [(f"卧室{number}",) for number in range(300)]
+    """Test a prompt in a script of several bytes a character stays within the budget in bytes, so in tokens."""
+    rooms = "厨房客厅卧室书浴阳台车库走廊花园"
+    groups = [(first + second,) for first, second in itertools.permutations(rooms, 2)]
     prompt = build_prompt("家庭命令。", groups, 200)
-    assert prompt is not None
-    assert estimate_prompt_tokens(prompt) <= 200
-    # A budget in characters would have let in far more than Whisper's 223 tokens
-    assert len(prompt) < 400
+    assert prompt is not None and prompt != "家庭命令。"
+    # Whisper's tokenizer never makes more tokens than a text has bytes, so this holds whatever the tokenizer does
+    assert len(prompt.encode("utf-8")) <= 200
 
 
 @pytest.mark.parametrize(
@@ -719,7 +735,7 @@ def test_build_keywords_picks_names_as_the_prompt_does():
     groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("kitchen",), ("Lamp",)]
     assert build_keywords(groups, 200) == ["Kitchen", "Ecobee", "Thermostat", "Lamp"]
     # Without STT_PROMPT, which keywords leave in the prompt, the whole budget is the names'
-    assert build_keywords(groups, 5) == ["Kitchen", "Lamp"]
+    assert build_keywords(groups, 10) == ["Kitchen", "Lamp"]
 
 
 def test_build_keywords_leaves_out_the_characters_openai_rejects():

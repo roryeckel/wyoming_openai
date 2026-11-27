@@ -7077,7 +7077,9 @@ async def test_transcribe_names_are_used_without_home_assistant(enhanced_handler
     stt_client, _ = mock_clients
     mock_info.asr[0].models[0].name = "whisper-1"
     enhanced_handler._stt_transcript_names = True
-    enhanced_handler._stt_prompt_max_tokens = estimate_prompt_tokens("Test prompt. Ecobee.")
+    # Room for "Test prompt." and Ecobee with its separator, but not for Rory after it
+    budget = estimate_prompt_tokens("Test prompt.") + estimate_prompt_tokens("Ecobee") + 2
+    enhanced_handler._stt_prompt_max_tokens = budget
     stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
 
     transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee", "Rory"]}

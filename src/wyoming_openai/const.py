@@ -63,8 +63,9 @@ OPENAI_SPEECH_ONLY_TTS_VOICES = tuple(
 
 # Biasing STT toward names: those a client sends with transcribe, and those Home Assistant exposes to Assist.
 # Whisper keeps at most 223 prompt tokens and drops the start of a longer prompt, which holds STT_PROMPT and the most
-# useful names. The budget is in estimated tokens (see utilities.estimate_prompt_tokens), which overcount, so a prompt
-# within it stays within Whisper's limit in any script; wyoming-faster-whisper uses the same 200-token default
+# useful names. The budget is in estimated tokens (see utilities.estimate_prompt_tokens), which overcount: outside ASCII
+# they are an upper bound, so a prompt within the budget stays within Whisper's limit in any script.
+# wyoming-faster-whisper uses the same 200-token default
 DEFAULT_STT_PROMPT_MAX_TOKENS = 200
 HASS_REQUEST_TIMEOUT = 10.0  # Seconds to connect to Home Assistant, or to read the names from it
 HASS_CLOSE_TIMEOUT = 2.0  # Seconds to wait for Home Assistant to close the websocket, so it cannot hold up shutdown
