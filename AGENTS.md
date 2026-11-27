@@ -125,15 +125,25 @@ opening the PR rather than ship the break.
 
 ### Providers
 
-A request-shape change runs on:
+The plan names the service the change touches (STT, TTS or both) and the
+request mode its changed code is on: for STT, HTTP streamed, HTTP not streamed
+or Realtime; for TTS, sentence by sentence, one request per reply, or Realtime.
+For each of those, a request-shape change runs on:
 
-- official OpenAI, on every transport the change touches: HTTP in the provider
-  lane (`openai`), Realtime in the OpenAI lane
-- every backend shim its code path reaches: `SPEACHES` (the local lane),
-  `KOKORO_FASTAPI` (`kokoro-fastapi`), `LOCALAI` (`localai`)
-- one third-party provider on the plain `OPENAI` backend:
-  `speaches-openai-backend` is free, and `groq`, `mistral`, `openai-edge-tts` or
-  `chatterbox` count too
+- official OpenAI in that mode: `openai` (streamed STT, TTS sentence by
+  sentence), `openai-unstreamed` (STT not streamed, TTS one request per reply),
+  or the OpenAI lane (Realtime)
+- every backend shim its code path reaches: `SPEACHES` (the local lane: STT not
+  streamed, TTS sentence by sentence), `KOKORO_FASTAPI` (`kokoro-fastapi`),
+  `LOCALAI` (`localai`)
+- one third-party provider on the plain `OPENAI` backend that serves that
+  service: `speaches-openai-backend` is free for both, and `groq` (both),
+  `mistral` (STT), `openai-edge-tts` or `chatterbox` (TTS) count too
+
+A provider counts only for the service and mode it runs, which its file in
+`tests/ha_e2e/smoke/providers/` states in its `Serves:` line. A TTS-only
+provider does not count for an STT change, and a streamed preset does not count
+for a change on the unstreamed path.
 
 Paid providers are not a hard requirement. Run one when its key is available;
 otherwise say in the plan and in the PR which providers did not run, and rely on

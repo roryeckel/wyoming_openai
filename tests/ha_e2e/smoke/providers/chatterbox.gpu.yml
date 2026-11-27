@@ -1,0 +1,11 @@
+# Puts docker-compose.chatterbox.yml's engine on the GPU, which that file leaves on the CPU. SMOKE_GPU picks the
+# device, as for the smoke stack.
+services:
+  chatterbox-tts:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${SMOKE_GPU:-0}"]
+              capabilities: [gpu]

@@ -41,8 +41,10 @@ scope.
   read their names, never their values. `STT_OPENAI_KEY` and `TTS_OPENAI_KEY`
   there are OpenAI keys unless the file says otherwise. A commented-out key, or
   one anywhere else, needs the developer's go-ahead.
-- **Engines:** a local provider's file header names its engine and how to start
-  it. Note the images that would have to be pulled, and their size.
+- **Providers:** each file in `tests/ha_e2e/smoke/providers/` says in its
+  `Serves:` line which service and request mode it runs; count it only for
+  those. A local provider's header names its engine and how to start it. Note
+  the images that would have to be pulled, and their size.
 - **Ports:** the stack uses 127.0.0.1 ports 8010, 8124 and 10400-10406. A local
   engine publishes the port its compose file names (for example 8880 for
   Kokoro-FastAPI).
@@ -91,15 +93,28 @@ docker compose -p ha_smoke_openai down
 
 A key goes into `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` (provider lane) or
 `OPENAI_API_KEY` (OpenAI lane) through the environment of the one command that
-starts the proxy. Read only that entry from `.env`, in the same process, and
-never echo it, log it or put it on a command line. Don't source `.env` as a
-script. In a worktree, `.env` is in the main checkout. In bash, for example:
+starts the proxy:
+
+- Read only that entry from `.env`, in the same process, and never echo it,
+  log it or put it on a command line. Don't source `.env` as a script. In a
+  worktree, `.env` is in the main checkout.
+- Set only the keys for the sides the provider's `Serves:` line names, and
+  clear the others first. A key left over from another provider would go to
+  the backend serving the other side.
+- Turn shell tracing off before reading a key: `set -x` would print it.
+
+In bash, for example:
 
 ```bash
-( key() { sed -n "s/^$1 *= *//p" "$ENV_FILE" | tr -d "\"'"; }
+( set +x
+  unset SMOKE_STT_KEY SMOKE_TTS_KEY
+  key() { sed -n "s/^$1 *= *//p" "$ENV_FILE" | tr -d "\"'"; }
   SMOKE_STT_KEY="$(key STT_OPENAI_KEY)" SMOKE_TTS_KEY="$(key TTS_OPENAI_KEY)" SMOKE_PROVIDER=openai \
     docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait )
 ```
+
+This reads uncommented entries only. A commented-out key is used only with
+the developer's go-ahead, and read from its own line the same way.
 
 In PowerShell, set the variables from the parsed entries in a script block,
 and remove them when it ends. Whatever runs the command must not print its

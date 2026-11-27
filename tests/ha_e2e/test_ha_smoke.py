@@ -99,8 +99,6 @@ ADMITTED_LOG = "Streaming chunk directly"
 HA_SHUTDOWN_LOG = "Error from Wyoming service: Server is shutting down"
 STT_CANCEL_LOG = "Cancelling the STT request in flight"
 TRANSCRIPTION_POST_LOG = "POST http://speaches:8000/v1/audio/transcriptions"
-SYNTHESIS_TEXT_LOG = "Processing final remaining text"
-SYNTHESIS_DONE_LOG = "Successfully completed streaming synthesis"
 
 
 @dataclass(frozen=True)
@@ -345,13 +343,25 @@ def smoke() -> Iterator[Smoke]:
 def _check_provider_proxy() -> None:
     """Fail unless the provider lane's proxy runs, for the provider HA_SMOKE_PROVIDER names."""
 
-    result = subprocess.run(
-        ["docker", "inspect", "--format", "{{index .Config.Labels \"" + PROVIDER_LABEL + "\"}}", PROVIDER.container],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    running = result.stdout.strip() if result.returncode == 0 else None
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{.State.Running}} {{index .Config.Labels \"" + PROVIDER_LABEL + "\"}}",
+                PROVIDER.container,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("docker inspect did not answer within 30 seconds", pytrace=False)
+    state, _, label = result.stdout.strip().partition(" ") if result.returncode == 0 else ("", "", "")
+    # A stopped container keeps its labels: it has to be running too
+    running = label if state == "true" else None
     if running != PROVIDER_NAME:
         found = "is not running" if running is None else f"runs {running!r}"
         pytest.fail(
@@ -809,15 +819,15 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
     """
     A client that stops reading while it holds the only TTS slot fails within the client write limit, and a
     satellite waiting for the slot is answered after it. With that client still connected, the proxy still stops
-    promptly and cleanly. On LIMITED_DEBUG the proxy's log shows when the satellite's request was admitted. The
-    OpenAI proxy must not log at debug level with its key, so its log only shows when the satellite's synthesis
-    finished, which a backend slower to answer than the write limit would also put after the release.
+    promptly and cleanly. On LIMITED_DEBUG the proxy's log also shows the satellite's request admitted only after the
+    release. The OpenAI proxy must not log at debug level with its key, and no other line names the request, so
+    there the case checks the write limit and the stop with Realtime TTS; the limit's queueing does not depend on the
+    TTS backend.
     """
 
     text = "The kitchen lights are on, and the garage door is closed."
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)
     admitted_before = _admitted_count(proxy, text)
-    received_before = _received_count(proxy, text)
     stuck = await _exec_in(proxy, STUCK_TTS_CLIENT, LONG_REPLY, "40")
     freed: asyncio.Task[float] | None = None
     try:
@@ -849,18 +859,6 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
                 assert admitted_line > failed_line, (
                     "the satellite's request was admitted while the stuck client still held the only slot"
                 )
-            else:
-                # Its synthesis finished only after the write limit had failed the stuck client
-                received_line = _nth_line(lines, lambda line: _is_received(line, text), received_before + 1)
-                assert received_line is not None, "the proxy's log does not show the satellite's text"
-                done_line = next(
-                    (index for index in range(received_line + 1, len(lines)) if SYNTHESIS_DONE_LOG in lines[index]),
-                    None,
-                )
-                assert done_line is not None, "the proxy's log does not show the satellite's synthesis finishing"
-                assert done_line > failed_line, (
-                    "the satellite's synthesis finished while the stuck client still held the only slot"
-                )
             outcome.notes["log"] = lines[failed_line][-140:]
             # The stuck client is still connected, with audio it never takes left in its connection
             stop_seconds = await _restart(proxy)
@@ -882,14 +880,6 @@ def _admitted_count(proxy: Proxy, text: str) -> int:
 def _is_admitted(line: str, text: str) -> bool:
     # The log line has the start of the sentence
     return ADMITTED_LOG in line and text[:25] in line
-
-
-def _received_count(proxy: Proxy, text: str) -> int:
-    return sum(_is_received(line, text) for line in container_logs(proxy.container).splitlines())
-
-
-def _is_received(line: str, text: str) -> bool:
-    return SYNTHESIS_TEXT_LOG in line and text[:25] in line
 
 
 def _nth_line(lines: list[str], matches: Any, nth: int) -> int | None:

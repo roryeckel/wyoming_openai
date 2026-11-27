@@ -779,7 +779,7 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 | The proxy stopping while it answers three satellites, then the next turn | 1 | | |
 | Eight satellites at once | default, 1, none | | |
 
-In the silent client scenario, the proxy's own log must show the satellite's session waiting for the slot before the idle limit frees it. In the local stuck-client scenario, it must show the satellite's request admitted only after the write limit frees the slot. That case runs on a fourth proxy at limit 1 that logs at debug level, for that line. The OpenAI stuck-client case has no such line, since that proxy must not log its key, so its log must show the satellite's synthesis finishing only after the slot is freed. That still passes a limit that doesn't hold if the backend takes longer than the write limit to answer. In the restart case, Home Assistant must log the proxy's shutdown error, and a turn must fail after the stop began. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`.
+In the silent client scenario, the proxy's own log must show the satellite's session waiting for the slot before the idle limit frees it. In the local stuck-client scenario, it must show the satellite's request admitted only after the write limit frees the slot. That case runs on a fourth proxy at limit 1 that logs at debug level, for that line. The OpenAI stuck-client case has no such line, since that proxy must not log its key at debug level, so it checks the write limit and the stop with Realtime TTS. The limit's queueing doesn't depend on the TTS backend. In the restart case, Home Assistant must log the proxy's shutdown error, and a turn must fail after the stop began. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`.
 
 Only `-m ha_smoke` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_e2e` picks it up. The stack needs an NVIDIA GPU (`SMOKE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
 
@@ -798,7 +798,7 @@ HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
 
 The OpenAI cases also test the Realtime models themselves, so a misheard command, a sentence returned as silence, or a reply the model makes up in place of the text fails a turn.
 
-The provider lane runs the first four scenarios against one other provider, defined in a file under [`tests/ha_e2e/smoke/providers/`](tests/ha_e2e/smoke/providers): official OpenAI over HTTP, GroqCloud, Mistral, Kokoro-FastAPI, LocalAI, openai-edge-tts, Chatterbox, or the stack's own Speaches on the plain `OPENAI` backend. Whatever a file leaves unset stays on the stack's Speaches. Its header says whether it needs a key, and how to start its engine if it runs locally. Set `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` for the side or sides a paid provider serves:
+The provider lane runs the first four scenarios against one other provider, defined in a file under [`tests/ha_e2e/smoke/providers/`](tests/ha_e2e/smoke/providers): official OpenAI over HTTP, streamed (`openai`) or not (`openai-unstreamed`), GroqCloud, Mistral, Kokoro-FastAPI, LocalAI, openai-edge-tts, Chatterbox, or the stack's own Speaches on the plain `OPENAI` backend. Whatever a file leaves unset stays on the stack's Speaches. Its header says which service and request mode it serves, whether it needs a key, and how to start its engine if it runs locally. Set `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` for the side or sides a paid provider serves:
 
 ```bash
 docker compose -f docker-compose.kokoro-fastapi.yml up -d --wait kokoro   # an engine that runs locally
@@ -807,7 +807,7 @@ HA_SMOKE_PROVIDER=kokoro-fastapi pytest -m ha_smoke -v -k provider
 docker compose -p ha_smoke_provider down
 ```
 
-The tests check that the running provider proxy is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) sets out which changes need which providers. Tear everything down with the following. The first two commands need no key:
+The tests check that the provider proxy is running, and is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) sets out which changes need which providers. Tear everything down with the following. The first two commands need no key:
 
 ```bash
 docker compose -p ha_smoke_openai down
