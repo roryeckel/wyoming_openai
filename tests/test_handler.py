@@ -6653,7 +6653,9 @@ async def test_cancelled_stop_and_disconnect_leave_no_realtime_session_behind(
     while it waited for stop(): the open Realtime session is still closed, and its slot freed.
     """
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([]))
+    socket_closed = asyncio.Event()
+    # A closing handshake that takes a while, so ending before it finishes would leave it to the event loop's teardown
+    manager = _GatedCloseManager(_FakeRealtimeConnection([]), socket_closed)
     stt_client.realtime.connect = Mock(return_value=manager)
     limit = ConcurrencyLimit(1)
     (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
@@ -6680,14 +6682,17 @@ async def test_cancelled_stop_and_disconnect_leave_no_realtime_session_behind(
     disconnecting = asyncio.create_task(handler.disconnect())
     await _settle()
     disconnecting.cancel()
-    await asyncio.gather(disconnecting, return_exceptions=True)
+    await _settle()
 
     assert not limit.full
     assert handler._realtime_receive_task is None
+    # disconnect() waits for the websocket close it started, since stop() has drained its own already
+    assert not disconnecting.done()
+    socket_closed.set()
+    await asyncio.gather(disconnecting, return_exceptions=True)
+    assert manager.exited
     client_closed.set()
     await asyncio.gather(stopping, return_exceptions=True)
-    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
-    assert manager.exited
 
 
 @pytest.mark.asyncio

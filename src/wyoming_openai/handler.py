@@ -408,6 +408,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 # would be if stop() was cancelled too
                 self._discard_recording()
                 await self._cleanup_realtime_transcription()
+                # The websocket close that schedules is waited for here, as stop() may have drained its own already
+                await self._drain_background_tasks(SHUTDOWN_DRAIN_TIMEOUT)
                 raise
         try:
             task = asyncio.current_task()
