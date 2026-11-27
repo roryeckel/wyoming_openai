@@ -8509,11 +8509,7 @@ async def test_a_connection_the_handler_ends_on_a_client_that_stopped_reading_is
         handlers.append(handler)
         return handler
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-
-    server = AsyncTcpServer("127.0.0.1", port)
+    server = AsyncTcpServer("127.0.0.1", 0)
     server_task = asyncio.create_task(server.run(handler_factory), name="wyoming-test-server")
     flood_task: asyncio.Task[None] | None = None
     client_writer: asyncio.StreamWriter | None = None
@@ -8522,6 +8518,9 @@ async def test_a_connection_the_handler_ends_on_a_client_that_stopped_reading_is
         async with asyncio.timeout(2):
             while server._server is None:
                 await asyncio.sleep(0)
+        listener = server._server
+        assert isinstance(listener, asyncio.Server)
+        port = listener.sockets[0].getsockname()[1]
 
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -8577,6 +8576,93 @@ async def test_a_connection_the_handler_ends_on_a_client_that_stopped_reading_is
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows event loops treat a full socket differently")
+async def test_a_handler_cancelled_while_it_closes_a_stalled_connection_aborts_it(mock_info, monkeypatch):
+    """
+    A handler cancelled while it waits for a stalled connection to close, as at Ctrl+C, aborts it rather than leave
+    it open, and leaves the close waiter usable, so the server's shutdown does not wait for the connection.
+    """
+    monkeypatch.setattr("wyoming_openai.handler.SHUTDOWN_CLOSE_TIMEOUT", 30.0)  # Longer than the test
+    monkeypatch.setattr("wyoming_openai.handler.TTS_STREAM_STOP_TIMEOUT", 0.05)
+    handlers: list[OpenAIEventHandler] = []
+
+    def handler_factory(reader, writer):
+        handler = OpenAIEventHandler(reader, writer, info=mock_info, stt_client=None, tts_client=None)
+        handlers.append(handler)
+        return handler
+
+    server = AsyncTcpServer("127.0.0.1", 0)
+    server_task = asyncio.create_task(server.run(handler_factory), name="wyoming-test-server")
+    flood_task: asyncio.Task[None] | None = None
+    client_writer: asyncio.StreamWriter | None = None
+    client_socket: socket.socket | None = None
+    try:
+        async with asyncio.timeout(2):
+            while server._server is None:
+                await asyncio.sleep(0)
+        listener = server._server
+        assert isinstance(listener, asyncio.Server)
+        port = listener.sockets[0].getsockname()[1]
+
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client_socket.setblocking(False)
+        await asyncio.get_running_loop().sock_connect(client_socket, ("127.0.0.1", port))
+        _, client_writer = await asyncio.open_connection(sock=client_socket, limit=1024)
+
+        async with asyncio.timeout(2):
+            while not handlers:
+                await asyncio.sleep(0)
+        handler = handlers[0]
+        (run_task,) = server._handlers
+        payload = b"\x00\x01" * (128 * 1024)
+
+        async def flood() -> None:
+            while True:
+                await handler.write_event(AudioChunk(audio=payload, rate=24000, width=2, channels=1).event())
+
+        flood_task = asyncio.create_task(flood(), name="wyoming-test-flood")
+        async with asyncio.timeout(2):
+            while handler.writer.transport.get_write_buffer_size() == 0:
+                await asyncio.sleep(0.01)
+
+        # The request fails and ends the connection, whose close then waits on the audio the client does not take
+        await async_write_event(Event(type="transcribe", data={"name": "not-a-model"}), client_writer)
+        async with asyncio.timeout(2):
+            while not handler.writer.transport.is_closing():
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert not run_task.done()
+
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+
+        # Aborted, and the close waiter still completes rather than raise its own cancellation
+        async with asyncio.timeout(0.5):
+            await handler.writer.wait_closed()
+        server._stop_requested = True
+        async with asyncio.timeout(2):
+            await server.stop()
+            await asyncio.wait_for(asyncio.shield(server_task), 0.5)
+    finally:
+        if flood_task is not None:
+            flood_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await flood_task
+        if client_writer is not None:
+            client_writer.close()
+            with contextlib.suppress(Exception):
+                await client_writer.wait_closed()
+        elif client_socket is not None:
+            client_socket.close()
+        if not server_task.done():
+            server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await server_task
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows event loops treat a full socket differently")
 async def test_server_stop_aborts_a_client_that_stopped_reading(mock_info, monkeypatch):
     """Test a client that leaves audio unread cannot hold up shutdown of the real server."""
     monkeypatch.setattr("wyoming_openai.handler.SHUTDOWN_CLOSE_TIMEOUT", 0.05)
@@ -8587,11 +8673,7 @@ async def test_server_stop_aborts_a_client_that_stopped_reading(mock_info, monke
         handlers.append(handler)
         return handler
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-
-    server = AsyncTcpServer("127.0.0.1", port)
+    server = AsyncTcpServer("127.0.0.1", 0)
     server_task = asyncio.create_task(server.run(handler_factory), name="wyoming-test-server")
     flood_task: asyncio.Task[None] | None = None
     client_writer: asyncio.StreamWriter | None = None
@@ -8600,6 +8682,9 @@ async def test_server_stop_aborts_a_client_that_stopped_reading(mock_info, monke
         async with asyncio.timeout(2):
             while server._server is None:
                 await asyncio.sleep(0)
+        listener = server._server
+        assert isinstance(listener, asyncio.Server)
+        port = listener.sockets[0].getsockname()[1]
 
         # A small receive buffer leaves the server's audio queued as soon as the test client stops reading
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

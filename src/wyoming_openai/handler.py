@@ -1758,11 +1758,11 @@ class OpenAIEventHandler(AsyncEventHandler):
         open. Python 3.12 and later wait for every client transport at server shutdown, also one whose handler has
         ended, so one that never takes the rest of its data would hold the process up until it is forced shut.
         """
+        # Never cancelled, as it waits on the close waiter of the stream protocol, which a cancellation would cancel
+        # for every later wait_closed(), as that of a concurrent or repeated stop(); an abort completes it instead
         wait_closed = asyncio.create_task(self.writer.wait_closed(), name="wyoming_writer_close")
         try:
             async with asyncio.timeout(SHUTDOWN_CLOSE_TIMEOUT):
-                # Shielded, so a timeout does not cancel the close waiter of the stream protocol, which a repeated
-                # stop() would then find cancelled
                 await asyncio.shield(wait_closed)
         except TimeoutError:
             _LOGGER.warning(
@@ -1772,14 +1772,14 @@ class OpenAIEventHandler(AsyncEventHandler):
             self.writer.transport.abort()
             # The abort completes the waiter; its result is not needed
             with contextlib.suppress(Exception):
-                await wait_closed
+                await asyncio.shield(wait_closed)
+        except asyncio.CancelledError:
+            # Interrupted, as at Ctrl+C: aborted rather than left open on data the client may never take, which
+            # would hold up the server's shutdown, and the cancellation goes on
+            self.writer.transport.abort()
+            raise
         except Exception as err:
             _LOGGER.debug("Waiting for the client connection to close failed: %s", err)
-        finally:
-            if not wait_closed.done():
-                wait_closed.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await wait_closed
 
     async def _write_event_or_fail(self, event: Event) -> None:
         """
