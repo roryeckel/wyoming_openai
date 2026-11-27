@@ -6194,6 +6194,176 @@ async def test_receiver_stopped_by_a_failed_chunk_writes_nothing_after_the_shutd
 
 
 @pytest.mark.asyncio
+async def test_server_stop_answers_a_half_closed_client_whose_session_start_ignored_the_cancellation(
+    mock_info, mock_clients
+):
+    """
+    Over a real connection: a Realtime start whose settings update catches the shutdown's cancellation and returns
+    still leaves the answer to stop(), though the client stopped sending and the server has read its end of stream.
+    """
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+    connection = _FakeRealtimeConnection([])
+    update_entered = asyncio.Event()
+
+    async def stubborn_update(**kwargs):
+        update_entered.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+
+    connection.session.update = AsyncMock(side_effect=stubborn_update)
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    handlers: list[OpenAIEventHandler] = []
+
+    def handler_factory(reader, writer):
+        handler = OpenAIEventHandler(
+            reader,
+            writer,
+            info=mock_info,
+            stt_client=stt_client,
+            tts_client=None,
+            stt_realtime_models=["gpt-realtime-whisper"],
+        )
+        handlers.append(handler)
+        return handler
+
+    server = AsyncTcpServer("127.0.0.1", 0)
+    server_task = asyncio.create_task(server.run(handler_factory), name="wyoming-test-server")
+    client_writer: asyncio.StreamWriter | None = None
+    try:
+        async with asyncio.timeout(2):
+            while server._server is None:
+                await asyncio.sleep(0)
+        listener = server._server
+        assert isinstance(listener, asyncio.Server)
+        port = listener.sockets[0].getsockname()[1]
+        client_reader, client_writer = await asyncio.open_connection("127.0.0.1", port)
+        await async_write_event(
+            Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}), client_writer
+        )
+        await asyncio.wait_for(update_entered.wait(), timeout=2)
+        client_writer.write_eof()
+        async with asyncio.timeout(2):
+            while not handlers[0].reader.at_eof():
+                await asyncio.sleep(0.01)
+
+        server._stop_requested = True
+        received = []
+        async with asyncio.timeout(3):
+            await server.stop()
+            while (event := await async_read_event(client_reader)) is not None:
+                received.append(event)
+
+        assert [event.type for event in received] == ["transcript-start", "error"]
+        assert Error.from_event(received[-1]).text == SHUTDOWN_ERROR
+    finally:
+        if client_writer is not None:
+            client_writer.close()
+            with contextlib.suppress(Exception):
+                await client_writer.wait_closed()
+        if not server_task.done():
+            server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await server_task
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_handler_during_a_failed_chunks_cleanup_ends_it(mock_info, mock_clients):
+    """
+    Ctrl+C while a failed chunk's cleanup waits for the receiver ends the handler, even if the receiver catches the
+    cancellation and ends normally.
+    """
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
+    receiver_cancelled = asyncio.Event()
+    may_yield = asyncio.Event()
+
+    class _StubbornConnection(_FakeRealtimeConnection):
+        async def __aiter__(self):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                receiver_cancelled.set()
+                while not may_yield.is_set():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await may_yield.wait()
+                yield _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="late")
+                raise
+
+    connection = _StubbornConnection([])
+    connection.input_audio_buffer.append = AsyncMock(side_effect=RuntimeError("socket gone"))
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    reader = asyncio.StreamReader()
+    writer = MagicMock(name="writer")
+    writer.wait_closed = AsyncMock()
+    handler = OpenAIEventHandler(
+        reader,
+        writer,
+        info=mock_info,
+        stt_client=stt_client,
+        tts_client=None,
+        stt_realtime_models=["gpt-realtime-whisper"],
+    )
+    handler.write_event = AsyncMock()
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    payload = b"\x00\x01" * 10
+
+    run_task = asyncio.create_task(handler.run())
+    try:
+        reader.feed_data(json.dumps({"type": "audio-start", "data": audio_format}).encode() + b"\n")
+        await _settle()  # The session is open, and the receiver waits for events
+        reader.feed_data(
+            json.dumps({"type": "audio-chunk", "data": audio_format, "payload_length": len(payload)}).encode()
+            + b"\n"
+            + payload
+        )
+        await asyncio.wait_for(receiver_cancelled.wait(), timeout=1)
+        run_task.cancel()
+        await _settle()
+        may_yield.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, timeout=1)
+        assert run_task.cancelled()
+    finally:
+        may_yield.set()
+        if not run_task.done():
+            run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_error_from_the_realtime_connection_fails_the_session(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A CancelledError the connection raises by itself fails the session: the client is told, and the slot freed."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    drop = asyncio.Event()
+
+    class _DroppingConnection(_FakeRealtimeConnection):
+        async def __aiter__(self):
+            await drop.wait()
+            raise asyncio.CancelledError
+            yield
+
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(_DroppingConnection([])))
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    written = []
+    handler.write_event = AsyncMock(
+        side_effect=lambda event: written.append(Error.from_event(event).text if event.type == "error" else event.type)
+    )
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    drop.set()
+    await _settle()
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    assert written == ["transcript-start", STT_FAILED_ERROR]
+    assert not limit.full
+
+
+@pytest.mark.asyncio
 async def test_stt_limit_is_shared_by_http_and_realtime_requests(mock_info, mock_clients):
     """A Realtime session on one connection holds the only slot; an HTTP request on another waits for it to end."""
     from openai.types.audio.transcription import Transcription

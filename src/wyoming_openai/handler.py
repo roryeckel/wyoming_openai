@@ -407,6 +407,10 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def disconnect(self) -> None:
         """Drop the audio stream in progress and other handler-owned resources when the Wyoming client disconnects."""
         try:
+            if self._stopping:
+                # stop() answers the client and closes the connection. The run loop can end first, as at once for a
+                # client that has stopped sending, so the stream stop() reports on is not dropped before it has
+                await self._stopped.wait()
             task = asyncio.current_task()
             if task is not None and task.cancelling():
                 # Cancelled rather than disconnected, as when Ctrl+C stops a server that has no SIGTERM handler to call
@@ -919,12 +923,14 @@ class OpenAIEventHandler(AsyncEventHandler):
                     if not transcript_future.done():
                         transcript_future.set_exception(error)
                     return
-        except asyncio.CancelledError:
-            raise
-        except Exception as err:
+        except (Exception, asyncio.CancelledError) as err:
+            if isinstance(err, asyncio.CancelledError) and _cancel_requested():
+                raise
+            # A CancelledError the connection raised of its own fails the session, as other errors do
             _LOGGER.exception("Error receiving realtime transcription events: %s", err)
             if not transcript_future.done():
-                transcript_future.set_exception(err)
+                cancelled = RealtimeTranscriptionError("Realtime connection was cancelled")
+                transcript_future.set_exception(err if isinstance(err, Exception) else cancelled)
         else:
             if not transcript_future.done():
                 transcript_future.set_exception(
@@ -956,13 +962,11 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _run_stt_request[T](self, request: Coroutine[Any, Any, T]) -> T | None:
         """
         Run the backend part of an STT request, from waiting for a slot to writing its answer, as a task stop() can
-        cancel. Returns its result, or None when stop() cancelled it or had been called before it started. stop() then
-        answers the client and closes the connection, which this waits for: the run loop must not close it first, as
-        it would at once for a client that has stopped sending.
+        cancel. Returns its result, or None when stop() cancelled it or had been called before it started; stop()
+        answers the client then, and disconnect() waits for it to have done so.
         """
         if self._stopping:
             request.close()
-            await self._stopped.wait()
             return None
         handler_task = asyncio.current_task()
         cancels_before = handler_task.cancelling() if handler_task is not None else 0
@@ -978,7 +982,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             if handler_cancelled() or not self._stopping:
                 # The handler itself is cancelled, not only its request; only stop() cancels the request alone
                 raise
-            await self._stopped.wait()
             return None
         finally:
             if self._stt_request is task:
@@ -1021,18 +1024,19 @@ class OpenAIEventHandler(AsyncEventHandler):
             # session may open while this one's closing handshake is still running
             slot.release()
 
+        cleaner = asyncio.current_task()
+        cancels_before = cleaner.cancelling() if cleaner is not None else 0
         try:
             if receive_task and not receive_task.done():
                 # Stopped before the session closes, and before this returns, so no late delta follows what the
                 # caller writes next
                 receive_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await receive_task
-                except asyncio.CancelledError:
-                    # The receiver ends cancelled. A cancellation of the task cleaning up, as at Ctrl+C or when stop()
-                    # cancels the request, goes on once the session is closed below
-                    if _cancel_requested():
-                        raise
+                if cleaner is not None and cleaner.cancelling() > cancels_before:
+                    # The task cleaning up was cancelled while it waited, as at Ctrl+C, however the receiver ended:
+                    # that cancellation goes on once the session is closed below
+                    raise asyncio.CancelledError
         finally:
             if transcript_future is not None:
                 if not transcript_future.done():
@@ -1072,7 +1076,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         else:
             request = self._handle_http_audio_stop(audio_stream)
         result = await self._run_stt_request(request)
-        # None when stop() cancelled the request, answered the client and closed the connection
+        # None when stop() cancelled the request: it answers the client, and the connection closes
         return False if result is None else result
 
     async def _handle_http_audio_stop(self, audio_stream: _AudioStreamState) -> bool:
