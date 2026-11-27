@@ -794,8 +794,11 @@ class OpenAIEventHandler(AsyncEventHandler):
             "No audio for %g seconds; ending the Realtime transcription session", REALTIME_STT_IDLE_TIMEOUT
         )
         session = self._detach_realtime_session()
-        await self._fail_realtime_audio_stream(audio_stream)
-        await self._close_realtime_session(session)
+        try:
+            await self._fail_realtime_audio_stream(audio_stream)
+        finally:
+            # Also when cancelled during the error write: nothing else owns the detached session
+            await self._close_realtime_session(session)
 
     async def _report_stt_failure(self) -> None:
         """
@@ -1681,15 +1684,23 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _drain_background_tasks(self, timeout: float | None = None) -> None:
         """
-        Wait for pending background cleanup. What a timeout leaves unfinished is cancelled and given as long again to
-        end, so a close that ignores its cancellation cannot hold up shutdown; what still runs then is left to the
-        event loop. A drain that is itself cancelled cancels what it was waiting for, which is not left without one.
+        Wait for pending background cleanup, and for cleanup the tasks waited for start meanwhile, as the idle
+        failure's websocket close, within the same time. What a timeout leaves unfinished is cancelled and given as
+        long again to end, so a close that ignores its cancellation cannot hold up shutdown; what still runs then is
+        left to the event loop. A drain that is itself cancelled cancels what it was waiting for, which is not left
+        without one.
         """
-        if not self._background_tasks:
-            return
-        tasks = set(self._background_tasks)
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        tasks: set[asyncio.Task[Any]] = set()
         try:
-            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            while self._background_tasks:
+                remaining = None if deadline is None else deadline - loop.time()
+                if remaining is not None and remaining <= 0:
+                    break
+                tasks = set(self._background_tasks)
+                await asyncio.wait(tasks, timeout=remaining)
+            pending = set(self._background_tasks)
             for task in pending:
                 self._cancel_cleanup_once(task)
             if pending:
@@ -1700,7 +1711,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         len(pending),
                     )
         except asyncio.CancelledError:
-            for task in tasks:
+            for task in tasks | self._background_tasks:
                 self._cancel_cleanup_once(task)
             raise
 
