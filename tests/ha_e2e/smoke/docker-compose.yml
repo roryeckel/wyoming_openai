@@ -6,8 +6,9 @@
 #
 # Three proxies share one Speaches, each with other limits, so a turn can be sent to the one a scenario needs:
 # the defaults (3), 1, and none (0). Home Assistant runs the demo integration, so Assist has devices to control.
-# The stack has its own project, ports and container names, so it runs next to the HA E2E stack. It reuses the
-# HA E2E stack's model cache volume. Tear it down with:
+# The stack has its own project, ports and container names, so it runs next to the HA E2E stack, and publishes its
+# ports on 127.0.0.1 only. It reuses the HA E2E stack's model cache volume (create it with `docker volume create
+# wyoming_openai_huggingface-hub` if that stack never ran). Tear it down with:
 #
 #   docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v
 name: ha_smoke
@@ -44,7 +45,7 @@ services:
     image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
     restart: "no"
     ports:
-      - "8010:8000"
+      - "127.0.0.1:8010:8000"
     environment:
       enable_ui: "False"
       log_level: info
@@ -72,7 +73,7 @@ services:
     <<: *proxy
     container_name: ha_smoke_proxy
     ports:
-      - "10400:10300"
+      - "127.0.0.1:10400:10300"
     environment:
       <<: *local-env
 
@@ -80,7 +81,7 @@ services:
     <<: *proxy
     container_name: ha_smoke_proxy_limited
     ports:
-      - "10401:10300"
+      - "127.0.0.1:10401:10300"
     environment:
       <<: *local-env
       STT_CONCURRENT_REQUESTS: "1"
@@ -90,7 +91,7 @@ services:
     <<: *proxy
     container_name: ha_smoke_proxy_unlimited
     ports:
-      - "10402:10300"
+      - "127.0.0.1:10402:10300"
     environment:
       <<: *local-env
       STT_CONCURRENT_REQUESTS: "0"
@@ -101,7 +102,7 @@ services:
     image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-2026.11.3}
     restart: "no"
     ports:
-      - "8124:8123"
+      - "127.0.0.1:8124:8123"
     environment:
       TZ: UTC
     volumes:
@@ -115,7 +116,8 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8123/api/onboarding', timeout=3)\"",
+          # Not /api/onboarding, which an instance that started onboarded already does not serve
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8123/manifest.json', timeout=3)\"",
         ]
       interval: 10s
       timeout: 5s

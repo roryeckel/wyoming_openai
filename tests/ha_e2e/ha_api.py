@@ -27,6 +27,7 @@ ENTRY_STATE_FILENAME = "config_entries.json"
 # only stable identifier the config-entry API exposes; the API omits entry data,
 # which contains host/port.
 PROXY_ENTRY_TITLES = frozenset({"openai", "openai-streaming", "openai-realtime"})
+ONBOARDING_STEPS = ("user", "core_config", "analytics", "integration")
 
 
 class HaUnavailableError(RuntimeError):
@@ -219,11 +220,15 @@ class HaRestClient:
         raise HaApiError(f"Home Assistant {path} returned HTTP {response.status_code}: {body}")
 
     def wait_until_up(self, timeout: float = READY_TIMEOUT_SECONDS) -> None:
+        """
+        Wait until the frontend answers. It is set up after onboarding, so from then on /api/onboarding either
+        answers or, for an instance that started onboarded already, never will.
+        """
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                response = self.request("GET", "/api/onboarding", auth=False)
+                response = self.request("GET", "/manifest.json", auth=False)
                 if response.status_code == 200:
                     return
                 last_error = HaApiError(f"HTTP {response.status_code}")
@@ -231,7 +236,7 @@ class HaRestClient:
                 last_error = exc
             time.sleep(1.0)
         raise HaUnavailableError(
-            f"Home Assistant did not answer {self.settings.base_url}/api/onboarding within {timeout}s "
+            f"Home Assistant did not answer {self.settings.base_url}/manifest.json within {timeout}s "
             f"({last_error}). Start the stack with docker-compose.ha-e2e.yml first."
         )
 
@@ -248,7 +253,12 @@ class HaRestClient:
         raise HaUnavailableError(f"Home Assistant did not reach RUNNING within {timeout}s")
 
     def onboarding_status(self) -> list[dict[str, Any]]:
-        return self.get_json("/api/onboarding", auth=False)
+        response = self.request("GET", "/api/onboarding", auth=False)
+        if response.status_code == 404:
+            # Home Assistant registers no onboarding views when it starts onboarded already, as after a restart
+            return [{"step": step, "done": True} for step in ONBOARDING_STEPS]
+        self._raise_for_status(response, "/api/onboarding")
+        return response.json()
 
     def create_onboarding_user(self, username: str, password: str) -> str:
         response = self.request(
@@ -304,8 +314,8 @@ class HaRestClient:
             ),
         ):
             response = self.request("POST", path, json_body=body)
-            if response.status_code == 403:
-                # Already done on a previous attempt.
+            if response.status_code in (403, 404):
+                # Already done on a previous attempt, or before Home Assistant started, which then has no such view
                 continue
             self._raise_for_status(response, path)
 

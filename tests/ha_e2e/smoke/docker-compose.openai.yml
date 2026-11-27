@@ -1,13 +1,14 @@
 # OpenAI Realtime proxies for the smoke stack: Realtime STT and Realtime TTS, at the default limits and at 1.
-# Start the smoke stack first; these join its network. The key is read from OPENAI_API_KEY:
+# Start the smoke stack first; these join its network. The key is read from OPENAI_API_KEY, and starting them without
+# it fails. Their ports are published on 127.0.0.1 only, since every request to them is billed to that key:
 #
 #   docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d
 #   HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
 #
-# Kept in a project of its own, so no command on the smoke stack recreates these without the key. Remove them,
-# and the key with them, with:
+# Kept in a project of its own, so no command on the smoke stack recreates these without the key. Remove them, and
+# the key with them, by project name, which needs no key:
 #
-#   docker rm -f ha_smoke_proxy_openai ha_smoke_proxy_openai_limited
+#   docker compose -p ha_smoke_openai down
 name: ha_smoke_openai
 
 x-openai-proxy: &openai-proxy
@@ -25,12 +26,12 @@ x-openai-env: &openai-env
   WYOMING_LOG_LEVEL: INFO
   WYOMING_LANGUAGES: en
   STT_OPENAI_URL: https://api.openai.com/v1
-  STT_OPENAI_KEY: ${OPENAI_API_KEY:-}
+  STT_OPENAI_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY to start the OpenAI proxies}
   # Only the Realtime model, so Home Assistant's STT entity uses it
   STT_REALTIME_MODELS: gpt-live-transcribe
   STT_BACKEND: OPENAI
   TTS_OPENAI_URL: https://api.openai.com/v1
-  TTS_OPENAI_KEY: ${OPENAI_API_KEY:-}
+  TTS_OPENAI_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY to start the OpenAI proxies}
   TTS_REALTIME_MODELS: gpt-realtime-2.1-mini
   TTS_STREAMING_MODELS: gpt-realtime-2.1-mini
   TTS_BACKEND: OPENAI
@@ -40,7 +41,7 @@ services:
     <<: *openai-proxy
     container_name: ha_smoke_proxy_openai
     ports:
-      - "10403:10300"
+      - "127.0.0.1:10403:10300"
     environment:
       <<: *openai-env
 
@@ -48,7 +49,7 @@ services:
     <<: *openai-proxy
     container_name: ha_smoke_proxy_openai_limited
     ports:
-      - "10404:10300"
+      - "127.0.0.1:10404:10300"
     environment:
       <<: *openai-env
       STT_CONCURRENT_REQUESTS: "1"

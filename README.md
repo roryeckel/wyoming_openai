@@ -766,16 +766,22 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 
 #### Home Assistant Smoke Tests
 
-`tests/ha_e2e/test_ha_smoke.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. It covers:
+`tests/ha_e2e/test_ha_smoke.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. Each turn speaks a command synthesized with Kokoro, then checks the transcript, what Assist did, the device's new state, and the spoken reply, transcribed back. A reply fails if any of its sentences is missing, or if it has a silence of 3 seconds or more. The scenarios run against proxies at the default limits (3), at 1, and with no limit (0):
 
-- a few turns of one conversation: lights turned off, on and dimmed, a garage door opened, asked about and closed
-- three, then eight, satellites speaking at once, each controlling its own device
-- long replies read out at once
-- a client that stops reading while it holds the only TTS slot, and the proxy stopping with that client still connected
-- a Realtime client that sends no audio while it holds the only STT slot
-- the proxy restarting while turns are queued
+| Scenario | Local proxies | OpenAI proxies |
+|---|---|---|
+| A six-turn conversation: lights off, on and dimmed, a garage door opened, asked about and closed | default | default |
+| A long reply streamed in deltas, as from an LLM agent | default | default |
+| Three satellites at once, each controlling its own device | default, 1, none | default, 1 |
+| Three long replies read out at once | default, 1, none | default, 1 |
+| A client that stops reading while it holds the only TTS slot, then `docker stop` with it still connected | 1 | 1 |
+| A Realtime client that sends no audio while it holds the only STT slot | | 1 |
+| The proxy stopping while it answers three satellites, then the next turn | 1 | |
+| Eight satellites at once | default, 1, none | |
 
-Each scenario runs against proxies at the default limits, at 1, and with no limit. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`. The stack needs an NVIDIA GPU (`SMOKE_GPU` picks it, default `0`) and reuses the HA E2E stack's model cache volume; create it with `docker volume create wyoming_openai_huggingface-hub` if that stack never ran.
+In the stuck and silent client scenarios, the satellite that speaks meanwhile must be answered only after the slot is freed. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`.
+
+Only `-m ha_smoke` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_e2e` picks it up. The stack needs an NVIDIA GPU (`SMOKE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
 
 ```bash
 docker build -t wyoming_openai:smoke .
@@ -783,16 +789,16 @@ docker compose -f tests/ha_e2e/smoke/docker-compose.yml up -d
 pytest -m ha_smoke -v
 ```
 
-The OpenAI Realtime lane runs the same scenarios on `gpt-live-transcribe` and `gpt-realtime-2.1-mini`. Start its proxies with `OPENAI_API_KEY` set, then run with `HA_SMOKE_OPENAI=1` (`$env:HA_SMOKE_OPENAI = "1"` in PowerShell):
+The OpenAI cases run on `gpt-live-transcribe` and `gpt-realtime-2.1-mini`, and every request is billed to the key. Start their proxies with `OPENAI_API_KEY` set; they refuse to start without it. `HA_SMOKE_OPENAI=1` adds the OpenAI cases to the run (`$env:HA_SMOKE_OPENAI = "1"` in PowerShell), and `-k openai` runs only them:
 
 ```bash
 docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d
 HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
 ```
 
-That lane also tests the Realtime models themselves: a misheard command, or a sentence a model returns as silence, fails a turn, and the failure names the silence. Tear everything down with:
+The OpenAI cases also test the Realtime models themselves, so a misheard command, a sentence returned as silence, or a reply the model makes up in place of the text fails a turn. Tear everything down with the following. The first command needs no key:
 
 ```bash
-docker rm -f ha_smoke_proxy_openai ha_smoke_proxy_openai_limited
+docker compose -p ha_smoke_openai down
 docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v
 ```

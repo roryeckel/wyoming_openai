@@ -51,6 +51,15 @@ class AssistRunResult:
     tts_progress: TtsProgress | None
     run_started_at: float
     conversation_id: str
+    # time.monotonic() at which each of `events` arrived, in the same order
+    received_at: list[float] = field(default_factory=list)
+
+    def received(self, event_type: str) -> float | None:
+        """When the first event of a type arrived, as time.monotonic()."""
+        for event, at in zip(self.events, self.received_at, strict=False):
+            if event.get("type") == event_type:
+                return at
+        return None
 
     @property
     def error_events(self) -> list[dict[str, Any]]:
@@ -142,6 +151,7 @@ async def run_assist(
 
     run_started_at = time.monotonic()
     events: list[dict[str, Any]] = []
+    received_at: list[float] = []
     run_start: dict[str, Any] | None = None
     progress: TtsProgress | None = None
     fetch_task: asyncio.Task[None] | None = None
@@ -203,6 +213,7 @@ async def run_assist(
 
                     event = message.get("event") or {}
                     events.append(event)
+                    received_at.append(time.monotonic())
                     event_type = event.get("type")
                     data = event.get("data") or {}
 
@@ -283,6 +294,7 @@ async def run_assist(
         tts_progress=progress,
         run_started_at=run_started_at,
         conversation_id=resolved_conversation_id,
+        received_at=received_at,
     )
 
 
@@ -301,6 +313,7 @@ async def run_assist_text(
 
     run_started_at = time.monotonic()
     events: list[dict[str, Any]] = []
+    received_at: list[float] = []
     run_start: dict[str, Any] | None = None
     progress: TtsProgress | None = None
     fetch_task: asyncio.Task[None] | None = None
@@ -349,6 +362,7 @@ async def run_assist_text(
                         continue
                     event = message.get("event") or {}
                     events.append(event)
+                    received_at.append(time.monotonic())
                     if event.get("type") == "run-start":
                         data = event.get("data") or {}
                         run_start = data
@@ -374,6 +388,7 @@ async def run_assist_text(
         tts_progress=progress,
         run_started_at=run_started_at,
         conversation_id=str((run_start or {}).get("conversation_id", conversation_id or "")),
+        received_at=received_at,
     )
 
 
