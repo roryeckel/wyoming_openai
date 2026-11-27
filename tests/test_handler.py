@@ -7030,9 +7030,12 @@ async def test_tts_limit_is_shared_across_connections(dummy_info, dummy_clients,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stuck_on", ["audio-start", "audio-chunk"])
 async def test_tts_client_that_stops_taking_audio_fails_the_synthesis_and_frees_its_slot(
-    enhanced_handler, mock_clients, monkeypatch, stuck_on
+    enhanced_handler, mock_clients, monkeypatch, caplog, stuck_on
 ):
-    """A client that does not take a chunk of audio in time fails the synthesis, so it cannot keep the slot."""
+    """
+    A client that does not take a chunk of audio in time fails the synthesis, so it cannot keep the slot, and the log
+    says why.
+    """
     monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
     _, tts_client = mock_clients
     _mock_speech_response(tts_client, [REALTIME_TTS_PCM] * 3)
@@ -7057,14 +7060,18 @@ async def test_tts_client_that_stops_taking_audio_fails_the_synthesis_and_frees_
 
     assert "error" in written
     assert not limit.full
+    assert f"Client did not take its {stuck_on} event within 0.05 seconds" in caplog.text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stuck_on", ["transcript-start", "transcript-chunk"])
 async def test_stt_client_that_stops_reading_a_streamed_transcript_fails_the_request_and_frees_its_slot(
-    mock_info, mock_clients, monkeypatch, stuck_on
+    mock_info, mock_clients, monkeypatch, caplog, stuck_on
 ):
-    """A client that does not take a transcript chunk in time fails the request, so it cannot keep the slot."""
+    """
+    A client that does not take a transcript chunk in time fails the request, so it cannot keep the slot, and the log
+    says why.
+    """
     monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
     stt_client, _ = mock_clients
     stt_client.audio.transcriptions.create = AsyncMock(return_value=_HiStream())
@@ -7088,16 +7095,17 @@ async def test_stt_client_that_stops_reading_a_streamed_transcript_fails_the_req
     assert written[-1] == STT_FAILED_ERROR
     assert "transcript" not in written
     assert not limit.full
+    assert f"Client did not take its {stuck_on} event within 0.05 seconds" in caplog.text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stuck_on", ["transcript-start", "transcript-chunk"])
 async def test_realtime_client_that_stops_reading_fails_the_session_and_frees_its_slot(
-    enhanced_handler, mock_info, mock_clients, monkeypatch, stuck_on
+    enhanced_handler, mock_info, mock_clients, monkeypatch, caplog, stuck_on
 ):
     """
     A client that does not take the Realtime transcript-start, or a chunk the receiver writes, in time fails the
-    session, which gives its slot back.
+    session, which gives its slot back, and the log says why.
     """
     monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
@@ -7125,6 +7133,42 @@ async def test_realtime_client_that_stops_reading_fails_the_session_and_frees_it
 
     assert written.count(STT_FAILED_ERROR) == 1
     assert not limit.full
+    assert f"Client did not take its {stuck_on} event within 0.05 seconds" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_realtime_client_too_slow_after_audio_stop_is_not_reported_as_a_missing_transcript(
+    enhanced_handler, mock_info, mock_clients, monkeypatch, caplog
+):
+    """
+    A receiver write that times out while audio-stop waits for the transcript fails the request as the client's
+    doing, not as a backend that sent no transcript within REALTIME_STT_TRANSCRIPT_TIMEOUT.
+    """
+    monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    # Delivered once the audio is committed, so the receiver writes it while audio-stop waits for the transcript
+    delta = _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hi")
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(_FakeRealtimeConnection([delta])))
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    written = []
+
+    async def write_event(event):
+        written.append(Error.from_event(event).text if event.type == "error" else event.type)
+        if event.type == "transcript-chunk":
+            await asyncio.Event().wait()  # The client stopped reading
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    assert await asyncio.wait_for(handler.handle_event(Event(type="audio-stop")), timeout=2) is False
+
+    assert written.count(STT_FAILED_ERROR) == 1
+    assert not limit.full
+    assert "Error during realtime transcription: Client did not take its transcript-chunk event" in caplog.text
+    assert "No Realtime transcript received" not in caplog.text
 
 
 @pytest.mark.asyncio

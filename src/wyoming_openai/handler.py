@@ -226,6 +226,14 @@ class RealtimeSynthesisError(Exception):
     """Raised when OpenAI Realtime speech synthesis fails."""
 
 
+class SlowClientError(Exception):
+    """
+    Raised when the Wyoming client does not take an event of a request that may hold a shared slot within
+    CLIENT_WRITE_TIMEOUT. Not a TimeoutError, so a backend time limit around the write, such as the wait for a
+    Realtime transcript, does not report it as its own.
+    """
+
+
 class OpenAIEventHandler(AsyncEventHandler):
     def __init__(
         self,
@@ -726,7 +734,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             await connection.session.update(session=self._get_realtime_transcription_session(audio_stream))
             self._check_stt_not_stopping()
             self._is_recording = True
-            await self._write_event_in_time(TranscriptStart().event())
+            await self._write_event_or_fail(TranscriptStart().event())
             audio_stream.transcript_started = True
             self._arm_realtime_idle_timer(audio_stream)
             _LOGGER.info(
@@ -982,7 +990,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         _LOGGER.debug("Realtime transcription chunk: %s", delta)
                         # Always the transcript so far: wyoming 1.11 requires whole transcripts from a streaming ASR
                         # service, so there is deliberately no mode that sends the pre-1.11 fragments
-                        await self._write_event_in_time(TranscriptChunk(text=full_text).event())
+                        await self._write_event_or_fail(TranscriptChunk(text=full_text).event())
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = _final_transcript(getattr(event, "transcript", None), full_text)
                     if not transcript_future.done():
@@ -1282,7 +1290,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         # Reading the response is backend work too, so no read starts once stop() has begun: each
                         # is preceded by a check, from the first one after transcript-start on
                         self._check_stt_not_stopping()
-                        await self._write_event_in_time(TranscriptStart().event())
+                        await self._write_event_or_fail(TranscriptStart().event())
                         self._check_stt_not_stopping()
                         async for chunk in transcription:
                             if chunk.type == "transcript.text.done":
@@ -1294,7 +1302,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                                 full_text += chunk.delta
                                 _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
                                 # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
-                                await self._write_event_in_time(TranscriptChunk(text=full_text).event())
+                                await self._write_event_or_fail(TranscriptChunk(text=full_text).event())
                             self._check_stt_not_stopping()
                     if not completed:
                         # Ended without the completed transcription, as a backend cut off by the shutdown may: outside
@@ -1755,14 +1763,24 @@ class OpenAIEventHandler(AsyncEventHandler):
                 with contextlib.suppress(asyncio.CancelledError):
                     await wait_closed
 
-    async def _write_event_in_time(self, event: Event) -> None:
+    async def _write_event_or_fail(self, event: Event) -> None:
         """
         Write an event of a request that may hold a shared STT or TTS slot. A client that does not take it within
-        CLIENT_WRITE_TIMEOUT fails the request with TimeoutError, so a client that stopped reading cannot keep the
-        slot from other connections.
+        CLIENT_WRITE_TIMEOUT fails the request with SlowClientError, so a client that stopped reading cannot keep the
+        slot from other connections. For an abort or a shutdown, _write_event_bounded gives up quietly instead.
         """
-        async with asyncio.timeout(CLIENT_WRITE_TIMEOUT):
-            await self.write_event(event)
+        timeout = asyncio.timeout(CLIENT_WRITE_TIMEOUT)
+        try:
+            async with timeout:
+                await self.write_event(event)
+        except TimeoutError:
+            if not timeout.expired():
+                raise
+            # Named, so the log of the failed request gives the cause; the cancellation the timeout used is not part
+            # of it
+            raise SlowClientError(
+                f"Client did not take its {event.type} event within {CLIENT_WRITE_TIMEOUT:g} seconds"
+            ) from None
 
     async def _write_event_bounded(self, event: Event) -> bool:
         """
@@ -2485,7 +2503,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Send the audio start for the selected format and mark the stream as open."""
         # Marked before the write, which waits for the client to take it: stop() meanwhile must see the stream
         self._synthesis.audio_started = True
-        await self._write_event_in_time(AudioStart(rate=rate, width=width, channels=channels).event())
+        await self._write_event_or_fail(AudioStart(rate=rate, width=width, channels=channels).event())
 
     async def _write_tts_audio_stop(self) -> None:
         """Send the audio stop at the end of the audio sent so far and mark the stream as closed."""
@@ -2525,7 +2543,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_width=framer.width,
             audio_channels=framer.channels,
         )
-        await self._write_event_in_time(
+        await self._write_event_or_fail(
             AudioChunk(
                 audio=audio_data,
                 rate=framer.rate,
