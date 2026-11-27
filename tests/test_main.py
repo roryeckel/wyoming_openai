@@ -1015,7 +1015,7 @@ async def test_main_defaults_tts_concurrent_requests_to_three(monkeypatch):
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
 
-    assert handler_kwargs["tts_concurrent_requests"] == 3
+    assert handler_kwargs["tts_limit"].limit == 3
 
 
 @pytest.mark.asyncio
@@ -1024,7 +1024,7 @@ async def test_main_treats_empty_tts_concurrent_requests_env_as_unset(monkeypatc
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
 
-    assert handler_kwargs["tts_concurrent_requests"] == 3
+    assert handler_kwargs["tts_limit"].limit == 3
 
 
 @pytest.mark.asyncio
@@ -1033,7 +1033,7 @@ async def test_main_reads_tts_concurrent_requests_from_env(monkeypatch):
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
 
-    assert handler_kwargs["tts_concurrent_requests"] == 2
+    assert handler_kwargs["tts_limit"].limit == 2
 
 
 @pytest.mark.asyncio
@@ -1042,7 +1042,7 @@ async def test_main_cli_tts_concurrent_requests_overrides_env(monkeypatch):
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--tts-concurrent-requests", "4")
 
-    assert handler_kwargs["tts_concurrent_requests"] == 4
+    assert handler_kwargs["tts_limit"].limit == 4
 
 
 @pytest.mark.asyncio
@@ -1056,7 +1056,7 @@ async def test_main_tts_concurrent_requests_zero_means_no_limit(monkeypatch, sou
         monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
         handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--tts-concurrent-requests", "0")
 
-    assert handler_kwargs["tts_concurrent_requests"] == 0
+    assert handler_kwargs["tts_limit"].limit == 0
 
 
 @pytest.mark.asyncio
@@ -1178,8 +1178,9 @@ async def test_main_does_not_warn_about_concurrency_limits_left_at_their_default
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("env_value", [None, "", "0"])
-async def test_main_leaves_stt_requests_unlimited_by_default(monkeypatch, env_value):
+@pytest.mark.parametrize(("env_value", "expected"), [(None, 3), ("", 3), ("0", 0)])
+async def test_main_defaults_stt_concurrent_requests_to_three(monkeypatch, env_value, expected):
+    """STT, like TTS, allows 3 requests across all connections by default; 0 lifts the limit."""
     if env_value is None:
         monkeypatch.delenv("STT_CONCURRENT_REQUESTS", raising=False)
     else:
@@ -1187,7 +1188,7 @@ async def test_main_leaves_stt_requests_unlimited_by_default(monkeypatch, env_va
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
 
-    assert handler_kwargs["stt_limit"].limit == 0
+    assert handler_kwargs["stt_limit"].limit == expected
 
 
 @pytest.mark.asyncio
@@ -1220,8 +1221,8 @@ async def test_main_cli_stt_concurrent_requests_zero_overrides_env_limit(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_main_gives_every_connection_the_same_stt_limit(monkeypatch):
-    """The handler factory hands each connection's handler the one server-wide limit, not a copy of its own."""
+async def test_main_gives_every_connection_the_same_limits(monkeypatch):
+    """The handler factory hands each connection's handler the one server-wide STT and TTS limit, not a copy."""
     server = _CapturingServer(connections=2)
 
     async def fake_factory(*args, **kwargs):
@@ -1234,7 +1235,9 @@ async def test_main_gives_every_connection_the_same_stt_limit(monkeypatch):
     )
     monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
     monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
-    for env_var in ("TTS_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES", "STT_CONCURRENT_REQUESTS"):
+    for env_var in (
+        "TTS_MODELS", "TTS_STREAMING_MODELS", "TTS_VOICES", "STT_CONCURRENT_REQUESTS", "TTS_CONCURRENT_REQUESTS"
+    ):
         monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr(
         sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1", "--stt-concurrent-requests", "1"]
@@ -1245,6 +1248,8 @@ async def test_main_gives_every_connection_the_same_stt_limit(monkeypatch):
     first, second = server.handlers
     assert first._stt_limit is second._stt_limit
     assert first._stt_limit.limit == 1
+    assert first._tts_limit is second._tts_limit
+    assert first._tts_limit.limit == 3
 
 
 @pytest.mark.asyncio

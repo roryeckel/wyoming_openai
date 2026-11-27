@@ -209,7 +209,7 @@ async def main():
         help=(
             "Maximum number of STT requests in flight at once across all connections; further requests wait for a "
             "free slot. A Realtime session holds its slot from audio-start until it ends "
-            f"(default: {STT_CONCURRENT_REQUESTS}, no limit; 0 means no limit)"
+            f"(default: {STT_CONCURRENT_REQUESTS}; 0 means no limit)"
         ),
     )
     parser.add_argument(
@@ -328,7 +328,8 @@ async def main():
         # None when not given, as for --stt-concurrent-requests
         default=env_default("TTS_CONCURRENT_REQUESTS"),
         help=(
-            "Maximum number of simultaneous TTS requests per connection when synthesizing sentences "
+            "Maximum number of TTS requests in flight at once across all connections, the sentences of a "
+            "synthesis included; further requests wait for a free slot "
             f"(default: {TTS_CONCURRENT_REQUESTS}; 0 means no limit)"
         ),
     )
@@ -581,6 +582,10 @@ async def main():
         stt_limit = ConcurrencyLimit(stt_concurrent_requests, name="STT request")
         if stt_concurrent_requests and asr_programs:
             _logger.info("Limiting STT to %d concurrent requests", stt_concurrent_requests)
+        # Unnamed, so a sentence waiting for its turn, as most of a long synthesis does, is not logged
+        tts_limit = ConcurrencyLimit(tts_concurrent_requests)
+        if tts_concurrent_requests and tts_programs:
+            _logger.info("Limiting TTS to %d concurrent requests", tts_concurrent_requests)
 
         # Create Wyoming server
         server = AsyncServer.from_uri(args.uri)
@@ -605,8 +610,8 @@ async def main():
                 tts_realtime_extra_body=args.tts_realtime_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
-                tts_concurrent_requests=tts_concurrent_requests,
                 stt_limit=stt_limit,
+                tts_limit=tts_limit,
             )
         )
 

@@ -5154,18 +5154,22 @@ class _OverlapRecordingSpeech:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("configured", "expected_peak"), [(None, 3), (1, 1), (2, 2), (5, 5), (0, 6)])
+@pytest.mark.parametrize(("configured", "expected_peak"), [(None, 6), (1, 1), (2, 2), (5, 5), (0, 6)])
 async def test_tts_requests_overlap_up_to_configured_limit(
     dummy_info, dummy_clients, dummy_reader_writer, configured, expected_peak
 ):
-    """Three sentences are synthesized at once by default; tts_concurrent_requests changes that limit, 0 lifts it."""
+    """A handler given a TTS limit synthesizes at most that many sentences at once; without one, or at 0, all."""
     stt_client, tts_client = dummy_clients
     reader, writer = dummy_reader_writer
     speech = _OverlapRecordingSpeech()
     tts_client.audio.speech.with_streaming_response = speech
-    extra_kwargs = {} if configured is None else {"tts_concurrent_requests": configured}
     handler = OpenAIEventHandler(
-        reader, writer, info=dummy_info, stt_client=stt_client, tts_client=tts_client, **extra_kwargs
+        reader,
+        writer,
+        info=dummy_info,
+        stt_client=stt_client,
+        tts_client=tts_client,
+        tts_limit=None if configured is None else ConcurrencyLimit(configured),
     )
     voice = handler._get_voice("voice1")
     assert voice is not None
@@ -5174,22 +5178,6 @@ async def test_tts_requests_overlap_up_to_configured_limit(
 
     assert all(result.audio for result in results)
     assert speech.peak == expected_peak
-
-
-@pytest.mark.parametrize("value", [-1, -5])
-def test_init_rejects_negative_tts_concurrent_requests(dummy_info, dummy_clients, dummy_reader_writer, value):
-    stt_client, tts_client = dummy_clients
-    reader, writer = dummy_reader_writer
-
-    with pytest.raises(ValueError, match="tts_concurrent_requests must be at least 0"):
-        OpenAIEventHandler(
-            reader,
-            writer,
-            info=dummy_info,
-            stt_client=stt_client,
-            tts_client=tts_client,
-            tts_concurrent_requests=value,
-        )
 
 
 def _stt_limited_handler(info, stt_client, limit):
@@ -7011,6 +6999,219 @@ async def test_stt_limit_is_shared_by_http_and_realtime_requests(mock_info, mock
     assert _written_transcripts(realtime_handler) == ["Hi"]
     assert _written_transcripts(http_handler) == ["Hello"]
     assert not limit.full
+
+
+@pytest.mark.asyncio
+async def test_tts_limit_is_shared_across_connections(dummy_info, dummy_clients, dummy_reader_writer):
+    """Connections sharing a TTS limit of 2 have at most 2 requests in flight between them."""
+    stt_client, tts_client = dummy_clients
+    reader, writer = dummy_reader_writer
+    speech = _OverlapRecordingSpeech()
+    tts_client.audio.speech.with_streaming_response = speech
+    limit = ConcurrencyLimit(2)
+    handlers = [
+        OpenAIEventHandler(
+            reader, writer, info=dummy_info, stt_client=stt_client, tts_client=tts_client, tts_limit=limit
+        )
+        for _ in range(2)
+    ]
+    voice = handlers[0]._get_voice("voice1")
+    assert voice is not None
+
+    results = await asyncio.gather(
+        *(handler._get_tts_audio_stream(f"Sentence {i}.", voice) for handler in handlers for i in range(3))
+    )
+
+    assert all(result.audio for result in results)
+    assert speech.peak == 2
+    assert not limit.full
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck_on", ["audio-start", "audio-chunk"])
+async def test_tts_client_that_stops_taking_audio_fails_the_synthesis_and_frees_its_slot(
+    enhanced_handler, mock_clients, monkeypatch, stuck_on
+):
+    """A client that does not take a chunk of audio in time fails the synthesis, so it cannot keep the slot."""
+    monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
+    _, tts_client = mock_clients
+    _mock_speech_response(tts_client, [REALTIME_TTS_PCM] * 3)
+    limit = ConcurrencyLimit(1)
+    handler = enhanced_handler
+    handler._tts_limit = limit
+    handler._tts_extra_body = {"response_format": "pcm"}
+    written = []
+
+    async def write_event(event):
+        written.append(event.type)
+        if event.type == stuck_on:
+            # The client stopped reading
+            await asyncio.Event().wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    assert (
+        await asyncio.wait_for(handler.handle_event(Event(type="synthesize", data={"text": "Hello world."})), 2)
+        is False
+    )
+
+    assert "error" in written
+    assert not limit.full
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck_on", ["transcript-start", "transcript-chunk"])
+async def test_stt_client_that_stops_reading_a_streamed_transcript_fails_the_request_and_frees_its_slot(
+    mock_info, mock_clients, monkeypatch, stuck_on
+):
+    """A client that does not take a transcript chunk in time fails the request, so it cannot keep the slot."""
+    monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
+    stt_client, _ = mock_clients
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=_HiStream())
+    limit = ConcurrencyLimit(1)
+    handler = _stt_limited_handler(mock_info, stt_client, limit)
+    written = []
+
+    async def write_event(event):
+        written.append(Error.from_event(event).text if event.type == "error" else event.type)
+        if event.type == stuck_on:
+            await asyncio.Event().wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 16000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    with patch("wyoming_openai.handler.AsyncStream", _HiStream):
+        assert await asyncio.wait_for(handler.handle_event(Event(type="audio-stop")), timeout=2) is False
+
+    assert written[-1] == STT_FAILED_ERROR
+    assert "transcript" not in written
+    assert not limit.full
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck_on", ["transcript-start", "transcript-chunk"])
+async def test_realtime_client_that_stops_reading_fails_the_session_and_frees_its_slot(
+    enhanced_handler, mock_info, mock_clients, monkeypatch, stuck_on
+):
+    """
+    A client that does not take the Realtime transcript-start, or a chunk the receiver writes, in time fails the
+    session, which gives its slot back.
+    """
+    monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    connection = _FakeRealtimeConnection([])
+    connection.events.put_nowait(
+        _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hi")
+    )
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    written = []
+
+    async def write_event(event):
+        written.append(Error.from_event(event).text if event.type == "error" else event.type)
+        if event.type == stuck_on:
+            await asyncio.Event().wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+
+    await asyncio.wait_for(handler.handle_event(Event(type="audio-start", data=audio_format)), timeout=2)
+    await asyncio.sleep(0.2)
+    # The receiver's failure is seen with the next chunk
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    assert written.count(STT_FAILED_ERROR) == 1
+    assert not limit.full
+
+
+@pytest.mark.asyncio
+async def test_realtime_session_without_audio_fails_and_frees_its_slot(
+    enhanced_handler, mock_info, mock_clients, monkeypatch
+):
+    """A Realtime session that gets no audio within the idle limit fails, closes, and gives its slot back."""
+    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_IDLE_TIMEOUT", 0.05)
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([]))
+    stt_client.realtime.connect = Mock(return_value=manager)
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    written = []
+    handler.write_event = AsyncMock(
+        side_effect=lambda event: written.append(Error.from_event(event).text if event.type == "error" else event.type)
+    )
+
+    await handler.handle_event(REALTIME_AUDIO_START)
+    assert limit.full
+    await asyncio.sleep(0.2)
+    await _settle()
+
+    assert written == ["transcript-start", STT_FAILED_ERROR]
+    assert not limit.full
+    assert handler._realtime_idle_timer is None
+    assert await handler.handle_event(Event(type="audio-stop")) is False
+    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
+    assert manager.exited
+
+
+@pytest.mark.asyncio
+async def test_realtime_session_that_keeps_getting_audio_outlives_the_idle_limit(
+    enhanced_handler, mock_info, mock_clients, monkeypatch
+):
+    """Each audio chunk restarts the idle limit, so a session longer than it is transcribed normally."""
+    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_IDLE_TIMEOUT", 0.25)
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    handler = enhanced_handler
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    for _ in range(8):
+        await asyncio.sleep(0.05)
+        await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+    assert await handler.handle_event(Event(type="audio-stop"))
+
+    assert _written_transcripts(handler) == ["Hi"]
+    assert "error" not in _written_event_types(handler)
+    # Stopped with the session, so no timer outlives it
+    assert handler._realtime_idle_timer is None
+
+
+@pytest.mark.asyncio
+async def test_idle_limit_does_not_end_a_realtime_session_waiting_for_its_transcript(
+    enhanced_handler, mock_info, mock_clients, monkeypatch
+):
+    """After audio-stop the stream has all its audio, so the wait for the transcript is not taken for idleness."""
+    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_IDLE_TIMEOUT", 0.05)
+    stt_client, _ = mock_clients
+    handler = enhanced_handler
+    entered, respond = _gate_backend_response(handler, stt_client, True, mock_info, mock_clients)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    await asyncio.sleep(0.2)
+    assert "error" not in _written_event_types(handler)
+    respond.set()
+
+    assert await asyncio.wait_for(audio_stop, timeout=1)
+    assert _written_transcripts(handler) == ["Hi"]
+
+
+@pytest.mark.asyncio
+async def test_failing_a_realtime_stream_twice_reports_it_once(enhanced_handler):
+    """The idle limit and a failing chunk may both fail a stream; the client is told once."""
+    handler = enhanced_handler
+    audio_stream = _realtime_stream()
+
+    await handler._fail_realtime_audio_stream(audio_stream)
+    await handler._fail_realtime_audio_stream(audio_stream)
+
+    assert _written_event_types(handler) == ["error"]
 
 
 @pytest.mark.asyncio

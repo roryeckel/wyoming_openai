@@ -131,8 +131,15 @@ def _final_transcript(final_text: str | None, snapshot: str) -> str:
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Bytes read from the TTS response at a time; WavFramer buffers a header across reads
-TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests per connection when streaming sentences
-STT_CONCURRENT_REQUESTS = 0  # Default number of concurrent STT requests across all connections; 0 means no limit
+TTS_CONCURRENT_REQUESTS = 3  # Default number of TTS requests in flight across all connections; 0 means no limit
+STT_CONCURRENT_REQUESTS = 3  # Default number of STT requests in flight across all connections; 0 means no limit
+# Seconds a client may take to accept one event written while its request holds a shared slot. The limit is per event,
+# so a client that reads audio at playback speed is not cut off, but one that stops reading fails the request rather
+# than keep the slot from other connections
+CLIENT_WRITE_TIMEOUT = 10.0
+# Seconds a Realtime STT session may go without audio before it fails and gives its slot back: a client streams audio
+# continuously, so a gap this long means it is stuck or gone
+REALTIME_STT_IDLE_TIMEOUT = 10.0
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
 SHUTDOWN_CLOSE_TIMEOUT = 2.0  # Seconds stop() waits for a client connection to finish closing before aborting it
@@ -228,8 +235,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_realtime_extra_body: dict[str, object] | None = None,
         tts_streaming_min_words: int | None = None,
         tts_streaming_max_chars: int | None = None,
-        tts_concurrent_requests: int = TTS_CONCURRENT_REQUESTS,
         stt_limit: ConcurrencyLimit | None = None,
+        tts_limit: ConcurrencyLimit | None = None,
         **kwargs,
     ) -> None:
         """
@@ -253,10 +260,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime TTS sessions.
             tts_streaming_min_words (int | None): Minimum words per chunk for streaming TTS.
             tts_streaming_max_chars (int | None): Maximum characters per chunk for streaming TTS.
-            tts_concurrent_requests (int): Maximum simultaneous TTS requests per connection; 0 means no limit.
             stt_limit (ConcurrencyLimit | None): Shared by every connection of the server to limit the STT requests
                 in flight across all of them, or None for no limit. A /v1/audio/transcriptions request holds a slot
                 from audio-stop until its response is read; a Realtime session from audio-start until it ends.
+            tts_limit (ConcurrencyLimit | None): Shared by every connection of the server to limit the TTS requests
+                in flight across all of them, or None for no limit. Each sentence request of a synthesis holds a
+                slot while its response is read, as does an unsplit request.
             Note: The caller owns the STT/TTS clients and is responsible for closing them.
             **kwargs: Arbitrary keyword arguments for the superclass.
         """
@@ -311,6 +320,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         # State for realtime transcription
         self._realtime_stt_slot: ConcurrencySlot | None = None  # Held from audio-start until the session ends
+        self._realtime_idle_timer: asyncio.TimerHandle | None = None  # Fails a session left without audio
         self._realtime_connection_manager: Any | None = None
         self._realtime_connection: Any | None = None
         self._realtime_receive_task: asyncio.Task[None] | None = None
@@ -323,10 +333,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State of the current synthesis
         self._synthesis = _SynthesisState()
 
-        if tts_concurrent_requests < 0:
-            raise ValueError(f"tts_concurrent_requests must be at least 0, got {tts_concurrent_requests}")
-        # Per connection, unlike the STT limit; 0 means no limit for both
-        self._tts_limit = ConcurrencyLimit(tts_concurrent_requests)
+        self._tts_limit = tts_limit if tts_limit is not None else ConcurrencyLimit(0)
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
         self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence and unsplit synthesis tasks still running
         self._background_tasks: set[asyncio.Task[Any]] = set()  # Cleanup that must not delay audio
@@ -709,8 +716,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             await connection.session.update(session=self._get_realtime_transcription_session(audio_stream))
             self._check_stt_not_stopping()
             self._is_recording = True
-            await self.write_event(TranscriptStart().event())
+            await self._write_event_in_time(TranscriptStart().event())
             audio_stream.transcript_started = True
+            self._arm_realtime_idle_timer(audio_stream)
             _LOGGER.info(
                 "Realtime recording started at %d Hz, %d channels, %d bytes per sample",
                 sample_rate,
@@ -737,9 +745,40 @@ class OpenAIEventHandler(AsyncEventHandler):
         ends the request instead of recording on. The rest of the stream's audio is dropped, and its audio-stop
         closes the connection.
         """
+        if audio_stream.failed:
+            # Reported already, as when the idle limit and a failing chunk meet
+            return
         self._is_recording = False
         audio_stream.failed = True
         await self._report_stt_failure()
+
+    def _arm_realtime_idle_timer(self, audio_stream: _AudioStreamState) -> None:
+        """(Re)start the time a Realtime session may go without audio before it fails."""
+        if self._realtime_idle_timer is not None:
+            self._realtime_idle_timer.cancel()
+        self._realtime_idle_timer = asyncio.get_running_loop().call_later(
+            REALTIME_STT_IDLE_TIMEOUT,
+            lambda: self._run_in_background(self._fail_idle_realtime_stream(audio_stream), name="realtime_stt_idle"),
+        )
+
+    def _cancel_realtime_idle_timer(self) -> None:
+        if self._realtime_idle_timer is not None:
+            self._realtime_idle_timer.cancel()
+            self._realtime_idle_timer = None
+
+    async def _fail_idle_realtime_stream(self, audio_stream: _AudioStreamState) -> None:
+        """
+        Fail a Realtime stream that got no audio for REALTIME_STT_IDLE_TIMEOUT, closing its session so its slot is
+        free for other connections. A stream that has failed or ended, by its audio-stop included, is left alone;
+        during a shutdown the client still gets a single answer, as _report_stt_failure writes nothing after stop()'s.
+        """
+        if self._audio_stream is not audio_stream or audio_stream.failed:
+            return
+        _LOGGER.warning(
+            "No audio for %g seconds; ending the Realtime transcription session", REALTIME_STT_IDLE_TIMEOUT
+        )
+        await self._cleanup_realtime_transcription()
+        await self._fail_realtime_audio_stream(audio_stream)
 
     async def _report_stt_failure(self) -> None:
         """
@@ -761,6 +800,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         if not self._is_recording or connection is None:
             _LOGGER.warning("Received realtime audio chunk without an active recording")
             return
+        self._arm_realtime_idle_timer(audio_stream)
 
         # session.update only sends the settings, so a server that rejects them, or a socket that closes, is only
         # seen once the receiver has read it; the client is told then rather than after the rest of the audio
@@ -917,7 +957,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         _LOGGER.debug("Realtime transcription chunk: %s", delta)
                         # Always the transcript so far: wyoming 1.11 requires whole transcripts from a streaming ASR
                         # service, so there is deliberately no mode that sends the pre-1.11 fragments
-                        await self.write_event(TranscriptChunk(text=full_text).event())
+                        await self._write_event_in_time(TranscriptChunk(text=full_text).event())
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = _final_transcript(getattr(event, "transcript", None), full_text)
                     if not transcript_future.done():
@@ -1052,6 +1092,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task, and release the STT slot the session held."""
+        self._cancel_realtime_idle_timer()
         # Detached before the first await, so a cleanup that overlaps this one finds nothing left to close or release
         slot, self._realtime_stt_slot = self._realtime_stt_slot, None
         receive_task, self._realtime_receive_task = self._realtime_receive_task, None
@@ -1189,7 +1230,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                         # Reading the response is backend work too, so no read starts once stop() has begun: each
                         # is preceded by a check, from the first one after transcript-start on
                         self._check_stt_not_stopping()
-                        await self.write_event(TranscriptStart().event())
+                        await self._write_event_in_time(TranscriptStart().event())
                         self._check_stt_not_stopping()
                         async for chunk in transcription:
                             if chunk.type == "transcript.text.done":
@@ -1201,7 +1242,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                                 full_text += chunk.delta
                                 _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
                                 # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
-                                await self.write_event(TranscriptChunk(text=full_text).event())
+                                await self._write_event_in_time(TranscriptChunk(text=full_text).event())
                             self._check_stt_not_stopping()
                     if not completed:
                         # Ended without the completed transcription, as a backend cut off by the shutdown may: outside
@@ -1653,6 +1694,15 @@ class OpenAIEventHandler(AsyncEventHandler):
                 wait_closed.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await wait_closed
+
+    async def _write_event_in_time(self, event: Event) -> None:
+        """
+        Write an event of a request that may hold a shared STT or TTS slot. A client that does not take it within
+        CLIENT_WRITE_TIMEOUT fails the request with TimeoutError, so a client that stopped reading cannot keep the
+        slot from other connections.
+        """
+        async with asyncio.timeout(CLIENT_WRITE_TIMEOUT):
+            await self.write_event(event)
 
     async def _write_event_bounded(self, event: Event) -> bool:
         """
@@ -2375,7 +2425,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Send the audio start for the selected format and mark the stream as open."""
         # Marked before the write, which waits for the client to take it: stop() meanwhile must see the stream
         self._synthesis.audio_started = True
-        await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
+        await self._write_event_in_time(AudioStart(rate=rate, width=width, channels=channels).event())
 
     async def _write_tts_audio_stop(self) -> None:
         """Send the audio stop at the end of the audio sent so far and mark the stream as closed."""
@@ -2415,7 +2465,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             audio_width=framer.width,
             audio_channels=framer.channels,
         )
-        await self.write_event(
+        await self._write_event_in_time(
             AudioChunk(
                 audio=audio_data,
                 rate=framer.rate,
