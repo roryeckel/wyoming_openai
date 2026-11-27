@@ -1116,6 +1116,51 @@ async def test_main_warns_about_an_stt_limit_without_stt(monkeypatch, caplog, va
 
 
 @pytest.mark.asyncio
+async def test_main_warns_about_concurrency_limits_when_nothing_is_requested(monkeypatch, caplog):
+    """The early exit without any models still reports the limits that were given."""
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setenv("STT_CONCURRENT_REQUESTS", "2")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-concurrent-requests", "0"])
+
+    with caplog.at_level(logging.WARNING):
+        await main()
+
+    assert "STT concurrent requests is set but unused" in caplog.text
+    assert "TTS concurrent requests is set but unused" in caplog.text
+    assert "No STT or TTS models specified" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_main_reports_requested_tts_without_voices_and_its_unused_limit(monkeypatch, caplog):
+    """TTS requested but without any voice to offer is told apart from no models at all."""
+
+    class _VoicelessClient(_FakeClient):
+        async def list_supported_voices(self, *args, **kwargs):
+            return []
+
+    async def fake_factory(*args, **kwargs):
+        return _VoicelessClient()
+
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main_module.CustomAsyncOpenAI, "create_autodetected_factory", staticmethod(lambda: fake_factory)
+    )
+    monkeypatch.setattr(main_module.AsyncServer, "from_uri", staticmethod(lambda uri: _CapturingServer()))
+    for env_var in ("STT_MODELS", "STT_STREAMING_MODELS", "STT_REALTIME_MODELS", "TTS_VOICES", "TTS_STREAMING_MODELS"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr(
+        sys, "argv", ["wyoming_openai", "--tts-models", "tts-1", "--tts-concurrent-requests", "2"]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await main()
+
+    assert "TTS concurrent requests is set but unused" in caplog.text
+    assert "None of the specified STT or TTS models can be offered" in caplog.text
+    assert "No STT or TTS models specified" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_main_does_not_warn_about_concurrency_limits_left_at_their_defaults(monkeypatch, caplog):
     """The defaults are not a setting, so an STT-only or TTS-only server reports neither limit."""
     monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)

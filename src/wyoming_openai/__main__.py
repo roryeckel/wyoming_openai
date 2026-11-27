@@ -377,7 +377,18 @@ async def main():
             "TTS extra body is set but unused: every TTS model is a Realtime model; use --tts-realtime-extra-body"
         )
 
+    def warn_unused_concurrency_limits(stt_configured: bool, tts_configured: bool) -> None:
+        """
+        Report a concurrency limit given explicitly, whatever its value, for a service that is not configured; a
+        limit left at its default is not reported. Called on every way out of startup, the early exits included.
+        """
+        if args.stt_concurrent_requests is not None and not stt_configured:
+            _logger.warning("STT concurrent requests is set but unused: STT is not configured")
+        if args.tts_concurrent_requests is not None and not tts_configured:
+            _logger.warning("TTS concurrent requests is set but unused: TTS is not configured")
+
     if not stt_requested and not tts_requested:
+        warn_unused_concurrency_limits(stt_configured=False, tts_configured=False)
         _logger.error("No STT or TTS models specified. Exiting.")
         return
 
@@ -480,7 +491,12 @@ async def main():
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 
         if not asr_programs and not tts_programs:
-            _logger.error("No STT or TTS models specified. Exiting.")
+            warn_unused_concurrency_limits(stt_configured=False, tts_configured=False)
+            # Models were given (the case without any exits above), but none of them can be offered
+            _logger.error(
+                "None of the specified STT or TTS models can be offered: no ASR models or TTS voices are "
+                "available (check TTS_VOICES or the backend's voice list). Exiting."
+            )
             return
 
         try:
@@ -551,11 +567,8 @@ async def main():
             _logger.warning("No TTS models specified")
 
         # Both limits take a whole number of at least 0, where 0 means no limit, and fall back to their own default
-        # when not given. One given for a service that is not configured is reported, whatever its value
-        if args.stt_concurrent_requests is not None and not asr_programs:
-            _logger.warning("STT concurrent requests is set but unused: STT is not configured")
-        if args.tts_concurrent_requests is not None and not tts_programs:
-            _logger.warning("TTS concurrent requests is set but unused: TTS is not configured")
+        # when not given
+        warn_unused_concurrency_limits(stt_configured=bool(asr_programs), tts_configured=bool(tts_programs))
         stt_concurrent_requests = (
             STT_CONCURRENT_REQUESTS if args.stt_concurrent_requests is None else args.stt_concurrent_requests
         )
