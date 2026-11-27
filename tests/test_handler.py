@@ -23,6 +23,7 @@ from wyoming.audio import AudioChunk
 from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import Attribution, TtsVoice
+from wyoming.ping import Pong
 from wyoming.server import AsyncTcpServer
 from wyoming.tts import Synthesize, SynthesizeChunk, SynthesizeStart, SynthesizeVoice
 
@@ -945,6 +946,46 @@ class TestOpenAIEventHandlerComprehensive:
         # Check that the event written was the info event
         written_event = enhanced_handler.write_event.call_args[0][0]
         assert written_event.type == "info"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("data", [{"text": "are you there"}, {"text": None}, {}])
+    async def test_ping_is_answered_with_a_pong_carrying_its_text(self, enhanced_handler, data):
+        """A ping gets a pong with the same text, and leaves the connection open."""
+        result = await enhanced_handler.handle_event(Event(type="ping", data=data))
+
+        assert result is True
+        enhanced_handler.write_event.assert_called_once()
+        written_event = enhanced_handler.write_event.call_args[0][0]
+        assert Pong.is_type(written_event.type)
+        assert Pong.from_event(written_event).text == data.get("text")
+
+    @pytest.mark.asyncio
+    async def test_ping_during_a_recording_leaves_the_transcription_intact(self, enhanced_handler, mock_clients):
+        """A ping that arrives while audio is streaming is answered, and the recording is still transcribed."""
+        from openai.types.audio.transcription import Transcription
+
+        stt_client, _ = mock_clients
+        sent_frames = []
+
+        async def create(**kwargs):
+            with wave.open(io.BytesIO(kwargs["file"].getvalue()), "rb") as wav_file:
+                sent_frames.append(wav_file.getnframes())
+            return Transcription(text="Hello")
+
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
+        audio_format = {"rate": 16000, "width": 2, "channels": 1}
+
+        await enhanced_handler.handle_event(Event(type="audio-start", data=audio_format))
+        await enhanced_handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+        assert await enhanced_handler.handle_event(Event(type="ping", data={"text": "x"}))
+        await enhanced_handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+        assert await enhanced_handler.handle_event(Event(type="audio-stop"))
+
+        assert [call.args[0].type for call in enhanced_handler.write_event.call_args_list] == [
+            "pong", "transcript-start", "transcript", "transcript-stop"
+        ]
+        # Both chunks were recorded, the one after the ping too
+        assert sent_frames == [20]
 
     @pytest.mark.asyncio
     async def test_handle_audio_start_event(self, enhanced_handler):

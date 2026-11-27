@@ -22,6 +22,7 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import AsrModel, AsrProgram, Describe, Info, SelectProgram, TtsProgram, TtsVoice
+from wyoming.ping import Ping, Pong
 from wyoming.server import AsyncEventHandler
 from wyoming.tts import (
     Synthesize,
@@ -386,6 +387,11 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         if Describe.is_type(event.type):
             await self.write_event(self._wyoming_info.event())
+            return True
+
+        if Ping.is_type(event.type):
+            # A liveness check, answered with its text; it does not touch a transcription or synthesis in progress
+            await self.write_event(Pong(text=Ping.from_event(event).text).event())
             return True
 
         _LOGGER.info("Ignoring unhandled event type: %s", event.type)
