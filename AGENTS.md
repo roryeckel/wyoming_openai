@@ -93,7 +93,9 @@ alters:
   values, model or voice resolution, the route or transport, Realtime session
   settings, the audio sent, auth or headers, backend detection or a backend
   shim. It runs on several providers. Official OpenAI is the strictest
-  requirement: a change that breaks it does not ship.
+  requirement: a change that breaks it does not ship. A break on another
+  provider is fixed in the same change, or raised with the developer if the
+  fix is hard.
 - what Home Assistant sees, but not the request (a proxy-behavior change):
   concurrency, queueing, timeouts, event order or content, error reporting,
   connection lifecycle and shutdown, response audio, streaming versus
