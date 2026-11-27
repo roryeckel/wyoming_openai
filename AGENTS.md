@@ -84,103 +84,34 @@ costs a few minutes. It can also be started by hand with
 
 ## Smoke Testing
 
-Before opening a PR, run the Home Assistant smoke suite (`pytest -m ha_smoke`, see
-"Home Assistant Smoke Tests" in the README) when the change falls in one of the
-first two classes below. The `ha-smoke` skill
-(`.agents/skills/ha-smoke/SKILL.md`) has the steps. The suite needs an NVIDIA
-GPU, and CI does not run it.
+The Home Assistant smoke suite (`pytest -m ha_smoke`) runs Home Assistant's
+voice pipeline through the proxy against real STT and TTS providers. It needs
+an NVIDIA GPU, and CI does not run it. Before opening a PR, run it when a change
+alters:
 
-| Class | What counts | Before opening the PR |
-|---|---|---|
-| Request shape | What a backend receives changes: request fields or their values (`prompt`, `language`, `response_format`, voice, speed, instructions, the extra-body merge), model or voice resolution, which route or transport is used, Realtime session settings, the audio sent (format, rate, chunking), auth or headers, backend detection or a backend shim | The request-shape check below, then the suite on several providers |
-| Proxy behavior | What Home Assistant sees changes, but not the request: concurrency, queueing, timeouts, event order or content, error reporting, connection lifecycle and shutdown, handling of response audio, streaming versus buffering, startup | The suite on one provider, free or not, that serves the service and request mode the change touches (see Providers) |
-| Neither | Docs, tests, logging, CLI parsing without a behavior change, refactors the unit tests cover | No smoke run |
+- what a backend receives (a request-shape change): request fields or their
+  values, model or voice resolution, the route or transport, Realtime session
+  settings, the audio sent, auth or headers, backend detection or a backend
+  shim. It runs on several providers. Official OpenAI is the strictest
+  requirement: a change that breaks it does not ship.
+- what Home Assistant sees, but not the request (a proxy-behavior change):
+  concurrency, queueing, timeouts, event order or content, error reporting,
+  connection lifecycle and shutdown, response audio, streaming versus
+  buffering, startup. It runs on one provider that serves the request mode the
+  change touches.
 
-When unsure, take the stricter class. Adding names to the STT prompt (#133) is
-a request-shape change; limiting concurrent requests (#135) is a proxy-behavior
-change. For a proxy-behavior change, the local lane is enough when the change is
-on STT not streamed or TTS sentence by sentence; `speaches-other-modes` runs
-streamed STT and TTS in one request per reply for free, and the OpenAI lane
-Realtime. These classes are separate from the `ha-e2e` label above: a change can
-need both.
+Docs, tests, logging, CLI parsing without a behavior change, and refactors the
+unit tests cover need no run. When unsure, take the stricter class. This is
+separate from the `ha-e2e` label above: a change can need both.
 
-### Request-shape check
+The `ha-smoke` skill (`.agents/skills/ha-smoke/SKILL.md`) has the rest: the
+request-shape check, which providers count, the plan, the commands and the
+report. Two of its rules hold before it is loaded:
 
-Ground it in the code, before anything runs:
-
-1. List every field, value, route or transport the change adds or alters, and
-   for which models and backends.
-2. Trace what each backend receives: `transcription_kwargs` and
-   `_get_realtime_transcription_session()` for STT, `_iter_tts_audio()` and
-   `_get_realtime_tts_session()` for TTS (all in `handler.py`), the backend
-   shims in `compatibility.py`, and the extra-body validators in
-   `utilities.py`.
-3. Compare that with each provider's documented request schema, with
-   [OpenAI's API reference](https://platform.openai.com/docs/api-reference) as
-   the contract, and record whether each provider accepts, ignores or rejects
-   it.
-
-Official OpenAI is the strictest requirement: a change that breaks it on any
-transport it touches does not ship. A break elsewhere is fixed in the same
-work, for example by sending a field only to the backends that take it. If that
-fix is hard or outside the change's scope, raise it with the developer before
-opening the PR rather than ship the break.
-
-### Providers
-
-The plan names the service the change touches (STT, TTS or both) and the
-request mode its changed code is on: for STT, HTTP streamed, HTTP not streamed
-or Realtime; for TTS, sentence by sentence, one request per reply, or Realtime.
-For each of those, a request-shape change runs on:
-
-- official OpenAI in that mode: `openai` (streamed STT, TTS sentence by
-  sentence), `openai-unstreamed` (STT not streamed, TTS one request per reply),
-  or the OpenAI lane (Realtime)
-- every backend shim its code path reaches: `SPEACHES` (the local lane: STT not
-  streamed, TTS sentence by sentence; `speaches-other-modes`: STT streamed, TTS
-  one request per reply), `KOKORO_FASTAPI` (`kokoro-fastapi`), `LOCALAI`
-  (`localai`)
-- one third-party provider on the plain `OPENAI` backend that serves that
-  service: `speaches-openai-backend` is free for both, and `groq` (both),
-  `mistral` (STT) or `chatterbox` (TTS) count too. `openai-edge-tts` is known
-  broken upstream (#139)
-
-A provider counts only for the service and mode it runs, which its file in
-`tests/ha_e2e/smoke/providers/` states in its `Serves:` line. A TTS-only
-provider does not count for an STT change, and a streamed preset does not count
-for a change on the unstreamed path.
-
-Some combinations have no preset: no third-party preset streams STT or speaks
-Realtime, for example. The plan names each such combination as not covered,
-gives the request-shape check's finding for it, citing the provider's
-documentation, and asks the developer whether that is enough before anything
-runs. Where a provider does serve the mode, a new preset for it is the better
-answer, and part of the same work.
-
-Paid providers are not a hard requirement. Run one when its key is available;
-otherwise say in the plan and in the PR which providers did not run, and rely on
-the request-shape check for them. A key counts as available, and as permission
-to use it for smoke testing, only when it is clearly set for this project: an
-uncommented entry in this repository's `.env`, such as `STT_OPENAI_KEY`. A
-commented-out key, or one found anywhere else, needs the developer's go-ahead
-first. Never print a key or put it on a command line: pass it through the
-environment, and remove the containers that hold it when the run is done.
-
-### The plan comes first
-
-Before running anything, show the developer the smoke plan and wait for them to
-accept it:
-
-- the change's class, and why
-- the request-shape findings, per provider
-- which lanes and providers will run, and which won't, and why
-- which keys will be used, and where they come from
-- what the run costs: paid requests, images to pull, roughly how long it takes
-
-Report the results in the PR's Testing section: what ran, on which providers,
-and what failed. Tell a model's fault (a misheard command, a sentence returned
-as silence, a reply it made up) from the proxy's, by running the same case on
-`main` when unsure.
+- Show the developer the smoke plan, and wait for them to accept it, before
+  running anything.
+- Only an uncommented key in this repository's `.env` counts as permission to
+  use it. Never print a key.
 
 ## Releases
 

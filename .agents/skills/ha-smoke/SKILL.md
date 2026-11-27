@@ -5,56 +5,128 @@ description: Plan and run the Home Assistant smoke suite before opening a pull r
 
 # Home Assistant Smoke Testing
 
-The rules are in AGENTS.md, "Smoke Testing": which changes need a run, on which
-providers, and when a key may be used. This skill is how to follow them. Read
-that section first, and the README's "Home Assistant Smoke Tests" for the
-suite itself.
+AGENTS.md, "Smoke Testing", says when a change needs a smoke run. This skill
+is how to plan it, run it and report it. The README's "Home Assistant Smoke
+Tests" describes the suite itself.
 
 ## 1. Classify the change
 
-Read the diff, not only its description, and put it in one of the classes in
-AGENTS.md: request shape, proxy behavior, or neither. A change that does both is
-a request-shape change. For "neither", say so with the reason, and stop.
+Read the diff, not only its description, and put it in one class:
+
+| Class | What counts | Before opening the PR |
+|---|---|---|
+| Request shape | What a backend receives changes: request fields or their values (`prompt`, `language`, `response_format`, voice, speed, instructions, the extra-body merge), model or voice resolution, which route or transport is used, Realtime session settings, the audio sent (format, rate, chunking), auth or headers, backend detection or a backend shim | The request-shape check (step 2), then the suite on several providers (step 3) |
+| Proxy behavior | What Home Assistant sees changes, but not the request: concurrency, queueing, timeouts, event order or content, error reporting, connection lifecycle and shutdown, handling of response audio, streaming versus buffering, startup | The suite on one provider, free or not, that serves the service and request mode the change touches (step 3) |
+| Neither | Docs, tests, logging, CLI parsing without a behavior change, refactors the unit tests cover | No smoke run |
+
+A change that does both is a request-shape change, and when unsure, take the
+stricter class. Adding names to the STT prompt (#133) is a request-shape
+change; limiting concurrent requests (#135) is a proxy-behavior change. For
+"neither", say so with the reason, and stop. These classes are separate from
+the `ha-e2e` label: a change can need both.
+
+Then name the service the change touches (STT, TTS or both) and the request
+mode its changed code is on: for STT, HTTP streamed, HTTP not streamed or
+Realtime; for TTS, sentence by sentence, one request per reply, or Realtime.
 
 ## 2. Check the request shape
 
-For a request-shape change only. Trace each field, value, route or transport
-the change adds or alters, for each backend, in the code AGENTS.md names, and
-compare it with the provider's documented request schema. Write the result as
-a table, one row per provider:
+For a request-shape change only. Ground it in the code, before anything runs:
+
+1. List every field, value, route or transport the change adds or alters, and
+   for which models and backends.
+2. Trace what each backend receives: `transcription_kwargs` and
+   `_get_realtime_transcription_session()` for STT, `_iter_tts_audio()` and
+   `_get_realtime_tts_session()` for TTS (all in `handler.py`), the backend
+   shims in `compatibility.py`, and the extra-body validators in
+   `utilities.py`.
+3. Compare that with each provider's documented request schema, with
+   [OpenAI's API reference](https://platform.openai.com/docs/api-reference) as
+   the contract.
+
+Write the result as a table, one row per provider:
 
 | Provider | Backend | What it now receives | Accepts / ignores / rejects | Source |
 |---|---|---|---|---|
 
 Cite the code (`file:line`) and the provider's documentation for each row. A
-row you could not establish says so: it is not a pass. A rejection by official
-OpenAI blocks the change. A rejection elsewhere is fixed in the same work, or
-raised with the developer before anything runs if the fix is hard or out of
-scope.
+row you could not establish says so: it is not a pass.
 
-## 3. Find out what can run
+Official OpenAI is the strictest requirement: a change that breaks it on any
+transport it touches does not ship. A break elsewhere is fixed in the same
+work, for example by sending a field only to the backends that take it. If that
+fix is hard or outside the change's scope, raise it with the developer before
+anything runs, rather than ship the break.
+
+## 3. Choose the providers
+
+Each file in `tests/ha_e2e/smoke/providers/` is a preset, and its `Serves:`
+line says which service and request mode it runs. A provider counts only for
+those: a TTS-only provider does not count for an STT change, and a streamed
+preset does not count for a change on the unstreamed path.
+
+For a proxy-behavior change, one provider that serves the mode is enough. The
+local lane runs STT not streamed and TTS sentence by sentence;
+`speaches-other-modes` runs streamed STT and TTS in one request per reply, both
+for free; the OpenAI lane runs Realtime.
+
+For a request-shape change, each mode it touches runs on:
+
+- official OpenAI in that mode: `openai` (streamed STT, TTS sentence by
+  sentence), `openai-unstreamed` (STT not streamed, TTS one request per reply),
+  or the OpenAI lane (Realtime)
+- every backend shim its code path reaches: `SPEACHES` (the local lane: STT not
+  streamed, TTS sentence by sentence; `speaches-other-modes`: STT streamed, TTS
+  one request per reply), `KOKORO_FASTAPI` (`kokoro-fastapi`), `LOCALAI`
+  (`localai`)
+- one third-party provider on the plain `OPENAI` backend that serves that
+  service: `speaches-openai-backend` is free for both, and `groq` (both),
+  `mistral` (STT) or `chatterbox` (TTS) count too. `openai-edge-tts` is known
+  broken upstream (#139)
+
+Some combinations have no preset: no third-party preset streams STT or speaks
+Realtime, for example. The plan names each such combination as not covered,
+gives the request-shape check's finding for it, citing the provider's
+documentation, and asks the developer whether that is enough. Where a provider
+does serve the mode, a new preset for it is the better answer, and part of the
+same work.
+
+## 4. Find out what can run
 
 - **GPU and Docker:** `nvidia-smi` and `docker info`. Without an NVIDIA GPU the
   suite can't run here: say so in the plan, and offer the developer the
   commands to run it themselves.
-- **Keys:** look only for uncommented entries in this repository's `.env`, and
-  read their names, never their values. `STT_OPENAI_KEY` and `TTS_OPENAI_KEY`
-  there are OpenAI keys unless the file says otherwise. A commented-out key, or
-  one anywhere else, needs the developer's go-ahead.
-- **Providers:** each file in `tests/ha_e2e/smoke/providers/` says in its
-  `Serves:` line which service and request mode it runs; count it only for
-  those. A local provider's header names its engine and how to start it. Note
-  the images that would have to be pulled, and their size, and the models a
-  local engine downloads on its first start.
+- **Keys:** paid providers are not a hard requirement. Run one when its key is
+  available; otherwise say in the plan and in the PR which providers did not
+  run, and rely on the request-shape check for them. A key counts as
+  available, and as permission to use it for smoke testing, only when it is
+  clearly set for this project: an uncommented entry in this repository's
+  `.env`. Read the entries' names, never their values. `STT_OPENAI_KEY` and
+  `TTS_OPENAI_KEY` there are OpenAI keys unless the file says otherwise. A
+  commented-out key, or one found anywhere else, needs the developer's
+  go-ahead first.
+- **Engines and images:** a local provider's header names its engine (its
+  `Engine:` line) and how to start it. Note the images that would have to be
+  pulled, and their size, and the models a local engine downloads on its first
+  start.
 - **Ports:** the stack uses 127.0.0.1 ports 8010, 8124 and 10400-10406. Local
   engines run from `tests/ha_e2e/smoke/docker-compose.engines.yml`, in their own
   project, with `ha_smoke_*` container names and no host ports, so they don't
   clash with an engine the developer runs.
 
-## 4. Propose the plan, and wait
+## 5. Propose the plan, and wait
 
-Show the developer the plan AGENTS.md describes, and wait for them to accept it,
-change it, or decline. Nothing runs before that. For example:
+Show the developer the plan, and wait for them to accept it, change it, or
+decline. Nothing runs before that. The plan says:
+
+- the change's class, and why
+- the request-shape findings, per provider
+- which lanes and providers will run, and which won't, and why
+- which keys will be used, and where they come from
+- what the run costs: paid requests, images to pull, models to download,
+  roughly how long it takes
+
+For example:
 
 > **Class:** request shape. The change adds names to `prompt` on
 > `/v1/audio/transcriptions` and in Realtime transcription sessions.
@@ -65,7 +137,7 @@ change it, or decline. Nothing runs before that. For example:
 > **Keys:** `STT_OPENAI_KEY` from `.env`. **Cost:** about 40 short OpenAI
 > requests; no images to pull; about 15 minutes.
 
-## 5. Run it
+## 6. Run it
 
 Build the image from the branch, and bring up the stack:
 
@@ -126,7 +198,7 @@ In PowerShell, set the variables from the parsed entries in a script block,
 and remove them when it ends. Whatever runs the command must not print its
 environment.
 
-## 6. Read the results
+## 7. Read the results
 
 Each run writes `tests/ha_e2e/artifacts/smoke-<timestamp>/`: `summary.md`,
 `summary.json`, and every reply's audio. A failure is either the proxy's or the
@@ -143,7 +215,7 @@ model's:
 A failure caused by the change is fixed before the PR opens, and the run
 repeated. One that is the model's or the provider's is reported, not hidden.
 
-## 7. Tear down
+## 8. Tear down
 
 Take down what the run started: `docker compose -p ha_smoke_provider down` and
 `docker compose -p ha_smoke_openai down` (both need no key, and remove the
@@ -155,7 +227,7 @@ started. Pulled images stay unless the developer asks to remove them, and so do
 the engines' model and backend volumes, so the next run skips those downloads;
 `docker compose -p ha_smoke_engines down -v` removes them.
 
-## 8. Report
+## 9. Report
 
 In the PR's Testing section:
 
