@@ -5515,40 +5515,80 @@ async def test_stop_reports_a_realtime_failure_that_is_still_cleaning_up(enhance
     receiver_stops.set()
     await asyncio.wait_for(asyncio.gather(audio_stop, stopping), timeout=1)
 
-    assert "error" in io_log
+    # One error, the shutdown's, before the connection closes; the failure report does not add a second
+    assert io_log.count("error") == 1
     assert io_log.index("error") < io_log.index("close")
     assert "transcript" not in io_log
 
 
 @pytest.mark.asyncio
-async def test_stop_reports_shutdown_while_the_final_transcript_write_is_blocked(
-    enhanced_handler, mock_info, mock_clients
+@pytest.mark.parametrize(("realtime", "terminal"), [(True, "transcript"), (False, "transcript"), (True, "error")])
+async def test_stop_adds_no_second_response_while_the_final_write_drains(
+    enhanced_handler, mock_info, mock_clients, realtime, terminal
 ):
-    """A Realtime session already closed for its final events still counts as a transcription stop() reports."""
-    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    stt_client.realtime.connect = _completing_realtime_connect()
+    """A transcript or error already queued is the client's response, even while its write waits on the client."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client, _ = mock_clients
+    if realtime:
+        _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+        if terminal == "error":
+            connection = _FakeRealtimeConnection([])
+            connection.input_audio_buffer.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+            stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+        else:
+            stt_client.realtime.connect = _completing_realtime_connect()
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hi"))
     handler = enhanced_handler
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
     client_reads = asyncio.Event()
     written = []
 
     async def write_event(event):
+        # Queued first, as Wyoming does with the whole event, then the drain waits for the client
         written.append(event.type)
-        if Transcript.is_type(event.type):
+        if event.type == terminal:
             await client_reads.wait()
 
     handler.write_event = AsyncMock(side_effect=write_event)
 
     audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
     await _settle()
-    assert written[-1] == "transcript"
-    assert handler._realtime_transcript_future is None  # Cleaned up before the final write
+    assert written[-1] == terminal
 
     stopping = asyncio.create_task(handler.stop())
     await _settle()
-    assert "error" in written
     client_reads.set()
     await asyncio.wait_for(asyncio.gather(audio_stop, stopping, return_exceptions=True), timeout=3)
+
+    assert written.count("error") == (1 if terminal == "error" else 0)
+    assert written.count("transcript") == (1 if terminal == "transcript" else 0)
+
+
+@pytest.mark.asyncio
+async def test_stop_reports_an_http_request_still_waiting_for_its_response(enhanced_handler, mock_clients):
+    """An audio-stop whose backend has not answered yet is told about the shutdown."""
+    stt_client, _ = mock_clients
+    responds = asyncio.Event()
+
+    async def create(**kwargs):
+        await responds.wait()
+        raise RuntimeError("cut off by the shutdown")
+
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
+    handler = enhanced_handler
+    io_log = _record_client_io(handler)
+
+    audio_stop = asyncio.create_task(_stream_audio(handler))
+    await _settle()
+    await handler.stop()
+    responds.set()
+    await asyncio.wait_for(audio_stop, timeout=1)
+
+    assert io_log.count("error") == 1
+    assert io_log.index("error") < io_log.index("close")
 
 
 @pytest.mark.asyncio
