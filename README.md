@@ -763,3 +763,36 @@ The failure lanes require the Docker CLI: the invalid-STT proxy runs next to the
 The [Home Assistant E2E](.github/workflows/ha-e2e.yml) workflow runs on `workflow_dispatch` and on pull requests labeled `ha-e2e` (not on every push). It is also called by the release workflows: the version bump cannot open a release PR until it passes, and `draft-release.yml` will not create a draft release until it passes against the exact release commit. Publishing the draft therefore cannot ship a release that skipped the Home Assistant check. Set the repository variable `HA_E2E_VERSION` to override the Home Assistant image tag used by release runs.
 
 Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covered by the Speaches lane. The compose overlay and workflow contain a clearly marked, unwired hook for a later OpenAI HTTP/Realtime lane that runs only by `workflow_dispatch` with an API key secret.
+
+#### Home Assistant Smoke Tests
+
+`tests/ha_e2e/test_ha_smoke.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. It covers:
+
+- a few turns of one conversation: lights turned off, on and dimmed, a garage door opened, asked about and closed
+- three, then eight, satellites speaking at once, each controlling its own device
+- long replies read out at once
+- a client that stops reading while it holds the only TTS slot, and the proxy stopping with that client still connected
+- a Realtime client that sends no audio while it holds the only STT slot
+- the proxy restarting while turns are queued
+
+Each scenario runs against proxies at the default limits, at 1, and with no limit. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`. The stack needs an NVIDIA GPU (`SMOKE_GPU` picks it, default `0`) and reuses the HA E2E stack's model cache volume; create it with `docker volume create wyoming_openai_huggingface-hub` if that stack never ran.
+
+```bash
+docker build -t wyoming_openai:smoke .
+docker compose -f tests/ha_e2e/smoke/docker-compose.yml up -d
+pytest -m ha_smoke -v
+```
+
+The OpenAI Realtime lane runs the same scenarios on `gpt-live-transcribe` and `gpt-realtime-2.1-mini`. Start its proxies with `OPENAI_API_KEY` set, then run with `HA_SMOKE_OPENAI=1` (`$env:HA_SMOKE_OPENAI = "1"` in PowerShell):
+
+```bash
+docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d
+HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
+```
+
+That lane also tests the Realtime models themselves: a misheard command, or a sentence a model returns as silence, fails a turn, and the failure names the silence. Tear everything down with:
+
+```bash
+docker rm -f ha_smoke_proxy_openai ha_smoke_proxy_openai_limited
+docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v
+```

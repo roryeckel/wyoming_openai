@@ -1,0 +1,60 @@
+# OpenAI Realtime proxies for the smoke stack: Realtime STT and Realtime TTS, at the default limits and at 1.
+# Start the smoke stack first; these join its network. The key is read from OPENAI_API_KEY:
+#
+#   docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d
+#   HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
+#
+# Kept in a project of its own, so no command on the smoke stack recreates these without the key. Remove them,
+# and the key with them, with:
+#
+#   docker rm -f ha_smoke_proxy_openai ha_smoke_proxy_openai_limited
+name: ha_smoke_openai
+
+x-openai-proxy: &openai-proxy
+  image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:smoke}
+  restart: "no"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 5s
+
+x-openai-env: &openai-env
+  WYOMING_URI: tcp://0.0.0.0:10300
+  WYOMING_LOG_LEVEL: INFO
+  WYOMING_LANGUAGES: en
+  STT_OPENAI_URL: https://api.openai.com/v1
+  STT_OPENAI_KEY: ${OPENAI_API_KEY:-}
+  # Only the Realtime model, so Home Assistant's STT entity uses it
+  STT_REALTIME_MODELS: gpt-live-transcribe
+  STT_BACKEND: OPENAI
+  TTS_OPENAI_URL: https://api.openai.com/v1
+  TTS_OPENAI_KEY: ${OPENAI_API_KEY:-}
+  TTS_REALTIME_MODELS: gpt-realtime-2.1-mini
+  TTS_STREAMING_MODELS: gpt-realtime-2.1-mini
+  TTS_BACKEND: OPENAI
+
+services:
+  proxy_openai:
+    <<: *openai-proxy
+    container_name: ha_smoke_proxy_openai
+    ports:
+      - "10403:10300"
+    environment:
+      <<: *openai-env
+
+  proxy_openai_limited:
+    <<: *openai-proxy
+    container_name: ha_smoke_proxy_openai_limited
+    ports:
+      - "10404:10300"
+    environment:
+      <<: *openai-env
+      STT_CONCURRENT_REQUESTS: "1"
+      TTS_CONCURRENT_REQUESTS: "1"
+
+networks:
+  default:
+    name: ha_smoke_net
+    external: true

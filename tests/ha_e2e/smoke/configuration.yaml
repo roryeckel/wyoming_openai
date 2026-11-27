@@ -1,0 +1,12 @@
+# Test-only configuration for the Home Assistant of the smoke stack. The demo integration gives Assist lights,
+# covers and sensors to control; runtime state lives in the ha-config volume.
+
+default_config:
+
+demo:
+
+logger:
+  default: info
+  logs:
+    homeassistant.components.wyoming: debug
+    custom_components.ha_e2e_scripted: debug
