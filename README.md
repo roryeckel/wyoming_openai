@@ -766,7 +766,7 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 
 #### Home Assistant Smoke Tests
 
-`tests/ha_e2e/test_ha_smoke.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. Each turn speaks a command synthesized with Kokoro, then checks the transcript, what Assist did, the device's new state, and the spoken reply, transcribed back. A reply fails if any of its sentences is missing, or if it has a silence of 3 seconds or more. The scenarios run against proxies at the default limits (3), at 1, and with no limit (0):
+`tests/ha_e2e/test_ha_smoke.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. Each turn speaks a command synthesized with Kokoro, then checks the transcript, what Assist did, the device's new state, and the spoken reply, transcribed back. The reply check is fuzzy: each sentence of four words or more must be in the transcript, the reply may not gain or lose a negation such as "not", and it may not have a silence of 3 seconds or more. A different word elsewhere can still pass. The scenarios run against proxies at the default limits (3), at 1, and with no limit (0):
 
 | Scenario | Local proxies | OpenAI proxies |
 |---|---|---|
@@ -779,7 +779,7 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 | The proxy stopping while it answers three satellites, then the next turn | 1 | |
 | Eight satellites at once | default, 1, none | |
 
-In the stuck and silent client scenarios, the satellite that speaks meanwhile must be answered only after the slot is freed. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`.
+In the stuck and silent client scenarios, the proxy's own log must show the satellite's request waiting, or being admitted, only once the slot is freed. The local stuck-client case runs on a fourth proxy at limit 1 that logs at debug level, for that line. The OpenAI stuck-client case has no such line, since that proxy must not log its key, so it checks that the reply's audio came after the slot was freed. That still passes a limit that doesn't hold if the backend is slow to answer. In the restart case, Home Assistant must log the proxy's shutdown error, and a turn must fail after the stop began. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`.
 
 Only `-m ha_smoke` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_e2e` picks it up. The stack needs an NVIDIA GPU (`SMOKE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
 

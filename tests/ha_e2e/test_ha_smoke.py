@@ -80,6 +80,7 @@ SMOKE_ENV = {
     "HA_E2E_STATE_DIR": str(PACKAGE_DIR / ".state" / "smoke"),
     "HA_E2E_ARTIFACT_DIR": str(PACKAGE_DIR / "artifacts"),
     "HA_E2E_WYOMING_PORT": "10300",
+    "HA_E2E_HA_CONTAINER": "ha_smoke_homeassistant",
 }
 FIXTURE_TTS_MODEL = "speaches-ai/Kokoro-82M-v1.0-ONNX"
 VOICES = ("af_heart", "am_michael", "bf_emma", "am_adam", "af_bella", "bm_george", "af_sarah", "bm_lewis")
@@ -90,6 +91,9 @@ STT_WAIT_LOG = "Waiting for a free STT request slot"
 SLOW_CLIENT_LOG = "Client did not take its"
 IDLE_LOG = "No audio for"
 REALTIME_RECORDING_LOG = "Realtime recording started"
+# Logged at debug level once a sentence that is playing has its slot, so its request is under way
+ADMITTED_LOG = "Streaming chunk directly"
+HA_SHUTDOWN_LOG = "Error from Wyoming service: Server is shutting down"
 STT_CANCEL_LOG = "Cancelling the STT request in flight"
 TRANSCRIPTION_POST_LOG = "POST http://speaches:8000/v1/audio/transcriptions"
 # How much later than a log line is written a poll of the logs may see it, so how much earlier than that a reply that
@@ -112,6 +116,9 @@ class Proxy:
 DEFAULT = Proxy("default", "ha_smoke_proxy", 10400, 3, 3)
 LIMITED = Proxy("limited", "ha_smoke_proxy_limited", 10401, 1, 1)
 UNLIMITED = Proxy("unlimited", "ha_smoke_proxy_unlimited", 10402, 0, 0)
+# At limit 1 and logging at debug level, which shows when a sentence's request is admitted. Kept apart from LIMITED,
+# whose many requests would fill its log with request bodies at that level
+LIMITED_DEBUG = Proxy("limited-debug", "ha_smoke_proxy_limited_debug", 10405, 1, 1)
 OPENAI = Proxy("openai", "ha_smoke_proxy_openai", 10403, 3, 3, openai=True)
 OPENAI_LIMITED = Proxy("openai-limited", "ha_smoke_proxy_openai_limited", 10404, 1, 1, openai=True)
 OPENAI_ENABLED = os.environ.get("HA_SMOKE_OPENAI", "").strip() == "1"
@@ -277,7 +284,7 @@ def smoke() -> Iterator[Smoke]:
         state = _load_entry_state(settings)
         custom_entry = ensure_custom_entry(rest, settings, state)
         scripted_agent = _wait_for_entities(rest, ws, custom_entry, ("conversation",))["conversation"]
-        proxies = [DEFAULT, LIMITED, UNLIMITED, *((OPENAI, OPENAI_LIMITED) if OPENAI_ENABLED else ())]
+        proxies = [DEFAULT, LIMITED, UNLIMITED, LIMITED_DEBUG, *((OPENAI, OPENAI_LIMITED) if OPENAI_ENABLED else ())]
         devices: dict[str, str] = {}
         scripted: dict[str, str] = {}
         first: PipelineInfo | None = None
@@ -433,6 +440,9 @@ async def _check_tts(smoke: Smoke, result: AssistRunResult, text: str, outcome: 
         )
     if missing := _missing_sentences(outcome.tts_transcript, text):
         problems.append("not spoken: " + " | ".join(sentence[:70] for sentence in missing))
+    # A fuzzy match takes "is not open" for "is open"; a negation gained or lost is checked on its own
+    if (expected := _negations(text)) != (heard := _negations(outcome.tts_transcript)):
+        problems.append(f"{heard} negations heard, {expected} in the text")
     outcome.notes.update({"problems": problems} if problems else {})
     try:
         assert_reply_match(outcome.tts_transcript, text, long_reply=long)
@@ -462,6 +472,13 @@ def _missing_sentences(transcript: str, text: str) -> list[str]:
         if len(expected.split()) >= SENTENCE_MIN_WORDS and fuzz.partial_ratio(expected, spoken) < SENTENCE_MIN_SCORE:
             missing.append(sentence.strip())
     return missing
+
+
+NEGATION_RE = re.compile(r"\b(?:not|no|never|none|nothing|nobody|cannot)\b|n't\b")
+
+
+def _negations(text: str) -> int:
+    return len(NEGATION_RE.findall(text.lower().replace("\u2019", "'")))
 
 
 SILENCE_SECONDS = 3.0
@@ -708,14 +725,39 @@ async def _when_logged(proxy: Proxy, needle: str, previous_count: int, timeout: 
     raise AssertionError(f"{proxy.container} logged no new {needle!r} within {timeout:g}s")
 
 
+async def _reap(task: asyncio.Task[Any] | None) -> None:
+    """Cancel a log poll if it still runs, and retrieve how it ended either way."""
+
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _stop_container(proxy: Proxy) -> float:
+    """
+    `docker stop` a proxy and return how long it took. The command runs in a thread a cancellation cannot stop, so a
+    cancelled caller waits for it before it goes on: a proxy started again meanwhile would be stopped by it after.
+    """
+
+    started = time.monotonic()
+    stopping = asyncio.ensure_future(asyncio.to_thread(stop_container, proxy.container))
+    try:
+        await asyncio.shield(stopping)
+    except asyncio.CancelledError:
+        await asyncio.gather(stopping, return_exceptions=True)
+        raise
+    return time.monotonic() - started
+
+
 async def _restart(proxy: Proxy) -> float:
     """Stop a proxy as `docker stop` does, start it again, and return how long the stop took."""
 
-    started = time.monotonic()
+    stopped: float | None = None
     exit_code: int | None = None
     try:
-        await asyncio.to_thread(stop_container, proxy.container)
-        stopped = time.monotonic() - started
+        stopped = await _stop_container(proxy)
         exit_code = await asyncio.to_thread(container_exit_code, proxy.container)
     finally:
         await _ensure_running(proxy)
@@ -725,15 +767,18 @@ async def _restart(proxy: Proxy) -> float:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("proxy", _proxies(LIMITED, OPENAI_LIMITED))
+@pytest.mark.parametrize("proxy", _proxies(LIMITED_DEBUG, OPENAI_LIMITED))
 async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> None:
     """
     A client that stops reading while it holds the only TTS slot fails within the client write limit, and a
     satellite waiting for the slot is answered after it. With that client still connected, the proxy still stops
-    promptly and cleanly.
+    promptly and cleanly. On LIMITED_DEBUG the proxy's log shows when the satellite's request was admitted; the
+    OpenAI proxy, which must not log at debug level with its key, has only the reply's timing to go by.
     """
 
+    text = "The kitchen lights are on, and the garage door is closed."
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)
+    admitted_before = _admitted_count(proxy, text)
     stuck = await _exec_in(proxy, STUCK_TTS_CLIENT, LONG_REPLY, "40")
     freed: asyncio.Task[float] | None = None
     try:
@@ -743,7 +788,6 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
         assert _log_count(proxy, SLOW_CLIENT_LOG) == slow_before, "the stuck client failed before the satellite asked"
         freed = asyncio.create_task(_when_logged(proxy, SLOW_CLIENT_LOG, slow_before, 40))
         smoke.rest.call_service("tts", "clear_cache", {})
-        text = "The kitchen lights are on, and the garage door is closed."
         outcome = TurnOutcome(test="stuck-client", proxy=proxy.name, phrase=text)
         smoke.outcomes.append(outcome)
         started = time.monotonic()
@@ -758,12 +802,22 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
             first_audio = None if progress is None else (progress.first_audio_at or progress.first_byte_at)
             assert first_audio is not None, "the satellite got no audio"
             outcome.notes["freed_after_s"] = round(freed_at - started, 2)
-            # Its audio waited for the slot, which the stuck client held until the write limit failed it
+            logs = container_logs(proxy.container)
+            if proxy is LIMITED_DEBUG:
+                # The satellite's request was admitted only once the write limit had failed the stuck client
+                lines = logs.splitlines()
+                failed_line = _nth_line(lines, lambda line: SLOW_CLIENT_LOG in line, slow_before + 1)
+                admitted_line = _nth_line(lines, lambda line: _is_admitted(line, text), admitted_before + 1)
+                assert failed_line is not None and admitted_line is not None, "the proxy's log misses a line"
+                assert admitted_line > failed_line, (
+                    "the satellite's request was admitted while the stuck client still held the only slot"
+                )
+            # Its audio came after the slot was freed too; without the log line this is what shows the wait, but a
+            # backend slow to answer a request admitted too early would also pass it
             assert first_audio >= freed_at - LOG_POLL_SLACK, (
                 f"the satellite's audio came {freed_at - first_audio:.1f}s before the stuck client's slot was freed: "
                 "it did not wait for the slot"
             )
-            logs = container_logs(proxy.container)
             outcome.notes["log"] = next(line for line in logs.splitlines()[::-1] if SLOW_CLIENT_LOG in line)[-140:]
             # The stuck client is still connected, with audio it never takes left in its connection
             stop_seconds = await _restart(proxy)
@@ -774,9 +828,29 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
             outcome.error = repr(exc)
             raise
     finally:
-        if freed is not None and not freed.done():
-            freed.cancel()
+        await _reap(freed)
         await _finish(stuck)
+
+
+def _admitted_count(proxy: Proxy, text: str) -> int:
+    return sum(_is_admitted(line, text) for line in container_logs(proxy.container).splitlines())
+
+
+def _is_admitted(line: str, text: str) -> bool:
+    # The log line has the start of the sentence
+    return ADMITTED_LOG in line and text[:25] in line
+
+
+def _nth_line(lines: list[str], matches: Any, nth: int) -> int | None:
+    """Index of the nth line, counting from 1, for which `matches` is true."""
+
+    seen = 0
+    for index, line in enumerate(lines):
+        if matches(line):
+            seen += 1
+            if seen == nth:
+                return index
+    return None
 
 
 @pytest.mark.asyncio
@@ -794,13 +868,20 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
     await asyncio.to_thread(smoke.audio, CONVERSATION[0].phrase, VOICES[2])
     idle = await _exec_in(proxy, IDLE_STT_CLIENT, "30")
     freed: asyncio.Task[float] | None = None
+    queued: asyncio.Task[float] | None = None
     try:
         # Its session is open, and holds the only slot
         await _when_logged(proxy, REALTIME_RECORDING_LOG, recording_before, 20)
         assert _log_count(proxy, IDLE_LOG) == idle_before, "the silent client was failed before the satellite spoke"
+        waits_before = _log_count(proxy, STT_WAIT_LOG)
         freed = asyncio.create_task(_when_logged(proxy, IDLE_LOG, idle_before, 30))
+        queued = asyncio.create_task(_when_logged(proxy, STT_WAIT_LOG, waits_before, 30))
         outcome = await _device_turn(smoke, "silent-client", proxy, CONVERSATION[0], VOICES[2])
         freed_at = await freed
+        queued_at = await queued
+        # The proxy logged the satellite's session waiting for the slot while the silent client held it
+        assert queued_at < freed_at, "the satellite's session did not wait for the slot the silent client held"
+        outcome.notes["queued_for_s"] = round(freed_at - queued_at, 2)
         assert outcome.stt_end_at is not None, "Home Assistant reported no end of the STT stage"
         assert outcome.stt_end_at >= freed_at - LOG_POLL_SLACK, (
             f"the satellite was transcribed {freed_at - outcome.stt_end_at:.1f}s before the silent client's slot was "
@@ -809,8 +890,8 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
         logs = container_logs(proxy.container)
         outcome.notes["log"] = next(line for line in logs.splitlines()[::-1] if IDLE_LOG in line)[-120:]
     finally:
-        if freed is not None and not freed.done():
-            freed.cancel()
+        await _reap(freed)
+        await _reap(queued)
         await _finish(idle)
 
 
@@ -818,8 +899,9 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
 @pytest.mark.timeout(600)
 async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
     """
-    The proxy stops while it answers three satellites at its limits of 1: the stop interrupts at least one turn,
-    every turn ends and none hangs, the proxy exits cleanly and promptly, and once it is back the next turn works.
+    The proxy stops while it answers three satellites at its limits of 1: Home Assistant gets its shutdown error for
+    at least one turn after the stop began, every turn ends and none hangs, the proxy exits cleanly and promptly, and
+    once it is back the next turn works.
     """
 
     proxy = LIMITED
@@ -827,6 +909,7 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
     # Synthesized before anything starts, so the turns reach the proxy together
     audio = [await asyncio.to_thread(smoke.audio, command.phrase, VOICES[i]) for i, command in enumerate(SATELLITES)]
     cancels_before = _log_count(proxy, STT_CANCEL_LOG)
+    ha_errors_before = container_logs(smoke.settings.ha_container).count(HA_SHUTDOWN_LOG)
     waits_before = _log_count(proxy, STT_WAIT_LOG)
     posts_before = _log_count(proxy, TRANSCRIPTION_POST_LOG)
 
@@ -854,6 +937,7 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
         for clip in audio
     ]
     stop_seconds: float | None = None
+    stop_started: float | None = None
     exit_code: int | None = None
     results: list[Any] = []
     try:
@@ -862,9 +946,8 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
         while not await answering():
             assert time.monotonic() < deadline, "the turns never reached the proxy"
             await asyncio.sleep(0.1)
-        started = time.monotonic()
-        await asyncio.to_thread(stop_container, proxy.container)
-        stop_seconds = time.monotonic() - started
+        stop_started = time.monotonic()
+        stop_seconds = await _stop_container(proxy)
         exit_code = await asyncio.to_thread(container_exit_code, proxy.container)
         results = await asyncio.wait_for(asyncio.gather(*turns, return_exceptions=True), timeout=120)
     finally:
@@ -877,9 +960,18 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
 
     ended = [result for result in results if isinstance(result, AssistRunResult)]
     interrupted = [result for result in ended if result.error_events]
+    # Interrupted by the stop: the error came after it began, and Home Assistant logged the proxy's shutdown error
+    by_stop = [
+        result
+        for result in interrupted
+        if stop_started is not None and (result.received("error") or 0.0) >= stop_started
+    ]
+    ha_errors = container_logs(smoke.settings.ha_container).count(HA_SHUTDOWN_LOG) - ha_errors_before
     note = {
         "turns_ok": len(ended) - len(interrupted),
         "turns_interrupted": len(interrupted),
+        "turns_interrupted_after_the_stop": len(by_stop),
+        "shutdown_errors_in_ha_log": ha_errors,
         "pipeline_errors": sorted(
             {str((event.get("data") or {}).get("code")) for result in interrupted for event in result.error_events}
         ),
@@ -895,7 +987,8 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
     assert not not_ended, f"a pipeline did not end after the proxy stopped: {not_ended!r}"
     for result in ended:
         assert result.events[-1].get("type") == "run-end", f"a pipeline did not reach run-end: {result.events[-1]}"
-    assert interrupted, "every turn finished before the stop: it did not hit their traffic"
+    assert by_stop, "no turn failed after the stop began: it did not hit their traffic"
+    assert ha_errors >= 1, f"Home Assistant logged no {HA_SHUTDOWN_LOG!r}: the stop did not answer a turn"
 
     await asyncio.to_thread(_prepare, smoke, SATELLITES[:1])
     await _device_turn(smoke, "after-restart", proxy, SATELLITES[0], VOICES[3])
