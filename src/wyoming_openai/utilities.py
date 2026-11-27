@@ -355,6 +355,8 @@ _PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?", "。", "．", "：", "�
 _WHITESPACE = re.compile(r"\s+")
 # The pieces a prompt is counted in: a word of ASCII letters, a number, or any other character on its own
 _PROMPT_TOKEN_PIECES = re.compile(r"(?P<word>[A-Za-z]+)|(?P<number>[0-9]+)|\S")
+# OpenAI rejects a whole transcription request, or session update, with a keyword that holds one of these
+_KEYWORD_REJECTED_CHARACTERS = re.compile(r"[<>\r\n]")
 
 
 def clean_name(name: object) -> str | None:
@@ -395,9 +397,34 @@ def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: in
     if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
         head += "."
 
+    chosen = select_names(groups, max_tokens, used_tokens=estimate_prompt_tokens(head))
+    if not chosen:
+        return prefix
+    return _join_prompt(head, chosen)
+
+
+def build_keywords(groups: Iterable[NameGroup], max_tokens: int) -> list[str]:
+    """
+    The `keywords` of an OpenAI transcription: the names of the groups that fit in max_tokens estimated tokens, picked
+    as build_prompt picks them, without the characters OpenAI rejects the whole request for: angle brackets and line
+    breaks.
+    """
+    safe_groups = (
+        tuple(_KEYWORD_REJECTED_CHARACTERS.sub(" ", name) for name in group if isinstance(name, str))
+        for group in groups
+    )
+    return select_names(safe_groups, max_tokens)
+
+
+def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int = 0) -> list[str]:
+    """
+    The names of the groups that fit in max_tokens estimated tokens, of which used_tokens are already taken, in order.
+    A group goes in whole or not at all; one that does not fit is left out, and a later, shorter one can still take the
+    room left. Names already chosen, compared case-insensitively, are skipped.
+    """
     # The estimate of a joined prompt is the sum of its parts: each name adds its own tokens, and one for the ", " or
     # the "." after it
-    tokens = estimate_prompt_tokens(head)
+    tokens = used_tokens
     seen: set[str] = set()
     chosen: list[str] = []
     for group in groups:
@@ -410,15 +437,12 @@ def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: in
             continue
         cost = sum(estimate_prompt_tokens(name) + 1 for name in unique.values())
         if tokens + cost > max_tokens:
-            # In order, so the most useful names are kept and the prompt is the same for the same names
+            # In order, so the most useful names are kept and the names are the same for the same groups
             continue
         tokens += cost
         seen.update(unique)
         chosen.extend(unique.values())
-
-    if not chosen:
-        return prefix
-    return _join_prompt(head, chosen)
+    return chosen
 
 
 def _join_prompt(head: str, names: list[str]) -> str:

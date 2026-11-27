@@ -38,6 +38,7 @@ from .const import (
     DEFAULT_AUDIO_CHANNELS,
     DEFAULT_AUDIO_WIDTH,
     DEFAULT_STT_PROMPT_MAX_TOKENS,
+    OPENAI_KEYWORD_STT_MODEL_PREFIXES,
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
     OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES,
     REALTIME_AUDIO_FORMAT,
@@ -54,6 +55,7 @@ from .utilities import (
     RealtimeAudioConverter,
     SsmlTextTransformer,
     advertised_language,
+    build_keywords,
     build_prompt,
     clamp_realtime_tts_speed,
     get_extra_body_boolean_field,
@@ -680,8 +682,10 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._receive_realtime_transcription_events(), name="openai_realtime_transcription"
             )
 
-            prompt = self._get_stt_prompt(audio_stream)
-            await connection.session.update(session=self._get_realtime_transcription_session(audio_stream, prompt))
+            prompt, keywords = self._get_stt_bias(audio_stream)
+            await connection.session.update(
+                session=self._get_realtime_transcription_session(audio_stream, prompt, keywords)
+            )
             self._is_recording = True
             await self.write_event(TranscriptStart().event())
             audio_stream.transcript_started = True
@@ -820,31 +824,42 @@ class OpenAIEventHandler(AsyncEventHandler):
             raise RealtimeTranscriptionError("No STT client configured for realtime transcription")
         return self._stt_client.realtime.connect(extra_query={"intent": "transcription"})
 
-    def _get_stt_prompt(self, audio_stream: _AudioStreamState) -> str | None:
+    def _get_stt_bias(self, audio_stream: _AudioStreamState) -> tuple[str | None, list[str] | None]:
         """
-        The STT prompt: STT_PROMPT, followed by the names sent with transcribe and the names read from Home
-        Assistant. A prompt in the extra body of the stream's transport replaces it, so it is STT_PROMPT alone then, as
-        without names; OpenAI's Realtime sessions for some models take none, so it is None for those.
+        The STT prompt and keywords of a stream: STT_PROMPT, followed by the names sent with transcribe and the names
+        read from Home Assistant. OpenAI models that take keywords get the names there instead, and STT_PROMPT alone as
+        the prompt, as OpenAI keeps the prompt for context and keywords for the terms to expect. A prompt, or keywords,
+        in the extra body of the stream's transport replace the proxy's, so the names are left out of that field then;
+        OpenAI's Realtime sessions for some models take no prompt, so it is None for those.
         """
         model = audio_stream.model
-        extra_body = self._stt_realtime_extra_body if audio_stream.realtime else self._stt_extra_body
-        if model is None or (extra_body and "prompt" in extra_body):
-            return self._stt_prompt
+        if model is None:
+            return self._stt_prompt, None
+        extra_body = (self._stt_realtime_extra_body if audio_stream.realtime else self._stt_extra_body) or {}
         hass_names = self._hass_names.names if self._hass_names is not None else ()
-        promptless = self._is_openai_stt_model(model.name, OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES)
-        if audio_stream.realtime and promptless:
-            # Called once per stream; only a prompt that would otherwise have been sent is worth reporting
-            if self._stt_prompt is not None or audio_stream.bias_names or hass_names:
-                _LOGGER.debug("Leaving out the STT prompt: %s does not support one", model.name)
-            return None
         groups = audio_stream.bias_names + hass_names
+        if self._is_openai_stt_model(model.name, OPENAI_KEYWORD_STT_MODEL_PREFIXES):
+            if not groups or "keywords" in extra_body:
+                return self._stt_prompt, None
+            keywords = build_keywords(groups, self._stt_prompt_max_tokens)
+            _LOGGER.debug("STT keywords: %s", keywords)
+            return self._stt_prompt, keywords or None
+        if "prompt" in extra_body:
+            return self._stt_prompt, None
+        if audio_stream.realtime and self._is_openai_stt_model(
+            model.name, OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES
+        ):
+            # Called once per stream; only a prompt that would otherwise have been sent is worth reporting
+            if self._stt_prompt is not None or groups:
+                _LOGGER.debug("Leaving out the STT prompt: %s does not support one", model.name)
+            return None, None
         prompt = build_prompt(self._stt_prompt, groups, self._stt_prompt_max_tokens)
         if groups:
             _LOGGER.debug("STT prompt: %s", prompt)
-        return prompt
+        return prompt, None
 
     def _get_realtime_transcription_session(
-        self, audio_stream: _AudioStreamState, prompt: str | None
+        self, audio_stream: _AudioStreamState, prompt: str | None, keywords: list[str] | None = None
     ) -> dict[str, object]:
         """Build a Realtime transcription session update payload."""
         if not audio_stream.model:
@@ -863,6 +878,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             transcription["languages"] = languages
         if prompt is not None:
             transcription["prompt"] = prompt
+        if keywords:
+            transcription["keywords"] = keywords
         transcription.update(extra_body)
         # A null in the extra body drops the field, e.g. {"prompt": null} for a model that takes no prompt
         transcription = {key: value for key, value in transcription.items() if value is not None}
@@ -1027,7 +1044,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 model.name, audio_stream.language, extra_body
             )
 
-            prompt = self._get_stt_prompt(audio_stream)
+            prompt, keywords = self._get_stt_bias(audio_stream)
             transcription_kwargs = {
                 "file": self._wav_buffer,
                 "model": model.name,
@@ -1035,6 +1052,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 "languages": languages if languages is not None else omit,
                 "temperature": self._stt_temperature if self._stt_temperature is not None else omit,
                 "prompt": prompt if prompt is not None else omit,
+                "keywords": keywords if keywords else omit,
                 "response_format": "json",
                 "stream": use_streaming if use_streaming else omit,
             }

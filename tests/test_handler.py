@@ -200,8 +200,8 @@ def _selected_realtime_stream(handler):
 async def _selected_realtime_session(handler):
     """The Realtime session settings, with their prompt, that the handler's current selection would open."""
     audio_stream = _selected_realtime_stream(handler)
-    prompt = handler._get_stt_prompt(audio_stream)
-    return handler._get_realtime_transcription_session(audio_stream, prompt)
+    prompt, keywords = handler._get_stt_bias(audio_stream)
+    return handler._get_realtime_transcription_session(audio_stream, prompt, keywords)
 
 
 def _realtime_stream(rate=24000, width=2, channels=1):
@@ -7022,6 +7022,8 @@ class _StubHassNames:
 
 
 HASS_NAMES = (("Kitchen",), ("Ecobee", "Thermostat"))
+# The same names, as keywords
+KEYWORDS = ["Kitchen", "Ecobee", "Thermostat"]
 
 
 @pytest.mark.asyncio
@@ -7122,6 +7124,48 @@ async def test_a_transcribe_during_the_recording_replaces_the_names(enhanced_han
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_body", "expected_keywords", "expected_prompt"),
+    [
+        (None, KEYWORDS, "Test prompt"),
+        # Keywords in the extra body replace the names, and a prompt there does not stop them going as keywords
+        ({"keywords": ["Wyoming"]}, omit, "Test prompt"),
+        ({"prompt": "Own prompt"}, KEYWORDS, "Test prompt"),
+    ],
+)
+async def test_http_transcription_sends_the_names_as_keywords_to_gpt_transcribe(
+    enhanced_handler, mock_info, mock_clients, extra_body, expected_keywords, expected_prompt
+):
+    """Test gpt-transcribe on OpenAI gets the names as keywords, and STT_PROMPT alone as its prompt."""
+    stt_client, _ = mock_clients
+    stt_client.backend = OpenAIBackend.OPENAI
+    mock_info.asr[0].models[0].name = "gpt-transcribe"
+    enhanced_handler._stt_extra_body = extra_body
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "gpt-transcribe")
+
+    assert call_args["keywords"] == expected_keywords
+    assert call_args["prompt"] == expected_prompt
+
+
+@pytest.mark.asyncio
+async def test_http_transcription_keeps_the_names_in_the_prompt_for_models_without_keywords(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test whisper-1 on OpenAI, which takes no keywords, still gets the names in its prompt."""
+    stt_client, _ = mock_clients
+    stt_client.backend = OpenAIBackend.OPENAI
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1")
+
+    assert call_args["keywords"] is omit
+    assert call_args["prompt"] == "Test prompt. Kitchen, Ecobee, Thermostat."
+
+
+@pytest.mark.asyncio
 async def test_home_assistant_names_are_not_added_when_the_extra_body_sets_the_prompt(
     enhanced_handler, mock_info, mock_clients
 ):
@@ -7140,21 +7184,26 @@ async def test_home_assistant_names_are_not_added_when_the_extra_body_sets_the_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_name", "extra_body", "expected_prompt"),
+    ("model_name", "backend", "extra_body", "expected_prompt", "expected_keywords"),
     [
-        ("gpt-live-transcribe", None, "Test prompt. Kitchen, Ecobee, Thermostat."),
-        # OpenAI's Realtime sessions for this model take no prompt
-        ("gpt-realtime-whisper", None, None),
-        # A null in the extra body still drops the prompt
-        ("gpt-live-transcribe", {"prompt": None}, None),
+        # OpenAI keeps the prompt for context and keywords for the terms to expect
+        ("gpt-live-transcribe", OpenAIBackend.OPENAI, None, "Test prompt", KEYWORDS),
+        # Another backend may not know keywords, so the names stay in the prompt
+        ("gpt-live-transcribe", OpenAIBackend.SPEACHES, None, "Test prompt. Kitchen, Ecobee, Thermostat.", None),
+        # OpenAI's Realtime sessions for this model take no prompt, nor keywords
+        ("gpt-realtime-whisper", OpenAIBackend.OPENAI, None, None, None),
+        # A null in the extra body still drops the prompt, and the names still go as keywords
+        ("gpt-live-transcribe", OpenAIBackend.OPENAI, {"prompt": None}, None, KEYWORDS),
+        # Keywords in the extra body replace the names
+        ("gpt-live-transcribe", OpenAIBackend.OPENAI, {"keywords": ["Wyoming"]}, "Test prompt", ["Wyoming"]),
     ],
 )
 async def test_realtime_session_adds_home_assistant_names(
-    enhanced_handler, mock_info, mock_clients, model_name, extra_body, expected_prompt
+    enhanced_handler, mock_info, mock_clients, model_name, backend, extra_body, expected_prompt, expected_keywords
 ):
-    """Test a Realtime session gets the names in its prompt, unless the prompt would not reach the model."""
+    """Test a Realtime session gets the names as keywords or in its prompt, unless they would not reach the model."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name=model_name)
-    stt_client.backend = OpenAIBackend.OPENAI
+    stt_client.backend = backend
     enhanced_handler._stt_realtime_extra_body = extra_body
     names = _StubHassNames(HASS_NAMES)
     enhanced_handler._hass_names = names
@@ -7166,6 +7215,7 @@ async def test_realtime_session_adds_home_assistant_names(
 
     transcription = connection.session.update.call_args.kwargs["session"]["audio"]["input"]["transcription"]
     assert transcription.get("prompt") == expected_prompt
+    assert transcription.get("keywords") == expected_keywords
     await enhanced_handler._drop_audio_stream()
     await enhanced_handler._drain_background_tasks()
 

@@ -25,6 +25,9 @@ ATTRIBUTION_URL = "https://github.com/roryeckel/wyoming_openai"
 OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES = ("gpt-transcribe", "gpt-live-transcribe")
 # OpenAI STT models whose Realtime sessions do not support a `prompt`
 OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES = ("gpt-realtime-whisper",)
+# OpenAI STT models that take `keywords`, literal terms to expect, alongside `prompt`, which OpenAI keeps for context;
+# the names that bias STT go there instead of into the prompt
+OPENAI_KEYWORD_STT_MODEL_PREFIXES = ("gpt-transcribe", "gpt-live-transcribe")
 
 # Realtime models are conversational, so TTS over Realtime has to tell the model to read rather than reply
 REALTIME_TTS_INSTRUCTIONS = (

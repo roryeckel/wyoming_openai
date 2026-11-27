@@ -12,6 +12,7 @@ from wyoming_openai.utilities import (
     RealtimePcmResampler,
     SsmlTextTransformer,
     advertised_language,
+    build_keywords,
     build_prompt,
     clamp_realtime_tts_speed,
     create_enum_parser,
@@ -712,3 +713,15 @@ def test_parse_bool(value, expected):
 def test_parse_bool_rejects_other_values(value):
     with pytest.raises(argparse.ArgumentTypeError, match="expected true or false"):
         parse_bool(value)
+
+
+def test_build_keywords_picks_names_as_the_prompt_does():
+    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("kitchen",), ("Lamp",)]
+    assert build_keywords(groups, 200) == ["Kitchen", "Ecobee", "Thermostat", "Lamp"]
+    # Without STT_PROMPT, which keywords leave in the prompt, the whole budget is the names'
+    assert build_keywords(groups, 5) == ["Kitchen", "Lamp"]
+
+
+def test_build_keywords_leaves_out_the_characters_openai_rejects():
+    groups = [("<Kitchen>",), ("Line\nBreak", "A<B"), ("<>",), ("Ok\r\n",)]
+    assert build_keywords(groups, 200) == ["Kitchen", "Line Break", "A B", "Ok"]
