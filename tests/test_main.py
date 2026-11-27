@@ -1044,7 +1044,21 @@ async def test_main_cli_tts_concurrent_requests_overrides_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["0", "-1", "two", "1.5"])
+@pytest.mark.parametrize("source", ["env", "cli"])
+async def test_main_tts_concurrent_requests_zero_means_no_limit(monkeypatch, source):
+    """As for STT_CONCURRENT_REQUESTS, 0 lifts the limit rather than being rejected."""
+    if source == "env":
+        monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", "0")
+        handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+    else:
+        monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
+        handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--tts-concurrent-requests", "0")
+
+    assert handler_kwargs["tts_concurrent_requests"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["-1", "two", "1.5"])
 async def test_main_rejects_invalid_tts_concurrent_requests_cli(monkeypatch, capsys, value):
     monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
     monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--tts-concurrent-requests", value])
@@ -1053,11 +1067,11 @@ async def test_main_rejects_invalid_tts_concurrent_requests_cli(monkeypatch, cap
         await main()
 
     assert exc_info.value.code == 2
-    assert "--tts-concurrent-requests: expected a whole number of at least 1" in capsys.readouterr().err
+    assert "--tts-concurrent-requests: expected a whole number of at least 0" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["0", "two"])
+@pytest.mark.parametrize("value", ["-1", "two"])
 async def test_main_rejects_invalid_tts_concurrent_requests_env(monkeypatch, capsys, value):
     monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", value)
     monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
@@ -1066,7 +1080,54 @@ async def test_main_rejects_invalid_tts_concurrent_requests_env(monkeypatch, cap
         await main()
 
     assert exc_info.value.code == 2
-    assert "--tts-concurrent-requests: expected a whole number of at least 1" in capsys.readouterr().err
+    assert "--tts-concurrent-requests: expected a whole number of at least 0" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "2"])
+@pytest.mark.parametrize("source", ["env", "cli"])
+async def test_main_warns_about_a_tts_limit_without_tts(monkeypatch, caplog, source, value):
+    """A TTS limit given explicitly, even 0, is reported when only STT is configured."""
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    if source == "env":
+        monkeypatch.setenv("TTS_CONCURRENT_REQUESTS", value)
+        cli_args = ()
+    else:
+        monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
+        cli_args = ("--tts-concurrent-requests", value)
+
+    with caplog.at_level(logging.WARNING):
+        await _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args)
+
+    assert "TTS concurrent requests is set but unused: TTS is not configured" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "2"])
+async def test_main_warns_about_an_stt_limit_without_stt(monkeypatch, caplog, value):
+    """An STT limit given explicitly, even 0, is reported when only TTS is configured."""
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setenv("STT_CONCURRENT_REQUESTS", value)
+
+    with caplog.at_level(logging.WARNING):
+        await _advertised_tts_voices(monkeypatch, _FakeClient(), "--tts-voices", "alloy")
+
+    assert "STT concurrent requests is set but unused: STT is not configured" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_main_does_not_warn_about_concurrency_limits_left_at_their_defaults(monkeypatch, caplog):
+    """The defaults are not a setting, so an STT-only or TTS-only server reports neither limit."""
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.delenv("STT_CONCURRENT_REQUESTS", raising=False)
+    monkeypatch.delenv("TTS_CONCURRENT_REQUESTS", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        # TTS-only first: the STT-only run replaces the handler class for the rest of the test
+        await _advertised_tts_voices(monkeypatch, _FakeClient(), "--tts-voices", "alloy")
+        await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert "concurrent requests is set but unused" not in caplog.text
 
 
 @pytest.mark.asyncio

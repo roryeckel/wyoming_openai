@@ -129,6 +129,7 @@ DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Bytes read from the TTS response at a time; WavFramer buffers a header across reads
 TTS_CONCURRENT_REQUESTS = 3  # Default number of concurrent OpenAI TTS requests per connection when streaming sentences
+STT_CONCURRENT_REQUESTS = 0  # Default number of concurrent STT requests across all connections; 0 means no limit
 TTS_STREAM_STOP_TIMEOUT = 1.0  # Seconds to wait for a client to take the events of a failed or cancelled synthesis
 SHUTDOWN_DRAIN_TIMEOUT = 2.0  # Seconds stop() waits for Realtime websockets to finish closing before giving up on them
 SHUTDOWN_CLOSE_TIMEOUT = 2.0  # Seconds stop() waits for a client connection to finish closing before aborting it
@@ -257,7 +258,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime TTS sessions.
             tts_streaming_min_words (int | None): Minimum words per chunk for streaming TTS.
             tts_streaming_max_chars (int | None): Maximum characters per chunk for streaming TTS.
-            tts_concurrent_requests (int): Maximum simultaneous TTS requests per connection.
+            tts_concurrent_requests (int): Maximum simultaneous TTS requests per connection; 0 means no limit.
             stt_semaphore (asyncio.Semaphore | None): Shared by every connection of the server to limit the STT
                 requests in flight across all of them, or None for no limit. A /v1/audio/transcriptions request
                 holds a slot from audio-stop until its response is read; a Realtime session from audio-start until
@@ -326,9 +327,12 @@ class OpenAIEventHandler(AsyncEventHandler):
         # State of the current synthesis
         self._synthesis = _SynthesisState()
 
-        if tts_concurrent_requests < 1:
-            raise ValueError(f"tts_concurrent_requests must be at least 1, got {tts_concurrent_requests}")
-        self._tts_semaphore = asyncio.Semaphore(tts_concurrent_requests)
+        if tts_concurrent_requests < 0:
+            raise ValueError(f"tts_concurrent_requests must be at least 0, got {tts_concurrent_requests}")
+        # 0 means no limit, as for the STT limit
+        self._tts_semaphore: asyncio.Semaphore | None = (
+            asyncio.Semaphore(tts_concurrent_requests) if tts_concurrent_requests else None
+        )
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
         self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence and unsplit synthesis tasks still running
         self._background_tasks: set[asyncio.Task[Any]] = set()  # Cleanup that must not delay audio
@@ -2095,7 +2099,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 raise TtsStreamError("TTS client is not configured", chunk_preview, voice.name)
 
             buffered: list[bytes] = []
-            async with self._tts_semaphore, contextlib.aclosing(self._iter_tts_audio(text, voice)) as audio_stream:
+            async with self._tts_slot(), contextlib.aclosing(self._iter_tts_audio(text, voice)) as audio_stream:
                 # Checked again with every chunk rather than once up front: a request that waited for its
                 # turn, or is still running when playback reaches it, is not buffered whole first
                 if not is_playing():
@@ -2395,6 +2399,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             ).event()
         )
 
+    def _tts_slot(self) -> contextlib.AbstractAsyncContextManager[Any]:
+        """One of this connection's TTS request slots, or nothing to wait for when there is no limit."""
+        return self._tts_semaphore if self._tts_semaphore is not None else contextlib.nullcontext()
+
     async def _stream_tts_audio(self, voice: TtsVoiceModel, text: str) -> bool:
         """
         Synthesize text as one whole request and stream its audio to Wyoming as it arrives.
@@ -2410,7 +2418,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.error("No TTS client configured for synthesis")
             return False
 
-        async with self._tts_semaphore:
+        async with self._tts_slot():
             return await self._play_tts_audio(
                 self._iter_tts_audio(text, voice),
                 audio_format=self._get_tts_audio_format(voice),

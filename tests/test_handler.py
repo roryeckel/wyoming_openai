@@ -5096,11 +5096,11 @@ class _OverlapRecordingSpeech:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("configured", "expected_peak"), [(None, 3), (1, 1), (2, 2), (5, 5)])
+@pytest.mark.parametrize(("configured", "expected_peak"), [(None, 3), (1, 1), (2, 2), (5, 5), (0, 6)])
 async def test_tts_requests_overlap_up_to_configured_limit(
     dummy_info, dummy_clients, dummy_reader_writer, configured, expected_peak
 ):
-    """Three sentences are synthesized at once by default; tts_concurrent_requests changes that limit."""
+    """Three sentences are synthesized at once by default; tts_concurrent_requests changes that limit, 0 lifts it."""
     stt_client, tts_client = dummy_clients
     reader, writer = dummy_reader_writer
     speech = _OverlapRecordingSpeech()
@@ -5118,12 +5118,12 @@ async def test_tts_requests_overlap_up_to_configured_limit(
     assert speech.peak == expected_peak
 
 
-@pytest.mark.parametrize("value", [0, -1])
-def test_init_rejects_non_positive_tts_concurrent_requests(dummy_info, dummy_clients, dummy_reader_writer, value):
+@pytest.mark.parametrize("value", [-1, -5])
+def test_init_rejects_negative_tts_concurrent_requests(dummy_info, dummy_clients, dummy_reader_writer, value):
     stt_client, tts_client = dummy_clients
     reader, writer = dummy_reader_writer
 
-    with pytest.raises(ValueError, match="tts_concurrent_requests must be at least 1"):
+    with pytest.raises(ValueError, match="tts_concurrent_requests must be at least 0"):
         OpenAIEventHandler(
             reader,
             writer,

@@ -28,7 +28,7 @@ from .const import (
     REALTIME_TTS_MIN_SPEED,
     __version__,
 )
-from .handler import TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
+from .handler import STT_CONCURRENT_REQUESTS, TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
 from .utilities import (
     clamp_realtime_tts_speed,
     create_enum_parser,
@@ -203,10 +203,12 @@ async def main():
     parser.add_argument(
         "--stt-concurrent-requests",
         type=parse_non_negative_int,
-        default=env_default("STT_CONCURRENT_REQUESTS") or 0,
+        # None when not given, so a limit set for a service that is not configured can be reported
+        default=env_default("STT_CONCURRENT_REQUESTS"),
         help=(
             "Maximum number of STT requests in flight at once across all connections; further requests wait for a "
-            "free slot. A Realtime session holds its slot from audio-start until it closes (default: 0, no limit)"
+            "free slot. A Realtime session holds its slot from audio-start until it closes "
+            f"(default: {STT_CONCURRENT_REQUESTS}, no limit; 0 means no limit)"
         ),
     )
     parser.add_argument(
@@ -321,11 +323,12 @@ async def main():
     )
     parser.add_argument(
         "--tts-concurrent-requests",
-        type=parse_positive_int,
-        default=os.getenv("TTS_CONCURRENT_REQUESTS") or TTS_CONCURRENT_REQUESTS,
+        type=parse_non_negative_int,
+        # None when not given, as for --stt-concurrent-requests
+        default=env_default("TTS_CONCURRENT_REQUESTS"),
         help=(
             "Maximum number of simultaneous TTS requests per connection when synthesizing sentences "
-            f"(default: {TTS_CONCURRENT_REQUESTS})"
+            f"(default: {TTS_CONCURRENT_REQUESTS}; 0 means no limit)"
         ),
     )
 
@@ -547,13 +550,23 @@ async def main():
         else:
             _logger.warning("No TTS models specified")
 
+        # Both limits take a whole number of at least 0, where 0 means no limit, and fall back to their own default
+        # when not given. One given for a service that is not configured is reported, whatever its value
+        if args.stt_concurrent_requests is not None and not asr_programs:
+            _logger.warning("STT concurrent requests is set but unused: STT is not configured")
+        if args.tts_concurrent_requests is not None and not tts_programs:
+            _logger.warning("TTS concurrent requests is set but unused: TTS is not configured")
+        stt_concurrent_requests = (
+            STT_CONCURRENT_REQUESTS if args.stt_concurrent_requests is None else args.stt_concurrent_requests
+        )
+        tts_concurrent_requests = (
+            TTS_CONCURRENT_REQUESTS if args.tts_concurrent_requests is None else args.tts_concurrent_requests
+        )
+
         # One limit for the whole server, so it is shared by the handler of every connection
-        stt_semaphore = asyncio.Semaphore(args.stt_concurrent_requests) if args.stt_concurrent_requests else None
-        if stt_semaphore is not None:
-            if asr_programs:
-                _logger.info("Limiting STT to %d concurrent requests", args.stt_concurrent_requests)
-            else:
-                _logger.warning("STT concurrent requests is set but unused: STT is not configured")
+        stt_semaphore = asyncio.Semaphore(stt_concurrent_requests) if stt_concurrent_requests else None
+        if stt_semaphore is not None and asr_programs:
+            _logger.info("Limiting STT to %d concurrent requests", stt_concurrent_requests)
 
         # Create Wyoming server
         server = AsyncServer.from_uri(args.uri)
@@ -578,7 +591,7 @@ async def main():
                 tts_realtime_extra_body=args.tts_realtime_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
-                tts_concurrent_requests=args.tts_concurrent_requests,
+                tts_concurrent_requests=tts_concurrent_requests,
                 stt_semaphore=stt_semaphore,
             )
         )
