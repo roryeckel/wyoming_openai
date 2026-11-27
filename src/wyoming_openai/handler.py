@@ -117,6 +117,12 @@ def _get_boundary_detector(language: str | None) -> BoundaryDetector:
     return _build_boundary_detector(_get_segmenter_language(primary_language_subtag(language or "en")))
 
 
+def _retrieve_result(task: asyncio.Future[Any]) -> None:
+    """Read a finished task's exception, so one nobody awaits any more is not logged as never retrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
 def _final_transcript(final_text: str | None, snapshot: str) -> str:
     """
     The final transcript of a stream whose deltas built `snapshot`. Any non-empty final text replaces them, as the
@@ -1761,10 +1767,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Never cancelled, as it waits on the close waiter of the stream protocol, which a cancellation would cancel
         # for every later wait_closed(), as that of a concurrent or repeated stop(); an abort completes it instead
         wait_closed = asyncio.create_task(self.writer.wait_closed(), name="wyoming_writer_close")
+        # Its failure is read even when nobody waits for it any more, as after a cancellation
+        wait_closed.add_done_callback(_retrieve_result)
+        raised_by_close: BaseException | None = None
         try:
             async with asyncio.timeout(SHUTDOWN_CLOSE_TIMEOUT):
-                await asyncio.shield(wait_closed)
-        except TimeoutError:
+                try:
+                    await asyncio.shield(wait_closed)
+                except TimeoutError as err:
+                    # The close's own, which leaves the connection closed: not the deadline's
+                    raised_by_close = err
+                    raise
+        except TimeoutError as err:
+            if err is raised_by_close:
+                _LOGGER.debug("Waiting for the client connection to close failed: %s", err)
+                return
             _LOGGER.warning(
                 "Client did not take the rest of its data within %g seconds; aborting its connection",
                 SHUTDOWN_CLOSE_TIMEOUT,

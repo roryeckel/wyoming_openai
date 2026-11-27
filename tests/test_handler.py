@@ -2,6 +2,7 @@ import asyncio
 import base64
 import builtins
 import contextlib
+import gc
 import io
 import json
 import logging
@@ -8572,6 +8573,53 @@ async def test_a_connection_the_handler_ends_on_a_client_that_stopped_reading_is
             server_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await server_task
+
+
+@pytest.mark.asyncio
+async def test_a_close_that_times_out_on_its_own_is_not_taken_for_a_client_that_stopped_reading(
+    enhanced_handler, caplog
+):
+    """A TimeoutError of the close itself leaves the connection closed: it is neither aborted nor reported as stuck."""
+    enhanced_handler.writer.wait_closed = AsyncMock(side_effect=TimeoutError("TCP close failed"))
+
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.handler"):
+        await asyncio.wait_for(enhanced_handler._close_writer(), timeout=1)
+
+    enhanced_handler.writer.transport.abort.assert_not_called()
+    assert "did not take the rest of its data" not in caplog.text
+    assert "Waiting for the client connection to close failed: TCP close failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_close_that_fails_after_its_wait_was_cancelled_is_not_logged_as_never_retrieved(enhanced_handler):
+    """The close a cancelled wait leaves running has its failure read, so asyncio does not log it as unretrieved."""
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    may_fail = asyncio.Event()
+
+    async def wait_closed():
+        await may_fail.wait()
+        raise ConnectionResetError("reset while closing")
+
+    enhanced_handler.writer.wait_closed = wait_closed
+    try:
+        closing = asyncio.create_task(enhanced_handler._close_writer())
+        await _settle()  # Waiting for the close
+        closing.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await closing
+        enhanced_handler.writer.transport.abort.assert_called_once()
+        may_fail.set()
+        await _settle()  # The close fails, with nobody waiting for it
+        del closing
+        gc.collect()
+        await _settle()
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert not [context for context in reported if "never retrieved" in str(context.get("message"))], reported
 
 
 @pytest.mark.asyncio
