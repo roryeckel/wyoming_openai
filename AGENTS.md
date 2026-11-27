@@ -110,7 +110,7 @@ The server accepts both command-line arguments and environment variables. Key co
 - Voice configurations
 - Backend-specific settings (temperature, speed, etc.)
 - STT/TTS extra request body fields (`--stt-extra-body` / `--stt-realtime-extra-body` / `--tts-extra-body` / `--tts-realtime-extra-body`)
-- Names for the STT prompt: `transcript_names`/`transcript_terms` from `transcribe` (`--stt-transcript-names`), and Home Assistant names (`--stt-hass-*`), within `--stt-prompt-max-tokens` estimated tokens
+- Names for the STT prompt: `transcript_names`/`transcript_terms` from `transcribe` (`--stt-transcript-names`), and Home Assistant names (`--stt-hass-*`), within `--stt-prompt-max-tokens` estimated tokens (0 for no limit)
 - Realtime transports for OpenAI models (`--stt-realtime-models` / `--tts-realtime-models`)
 
 ## Testing Strategy

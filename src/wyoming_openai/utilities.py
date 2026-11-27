@@ -391,10 +391,10 @@ def estimate_prompt_tokens(text: str) -> int:
 def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: int) -> str | None:
     """
     The STT prompt: the prefix (STT_PROMPT) first, then the name groups that fit in max_tokens estimated tokens (see
-    estimate_prompt_tokens), in the form "<prefix>. Name1, Name2.". A group goes in whole or not at all; one that does
-    not fit is left out, and a later, shorter one can still take the room left. Names already added, compared
-    case-insensitively, are skipped. The prefix is never shortened, and when no names fit, or there are none, the
-    prompt is the prefix exactly as given.
+    estimate_prompt_tokens), or every group when max_tokens is 0, in the form "<prefix>. Name1, Name2.". A group goes
+    in whole or not at all; one that does not fit is left out, and a later, shorter one can still take the room left.
+    Names already added, compared case-insensitively, are skipped. The prefix is never shortened, and when no names
+    fit, or there are none, the prompt is the prefix exactly as given.
     """
     head = (prefix or "").strip()
     if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
@@ -408,9 +408,9 @@ def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: in
 
 def build_keywords(groups: Iterable[NameGroup], max_tokens: int) -> list[str]:
     """
-    The `keywords` of an OpenAI transcription: the names of the groups that fit in max_tokens estimated tokens, picked
-    as build_prompt picks them, without the characters OpenAI rejects the whole request for: angle brackets and line
-    breaks.
+    The `keywords` of an OpenAI transcription: the names of the groups that fit in max_tokens estimated tokens, or of
+    every group when max_tokens is 0, picked as build_prompt picks them, without the characters OpenAI rejects the
+    whole request for: angle brackets and line breaks.
     """
     safe_groups = (
         tuple(_KEYWORD_REJECTED_CHARACTERS.sub(" ", name) for name in group if isinstance(name, str))
@@ -421,9 +421,9 @@ def build_keywords(groups: Iterable[NameGroup], max_tokens: int) -> list[str]:
 
 def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int = 0) -> list[str]:
     """
-    The names of the groups that fit in max_tokens estimated tokens, of which used_tokens are already taken, in order.
-    A group goes in whole or not at all; one that does not fit is left out, and a later, shorter one can still take the
-    room left. Names already chosen, compared case-insensitively, are skipped.
+    The names of the groups that fit in max_tokens estimated tokens, of which used_tokens are already taken, in order;
+    a max_tokens of 0 sets no limit. A group goes in whole or not at all; one that does not fit is left out, and a
+    later, shorter one can still take the room left. Names already chosen, compared case-insensitively, are skipped.
     """
     # The estimate of a joined prompt is at most the sum of its parts: each name adds its own tokens, and two for the
     # ", " after it, which also covers the "." that ends the list and the space between the prefix and the names
@@ -439,7 +439,7 @@ def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int 
         if not unique:
             continue
         cost = sum(estimate_prompt_tokens(name) + 2 for name in unique.values())
-        if tokens + cost > max_tokens:
+        if max_tokens and tokens + cost > max_tokens:
             # In order, so the most useful names are kept and the names are the same for the same groups
             continue
         tokens += cost

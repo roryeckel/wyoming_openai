@@ -1315,12 +1315,24 @@ async def test_main_reads_home_assistant_settings_from_env(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_main_accepts_no_prompt_token_limit(monkeypatch):
+    """Test 0, which sets no limit on the names, is accepted from the CLI and the environment."""
+    _, max_tokens, _ = await _capture_hass_settings(monkeypatch, "--stt-prompt-max-tokens", "0")
+    assert max_tokens == 0
+
+    monkeypatch.setenv("STT_PROMPT_MAX_TOKENS", "0")
+    _, max_tokens, _ = await _capture_hass_settings(monkeypatch)
+    assert max_tokens == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("cli_args", "message"),
     [
         (["--stt-hass-token", "t", "--stt-hass-url", "ftp://ha"], "Home Assistant URL must be"),
         (["--stt-hass-token", "t"], "--stt-hass-url (STT_HASS_URL) is required"),
-        (["--stt-prompt-max-tokens", "0"], "--stt-prompt-max-tokens"),
+        (["--stt-prompt-max-tokens", "-1"], "--stt-prompt-max-tokens"),
+        (["--stt-prompt-max-tokens", "lots"], "--stt-prompt-max-tokens"),
         (["--stt-transcript-names", "maybe"], "--stt-transcript-names"),
     ],
 )

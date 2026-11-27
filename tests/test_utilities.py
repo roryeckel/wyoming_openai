@@ -667,6 +667,14 @@ def test_build_prompt_leaves_out_a_group_that_does_not_fit_and_goes_on():
     assert build_prompt(None, groups, 18) == "Kitchen, Ecobee, Thermostat."
 
 
+def test_build_prompt_and_keywords_take_every_name_with_no_limit():
+    """Test a budget of 0, for models with a longer context than Whisper's, sets no limit."""
+    groups = [(f"Light {number}",) for number in range(1000)] + [("Light 1",)]
+    names = [f"Light {number}" for number in range(1000)]
+    assert build_prompt("Commands.", groups, 0) == f"Commands. {', '.join(names)}."
+    assert build_keywords(groups, 0) == names
+
+
 @pytest.mark.parametrize("prefix", ["A long prompt that does not leave room for any name ", None])
 def test_build_prompt_keeps_stt_prompt_as_given_when_no_names_fit(prefix):
     assert build_prompt(prefix, [("Kitchen",)], 5) == prefix

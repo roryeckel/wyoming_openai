@@ -253,8 +253,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 the caller.
             stt_transcript_names (bool): Whether the transcript_names, then transcript_terms, a client sends with
                 transcribe are added to the STT prompt after stt_prompt, ahead of the Home Assistant names.
-            stt_prompt_max_tokens (int): The estimated tokens the names may bring the STT prompt to; stt_prompt is
-                never shortened.
+            stt_prompt_max_tokens (int): The estimated tokens the names may bring the STT prompt to, or 0 for no
+                limit; stt_prompt is never shortened.
             stt_extra_body (dict[str, object] | None): Optional JSON body fields merged into STT requests.
             stt_realtime_models (list[str] | set[str] | None): STT models that use OpenAI Realtime transcription.
             stt_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime

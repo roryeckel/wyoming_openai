@@ -182,13 +182,14 @@ async def main():
     parser.add_argument("--stt-prompt", default=os.getenv("STT_PROMPT", None), help="Optional prompt for STT requests")
     parser.add_argument(
         "--stt-prompt-max-tokens",
-        type=parse_positive_int,
+        type=parse_non_negative_int,
         default=env_default("STT_PROMPT_MAX_TOKENS") or DEFAULT_STT_PROMPT_MAX_TOKENS,
         help=(
             "Estimated tokens the names sent with transcribe and read from Home Assistant may bring the STT prompt "
             "to; names that do not fit are left out, while --stt-prompt is always kept whole. The estimate errs high, "
-            "counting the UTF-8 bytes of characters outside ASCII and a token per 2 ASCII letters, so the prompt "
-            f"stays within Whisper's 223 tokens (default: {DEFAULT_STT_PROMPT_MAX_TOKENS})"
+            "counting the UTF-8 bytes of characters outside ASCII and a token per 2 ASCII letters, so the default "
+            "stays within Whisper's 223 tokens; models with a longer context, such as Qwen3-ASR, can take more "
+            f"(default: {DEFAULT_STT_PROMPT_MAX_TOKENS}; 0 sends every name)"
         ),
     )
     parser.add_argument(
