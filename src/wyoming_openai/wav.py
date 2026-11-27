@@ -41,8 +41,8 @@ _WAVE_FORMAT_NAMES = {
 # is instead of playing as noise. Raw PCM has one of these only by a chance too small to matter. MP3 without an ID3
 # tag and ADTS AAC have no signature and are recognized by their first frame header instead
 _FOREIGN_AUDIO_SIGNATURES = (
-    (0, b"RF64", "RF64 WAV"),
-    (0, b"BW64", "BW64 WAV"),
+    (0, b"RF64", "RF64 (64-bit WAV)"),
+    (0, b"BW64", "BW64 (64-bit WAV)"),
     (0, b"RIFX", "big-endian RIFX WAV"),
     (0, b"FORM", "AIFF"),
     (0, b"caff", "CAF"),
@@ -116,7 +116,7 @@ def _reject_foreign_audio(start: bytes) -> None:
     names = [name for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES if start.startswith(signature, offset)]
     name = names[0] if names else _frame_header_audio(start)
     if name:
-        raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only WAV and raw PCM)")
+        raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only RIFF WAV and raw PCM)")
 
 
 def _describe_format(tag: int) -> str:
@@ -306,7 +306,10 @@ class WavFramer:
             if not self._pending.startswith(b"RIFF"):
                 if len(self._pending) < _SIGNATURE_BYTES:
                     return b""
-                _reject_foreign_audio(self._pending)
+                try:
+                    _reject_foreign_audio(self._pending)
+                except WavFormatError as e:
+                    raise WavFormatError(f"{e}{self._error_note(pcm_may_help=True)}") from e
                 # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
                 # Callers report `header_missing`, once for all the responses of a synthesis
                 return self._release_pending()
@@ -316,7 +319,7 @@ class WavFramer:
         try:
             header = self._header.feed(chunk)
         except WavFormatError as e:
-            if note := self._error_note(unsupported_format=isinstance(e, UnsupportedWavFormatError)):
+            if note := self._error_note(pcm_may_help=isinstance(e, UnsupportedWavFormatError)):
                 raise type(e)(f"{e}{note}") from e
             raise
         if header is None:
@@ -379,13 +382,16 @@ class WavFramer:
             self._partial = b""
         return audio
 
-    def _error_note(self, *, unsupported_format: bool = False) -> str:
-        """What to add to an error about a RIFF response, given what was requested."""
+    def _error_note(self, *, pcm_may_help: bool = False) -> str:
+        """
+        What to add to an error about a response, given what was requested; the error already says what it is.
+
+        `pcm_may_help` is for audio a backend may be able to send as raw PCM instead, such as a WAV codec or MP3.
+        """
         if not self._expects_wav:
             # The backend ignores response_format, so asking for raw PCM is not a way around the error
-            wave = self._header is not None and self._header.riff_size is not None
-            return f"; the backend returned {'WAV' if wave else 'a RIFF file'} although raw PCM was requested"
-        return _UNSUPPORTED_FORMAT_HINT if unsupported_format else ""
+            return "; raw PCM was requested, so the backend ignores response_format"
+        return _UNSUPPORTED_FORMAT_HINT if pcm_may_help else ""
 
     def _release_pending(self) -> bytes:
         """Give up on a WAV header and release the bytes held for it as raw PCM."""

@@ -128,6 +128,8 @@ def test_framer_finish_hands_back_a_response_too_short_to_be_a_wav_file():
 WAV_FORMAT = TtsAudioFormat(headerless=False, rate=24000)
 SPEECH_PCM_FORMAT = TtsAudioFormat(headerless=True, rate=24000, may_be_wav=True)
 REALTIME_FORMAT = TtsAudioFormat(headerless=True, rate=24000)
+# Ends an error about a response to a request for raw PCM, which asking for raw PCM again cannot get around
+PCM_IGNORED = "raw PCM was requested, so the backend ignores response_format"
 
 
 @pytest.mark.parametrize("chunk_size", [1, 5, 4096])
@@ -168,8 +170,8 @@ FOREIGN_AUDIO = [
     (b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64" * 8, "MP3"),
     (b"fLaC\x00\x00\x00\x22" + bytes(34), "FLAC"),
     (b"OggS\x00\x02" + bytes(22), r"Ogg \(Opus or Vorbis\)"),
-    (b"RF64\xff\xff\xff\xffWAVEds64" + bytes(28), "RF64 WAV"),
-    (b"BW64\xff\xff\xff\xffWAVEds64" + bytes(28), "BW64 WAV"),
+    (b"RF64\xff\xff\xff\xffWAVEds64" + bytes(28), r"RF64 \(64-bit WAV\)"),
+    (b"BW64\xff\xff\xff\xffWAVEds64" + bytes(28), r"BW64 \(64-bit WAV\)"),
     (b"RIFX" + _wav()[4:], "big-endian RIFX WAV"),
     (b"FORM\x00\x00\x00\x2eAIFFCOMM" + bytes(26), "AIFF"),
     (b"caff\x00\x01\x00\x00desc" + bytes(40), "CAF"),
@@ -204,11 +206,16 @@ FOREIGN_AUDIO = [
 )
 @pytest.mark.parametrize("audio_format", [WAV_FORMAT, SPEECH_PCM_FORMAT], ids=["wav-requested", "pcm-requested"])
 def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, audio_format):
+    """And says what to do about it: try raw PCM, or, when raw PCM was requested, that the backend ignored that."""
     framer = WavFramer(audio_format)
 
     assert framer.feed(audio[:2]) == b""
-    with pytest.raises(WavFormatError, match=f"^TTS response is {name} audio, which the proxy does not play"):
+    with pytest.raises(WavFormatError, match=f"^TTS response is {name} audio, which the proxy does not play") as error:
         framer.feed(audio[2:])
+    if audio_format.headerless:
+        assert str(error.value).endswith(f"; {PCM_IGNORED}")
+    else:
+        assert str(error.value).endswith('add "response_format": "pcm" to TTS_EXTRA_BODY or --tts-extra-body')
 
 
 @pytest.mark.parametrize(
@@ -397,13 +404,13 @@ def test_unsupported_format_error_offers_no_workaround_when_raw_pcm_was_already_
     with pytest.raises(WavFormatError, match=r"format 0x0007 \(mu-law\) is not supported") as error:
         framer.feed(wav_file(fmt_chunk_body(7, bits=8)))
     assert "TTS_EXTRA_BODY" not in str(error.value)
-    assert str(error.value).endswith("; the backend returned WAV although raw PCM was requested")
+    assert str(error.value).endswith(f"; {PCM_IGNORED}")
 
 
-def test_other_riff_error_says_what_was_returned_although_raw_pcm_was_requested():
+def test_other_riff_error_says_raw_pcm_was_requested():
     framer = WavFramer(SPEECH_PCM_FORMAT)
 
-    with pytest.raises(WavFormatError, match="not WAVE audio; the backend returned a RIFF file although raw PCM"):
+    with pytest.raises(WavFormatError, match=f"not WAVE audio; {PCM_IGNORED}$"):
         framer.feed(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
 
 
@@ -411,7 +418,7 @@ def test_truncated_wav_error_says_raw_pcm_was_requested():
     framer = WavFramer(SPEECH_PCM_FORMAT)
 
     assert framer.feed(_wav()[:30]) == b""
-    with pytest.raises(WavFormatError, match="malformed; the backend returned WAV although raw PCM was requested$"):
+    with pytest.raises(WavFormatError, match=f"malformed; {PCM_IGNORED}$"):
         framer.finish()
 
 
