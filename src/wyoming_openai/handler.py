@@ -5,6 +5,7 @@ import functools
 import logging
 import unicodedata
 import wave
+import weakref
 from collections.abc import AsyncGenerator, Coroutine
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -125,15 +126,6 @@ def _final_transcript(final_text: str | None, snapshot: str) -> str:
     a streamed transcription with text="" and the deltas alone, so the snapshots already sent stand.
     """
     return final_text or snapshot
-
-
-def _cancel_once(task: asyncio.Task[Any]) -> None:
-    """
-    Cancel a task unless it is done or already handling a cancellation, which a second one would cut short, as when
-    the drains of stop() and disconnect() overlap.
-    """
-    if not task.done() and not task.cancelling():
-        task.cancel()
 
 
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
@@ -338,6 +330,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._allow_streaming_task_id: str | None = None  # ID of task allowed to stream directly
         self._synthesis_tasks: set[asyncio.Task[Any]] = set()  # Sentence and unsplit synthesis tasks still running
         self._background_tasks: set[asyncio.Task[Any]] = set()  # Cleanup that must not delay audio
+        # Cleanup a drain has cancelled, kept here because a task can clear its own cancellation count
+        self._cancelled_cleanup: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
 
     async def handle_event(self, event: Event) -> bool:
         """
@@ -1596,6 +1590,16 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Run cleanup that should not delay the audio stream; awaited when the client disconnects."""
         self._track_task(coro, name=name, tasks=self._background_tasks, log_failure=True)
 
+    def _cancel_cleanup_once(self, task: asyncio.Task[Any]) -> None:
+        """
+        Cancel a cleanup task unless it is done or was cancelled already: a second cancellation would cut its own
+        cleanup short, as when the drains of stop() and disconnect() overlap.
+        """
+        if task.done() or task in self._cancelled_cleanup or task.cancelling():
+            return
+        self._cancelled_cleanup.add(task)
+        task.cancel()
+
     async def _drain_background_tasks(self, timeout: float | None = None) -> None:
         """
         Wait for pending background cleanup. What a timeout leaves unfinished is cancelled and given as long again to
@@ -1608,7 +1612,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         try:
             _, pending = await asyncio.wait(tasks, timeout=timeout)
             for task in pending:
-                _cancel_once(task)
+                self._cancel_cleanup_once(task)
             if pending:
                 _, pending = await asyncio.wait(pending, timeout=timeout)
                 if pending:
@@ -1618,7 +1622,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     )
         except asyncio.CancelledError:
             for task in tasks:
-                _cancel_once(task)
+                self._cancel_cleanup_once(task)
             raise
 
     async def _close_writer(self) -> None:

@@ -6788,10 +6788,12 @@ async def test_disconnect_cancelled_twice_leaves_no_websocket_close_behind(enhan
 
 
 @pytest.mark.asyncio
-async def test_overlapping_drains_cancel_a_cleanup_task_once(enhanced_handler):
+@pytest.mark.parametrize("uncancel", [False, True])
+async def test_overlapping_drains_cancel_a_cleanup_task_once(enhanced_handler, uncancel):
     """
     A drain interrupted while a close it shares with an earlier, timed-out drain still unwinds from that drain's
-    cancellation does not cancel it again, which would cut its own cleanup short.
+    cancellation does not cancel it again, which would cut its own cleanup short, also if the close cleared its
+    cancellation count.
     """
     handler = enhanced_handler
     unwinding = asyncio.Event()
@@ -6803,6 +6805,10 @@ async def test_overlapping_drains_cancel_a_cleanup_task_once(enhanced_handler):
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             unwinding.set()
+            if uncancel:
+                task = asyncio.current_task()
+                assert task is not None
+                task.uncancel()
             try:
                 await may_finish.wait()
                 outcome["finished"] = True
