@@ -624,9 +624,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         if audio_stream is None:
             return None
         _LOGGER.warning("Dropping an audio stream without transcribing it: %s", reason)
-        if audio_stream.transcript_started:
+        if audio_stream.transcript_started and not self._shutdown_reported:
             # Closed without a Transcript: a client reads the first one it gets as the result of the request it is
-            # waiting for, which is no longer this stream
+            # waiting for, which is no longer this stream. After a shutdown error nothing more of it is sent
             await self.write_event(TranscriptStop().event())
         return audio_stream
 
@@ -666,6 +666,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
 
             await connection.session.update(session=self._get_realtime_transcription_session(audio_stream))
+            if self._shutdown_reported:
+                # stop() told the client while the session was opening, so its transcript is not started
+                raise SttShutdownError("Not starting the Realtime transcript: the server is shutting down")
             self._is_recording = True
             await self.write_event(TranscriptStart().event())
             audio_stream.transcript_started = True
@@ -1203,10 +1206,14 @@ class OpenAIEventHandler(AsyncEventHandler):
                     _LOGGER.info("Successfully transcribed: %s", truncate_for_log(transcription.text))
                 else:
                     _LOGGER.warning("Received empty transcription result")
-                # Claimed before transcript-start, which then stands for the transcript that follows it
-                if self._shutdown_answered_stt():
+                # Nothing of the transcript follows a shutdown error. It is claimed only once transcript-start is
+                # written, right before the transcript: until then stop() may still answer in its place
+                if self._shutdown_reported:
+                    _LOGGER.info("Dropping the transcript: the client was already told the server is shutting down")
                     return False
                 await self.write_event(TranscriptStart().event())
+                if self._shutdown_answered_stt():
+                    return False
                 await self.write_event(Transcript(text=transcription.text).event())
 
             else:

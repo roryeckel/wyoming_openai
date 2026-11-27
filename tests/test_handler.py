@@ -5700,6 +5700,105 @@ async def test_stop_decides_after_stopping_tts_so_a_transcript_queued_meanwhile_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_stop_during_the_http_transcript_start_sends_one_terminal_error(
+    enhanced_handler, mock_clients, streamed
+):
+    """
+    stop() running while transcript-start drains answers with its error, and nothing else of the transcript
+    follows: neither the transcript of a non-streamed response nor the next chunk of a streamed one.
+    """
+    from openai.types.audio.transcription import Transcription
+
+    stt_client, _ = mock_clients
+    handler = enhanced_handler
+    next_delta = asyncio.Event()
+
+    class _SlowStream(_FakeTranscriptionStream):
+        async def __aiter__(self):
+            await next_delta.wait()
+            yield Mock(type="transcript.text.delta", delta="Hi")
+            yield Mock(type="transcript.text.done", text="Hi")
+
+    stt_client.audio.transcriptions.create = AsyncMock(
+        return_value=_SlowStream() if streamed else Transcription(text="Hi")
+    )
+    start_queued = asyncio.Event()
+    client_reads = asyncio.Event()
+    io_log = _record_client_io(handler)
+
+    async def write_event(event):
+        io_log.append(event.type)
+        if event.type == "transcript-start":
+            start_queued.set()
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    with patch("wyoming_openai.handler.AsyncStream", _SlowStream):
+        audio_stop = asyncio.create_task(_stream_audio(handler))
+        await asyncio.wait_for(start_queued.wait(), timeout=1)
+        stopping = asyncio.create_task(handler.stop())
+        await _settle()
+        client_reads.set()
+        next_delta.set()
+        await asyncio.wait_for(asyncio.gather(audio_stop, stopping), timeout=3)
+
+    assert [entry for entry in io_log if entry != "close"] == ["transcript-start", "error"]
+    assert io_log.index("error") < io_log.index("close")
+
+
+@pytest.mark.asyncio
+async def test_realtime_session_opened_after_the_shutdown_error_starts_no_transcript(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A session whose settings are still being sent when stop() reports does not write transcript-start after it."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    connection = _FakeRealtimeConnection([])
+    settings_sent = asyncio.Event()
+    update_entered = asyncio.Event()
+
+    async def update(**kwargs):
+        update_entered.set()
+        await settings_sent.wait()
+
+    connection.session.update = AsyncMock(side_effect=update)
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    handler = enhanced_handler
+    written = []
+    handler.write_event = AsyncMock(side_effect=lambda event: written.append(event.type))
+
+    audio_start = asyncio.create_task(
+        handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    )
+    await asyncio.wait_for(update_entered.wait(), timeout=1)
+    stopping = asyncio.create_task(handler.stop())
+    await _settle()
+    settings_sent.set()
+    await asyncio.wait_for(asyncio.gather(audio_start, stopping), timeout=3)
+
+    assert written == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_refused_transcribe_after_the_shutdown_error_sends_no_transcript_stop(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A started Realtime stream abandoned after stop() reported does not close its transcript after that error."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    handler = enhanced_handler
+    written = []
+    handler.write_event = AsyncMock(side_effect=lambda event: written.append(event.type))
+
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    await handler.stop()
+    assert await handler.handle_event(Event(type="transcribe", data={"name": "no-such-model"})) is False
+
+    assert written == ["transcript-start", "error"]
+
+
+@pytest.mark.asyncio
 async def test_repeated_stop_sends_one_shutdown_error_while_recording(enhanced_handler):
     """A second stop() while the first one's error is still being written does not send another."""
     handler = enhanced_handler
