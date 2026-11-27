@@ -7203,6 +7203,66 @@ async def test_realtime_timeout_of_another_limit_after_audio_stop_is_not_reporte
 
 
 @pytest.mark.asyncio
+async def test_realtime_timeout_raised_while_the_transcript_deadline_cancels_is_reported_as_it_is(
+    enhanced_handler, mock_info, mock_clients, monkeypatch, caplog
+):
+    """
+    A TimeoutError that a stalled commit raises when the transcript deadline cancels it is the commit's own, and is
+    reported as it is, not as a missing transcript.
+    """
+    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_TRANSCRIPT_TIMEOUT", 0.05)
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    connection = _FakeRealtimeConnection([])
+
+    async def commit():
+        try:
+            await asyncio.Event().wait()  # Stalls until the deadline cancels it
+        except asyncio.CancelledError:
+            raise TimeoutError("transport failed during cancellation") from None
+
+    connection.input_audio_buffer.commit = commit
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    handler = enhanced_handler
+    written = []
+
+    async def write_event(event):
+        written.append(Error.from_event(event).text if event.type == "error" else event.type)
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    assert await asyncio.wait_for(handler.handle_event(Event(type="audio-stop")), timeout=2) is False
+
+    assert written.count(STT_FAILED_ERROR) == 1
+    assert "Error during realtime transcription: transport failed during cancellation" in caplog.text
+    assert "No Realtime transcript received" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timeout_a_write_raises_while_the_client_write_limit_cancels_it_is_passed_on_as_it_is(
+    enhanced_handler, monkeypatch
+):
+    """
+    A TimeoutError that a write raises when the client write limit cancels it is the write's own, and is passed on as
+    it is rather than as the client being too slow.
+    """
+    monkeypatch.setattr("wyoming_openai.handler.CLIENT_WRITE_TIMEOUT", 0.05)
+
+    async def write_event(event):
+        try:
+            await asyncio.Event().wait()  # Stalls until the limit cancels it
+        except asyncio.CancelledError:
+            raise TimeoutError("transport failed during cancellation") from None
+
+    enhanced_handler.write_event = AsyncMock(side_effect=write_event)
+
+    with pytest.raises(TimeoutError, match="transport failed during cancellation"):
+        await asyncio.wait_for(enhanced_handler._write_event_or_fail(Event(type="transcript-start")), timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_realtime_session_without_audio_fails_and_frees_its_slot(
     enhanced_handler, mock_info, mock_clients, monkeypatch
 ):

@@ -216,7 +216,7 @@ How long a request holds its slot:
 
 - **`/v1/audio/transcriptions`:** from the end of the audio until the response, streamed or not, has been read. The final transcript events are written after the slot is free.
 - **`STT_REALTIME_MODELS`:** from `audio-start` until the session ends. Audio that arrives while a session waits for a slot waits in the connection.
-- **TTS:** a streaming synthesis sends one request per text chunk, usually a sentence (`TTS_STREAMING_MIN_WORDS` can merge sentences and `TTS_STREAMING_MAX_CHARS` split them). Each holds a slot while its response is read, and so does a request that is not split. A synthesis requests every chunk of the text it has so far at once, so connections speaking at the same time share the slots, and the second one can wait behind the first one's chunks. With `0`, every chunk received so far is requested at once.
+- **TTS:** a streaming synthesis sends one request per text chunk: a sentence, or several sentences when `TTS_STREAMING_MIN_WORDS` or `TTS_STREAMING_MAX_CHARS` group them. Each holds a slot while its response is read, and so does a request that is not split. A synthesis requests every chunk of the text it has so far at once, so connections speaking at the same time share the slots, and the second one can wait behind the first one's chunks. With `0`, every chunk received so far is requested at once.
 
 For Realtime models, STT and TTS, the limit counts requests rather than websockets: the websocket of a finished request may still be closing when the next one opens.
 

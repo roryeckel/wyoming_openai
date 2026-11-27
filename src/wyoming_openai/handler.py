@@ -881,22 +881,28 @@ class OpenAIEventHandler(AsyncEventHandler):
                 raise RealtimeTranscriptionError("Realtime transcription session was not initialized")
 
             # The commit is a websocket send that can stall too, so it shares the time limit
-            deadline = asyncio.timeout(REALTIME_STT_TRANSCRIPT_TIMEOUT)
+            raised_inside: TimeoutError | None = None
             try:
-                async with deadline:
-                    await self._append_realtime_audio(audio_stream.realtime_converter.flush(), connection)
-                    if transcript_future.done():
-                        # stop() closed the session during the flush: await its failure instead of committing
-                        transcript = await transcript_future
-                    else:
-                        self._check_stt_not_stopping()
-                        await connection.input_audio_buffer.commit()
-                        transcript = await transcript_future
+                async with asyncio.timeout(REALTIME_STT_TRANSCRIPT_TIMEOUT):
+                    try:
+                        await self._append_realtime_audio(audio_stream.realtime_converter.flush(), connection)
+                        if transcript_future.done():
+                            # stop() closed the session during the flush: await its failure instead of committing
+                            transcript = await transcript_future
+                        else:
+                            self._check_stt_not_stopping()
+                            await connection.input_audio_buffer.commit()
+                            transcript = await transcript_future
+                    except TimeoutError as err:
+                        # Another time limit's, such as a transport timeout the receiver failed with, even one raised
+                        # while the deadline cancels the wait: reported as it is
+                        raised_inside = err
+                        raise
             except TimeoutError as err:
-                if not deadline.expired():
-                    # Another time limit's, such as a transport timeout the receiver failed with: reported as it is
+                if err is raised_inside:
                     raise
-                # A server that stalls with the socket open would otherwise hold the Wyoming client forever
+                # The deadline's own: a server that stalls with the socket open would otherwise hold the Wyoming
+                # client forever
                 raise RealtimeTranscriptionError(
                     f"No Realtime transcript received within {REALTIME_STT_TRANSCRIPT_TIMEOUT:g} seconds "
                     "of the end of the audio"
@@ -1773,15 +1779,20 @@ class OpenAIEventHandler(AsyncEventHandler):
         CLIENT_WRITE_TIMEOUT fails the request with SlowClientError, so a client that stopped reading cannot keep the
         slot from other connections. For an abort or a shutdown, _write_event_bounded gives up quietly instead.
         """
-        timeout = asyncio.timeout(CLIENT_WRITE_TIMEOUT)
+        raised_by_write: TimeoutError | None = None
         try:
-            async with timeout:
-                await self.write_event(event)
-        except TimeoutError:
-            if not timeout.expired():
+            async with asyncio.timeout(CLIENT_WRITE_TIMEOUT):
+                try:
+                    await self.write_event(event)
+                except TimeoutError as err:
+                    # The write's own, even one raised while this limit cancels it: passed on as it is
+                    raised_by_write = err
+                    raise
+        except TimeoutError as err:
+            if err is raised_by_write:
                 raise
-            # Named, so the log of the failed request gives the cause; the cancellation the timeout used is not part
-            # of it
+            # The limit's own. Named, so the log of the failed request gives the cause; the cancellation the limit
+            # used is not part of it
             raise SlowClientError(
                 f"Client did not take its {event.type} event within {CLIENT_WRITE_TIMEOUT:g} seconds"
             ) from None
