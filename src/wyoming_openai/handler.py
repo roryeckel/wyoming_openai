@@ -404,8 +404,10 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await self._stopped.wait()
             except asyncio.CancelledError:
                 # Cancelled meanwhile, as at Ctrl+C: the connection is still stop()'s to answer and close, so the
-                # writer stays open for it, but the recording is not left open
+                # writer stays open for it, but neither the recording nor a Realtime session is left open, as they
+                # would be if stop() was cancelled too
                 self._discard_recording()
+                await self._cleanup_realtime_transcription()
                 raise
         try:
             task = asyncio.current_task()
@@ -1172,22 +1174,31 @@ class OpenAIEventHandler(AsyncEventHandler):
                 if isinstance(transcription, AsyncStream):
                     _LOGGER.debug("Handling streaming transcription response")
                     full_text = ""
+                    completed = False
                     # Closed however it ends, as when stop() cancels the request, so the response does not stay open
                     # after its slot is released
                     async with transcription:
-                        # Reading the response is backend work too, so none of it starts once stop() has begun
+                        # Reading the response is backend work too, so no read starts once stop() has begun: each
+                        # is preceded by a check, from the first one after transcript-start on
                         self._check_stt_not_stopping()
                         await self.write_event(TranscriptStart().event())
+                        self._check_stt_not_stopping()
                         async for chunk in transcription:
-                            self._check_stt_not_stopping()
-                            if chunk.type == "transcript.text.delta":
-                                if chunk.delta:
-                                    full_text += chunk.delta
-                                    _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
-                                    # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
-                                    await self.write_event(TranscriptChunk(text=full_text).event())
-                            elif chunk.type == "transcript.text.done":
+                            if chunk.type == "transcript.text.done":
                                 full_text = _final_transcript(chunk.text, full_text)
+                                # The complete transcription, so nothing more is read
+                                completed = True
+                                break
+                            if chunk.type == "transcript.text.delta" and chunk.delta:
+                                full_text += chunk.delta
+                                _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
+                                # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
+                                await self.write_event(TranscriptChunk(text=full_text).event())
+                            self._check_stt_not_stopping()
+                    if not completed:
+                        # Ended without the completed transcription, as a backend cut off by the shutdown may: outside
+                        # one, the deltas so far are the transcript, but during one stop() answers
+                        self._check_stt_not_stopping()
                     text = full_text
                     if text:
                         _LOGGER.info("Successfully transcribed stream: %s", truncate_for_log(text))

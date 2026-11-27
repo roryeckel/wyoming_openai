@@ -6645,6 +6645,145 @@ async def test_a_cancelled_error_after_the_transcript_adds_no_second_answer(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_stop_and_disconnect_leave_no_realtime_session_behind(
+    enhanced_handler, mock_info, mock_clients
+):
+    """
+    An audio-stop whose request never started, with stop() cancelled before it cleaned up and disconnect() cancelled
+    while it waited for stop(): the open Realtime session is still closed, and its slot freed.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([]))
+    stt_client.realtime.connect = Mock(return_value=manager)
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    client_closed = asyncio.Event()
+
+    async def wait_closed():
+        await client_closed.wait()
+
+    # stop() then waits in its cleanup for the client connection to close, so disconnect() waits for it meanwhile
+    handler.writer.wait_closed = AsyncMock(side_effect=wait_closed)
+
+    await handler.handle_event(REALTIME_AUDIO_START)
+    assert limit.full
+    # Scheduled together: the audio-stop's request is cancelled before its first step
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    stopping = asyncio.create_task(handler.stop())
+    await asyncio.sleep(0)
+    # Cancelled while it waits for that request, so before it closes the Realtime session
+    stopping.cancel()
+    assert await asyncio.wait_for(audio_stop, timeout=1) is False
+    await _settle()
+    assert not stopping.done()
+
+    disconnecting = asyncio.create_task(handler.disconnect())
+    await _settle()
+    disconnecting.cancel()
+    await asyncio.gather(disconnecting, return_exceptions=True)
+
+    assert not limit.full
+    assert handler._realtime_receive_task is None
+    client_closed.set()
+    await asyncio.gather(stopping, return_exceptions=True)
+    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
+    assert manager.exited
+
+
+@pytest.mark.asyncio
+async def test_no_read_of_a_streamed_response_starts_after_a_transcript_start_that_outlived_the_shutdown(
+    enhanced_handler, mock_clients
+):
+    """A transcript-start write that catches the shutdown's cancellation and returns is followed by no read."""
+    stt_client, _ = mock_clients
+    start_written = asyncio.Event()
+
+    class _WatchedStream(_FakeTranscriptionStream):
+        read = False
+
+        async def __aiter__(self):
+            self.read = True
+            yield Mock(type="transcript.text.delta", delta="Hi")
+            yield Mock(type="transcript.text.done", text="Hi")
+
+    stream = _WatchedStream()
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=stream)
+    handler = enhanced_handler
+    written = []
+
+    async def write_event(event):
+        written.append(event.type)
+        if event.type == "transcript-start":
+            start_written.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    with patch("wyoming_openai.handler.AsyncStream", _WatchedStream):
+        request = asyncio.create_task(_stream_audio(handler))
+        await asyncio.wait_for(start_written.wait(), timeout=1)
+        await asyncio.wait_for(handler.stop(), timeout=3)
+        await asyncio.wait_for(request, timeout=1)
+
+    assert not stream.read
+    assert stream.closed
+    assert written == ["transcript-start", "error"]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_cut_off_by_the_shutdown_is_not_taken_for_the_transcript(enhanced_handler, mock_clients):
+    """
+    A streamed response that ends without its completed transcription because the shutdown cut it off is answered
+    by stop(), not with the deltas so far as the transcript.
+    """
+    stt_client, _ = mock_clients
+    delta_read = asyncio.Event()
+
+    class _CutOffStream(_FakeTranscriptionStream):
+        async def __aiter__(self):
+            yield Mock(type="transcript.text.delta", delta="Hel")
+            delta_read.set()
+            # Cut off by the shutdown's cancellation, which it takes as the end of the stream
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=_CutOffStream())
+    handler = enhanced_handler
+    written = []
+    handler.write_event = AsyncMock(side_effect=lambda event: written.append(event.type))
+
+    with patch("wyoming_openai.handler.AsyncStream", _CutOffStream):
+        request = asyncio.create_task(_stream_audio(handler))
+        await asyncio.wait_for(delta_read.wait(), timeout=1)
+        await asyncio.wait_for(handler.stop(), timeout=3)
+        await asyncio.wait_for(request, timeout=1)
+
+    assert written == ["transcript-start", "transcript-chunk", "error"]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_ends_without_completion_outside_a_shutdown_keeps_its_deltas(
+    enhanced_handler, mock_clients
+):
+    """Outside a shutdown, the deltas of a stream that ends without its completed transcription are the transcript."""
+    stt_client, _ = mock_clients
+
+    class _DeltasOnlyStream(_FakeTranscriptionStream):
+        async def __aiter__(self):
+            yield Mock(type="transcript.text.delta", delta="Hel")
+            yield Mock(type="transcript.text.delta", delta="lo")
+
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=_DeltasOnlyStream())
+    handler = enhanced_handler
+
+    with patch("wyoming_openai.handler.AsyncStream", _DeltasOnlyStream):
+        await _stream_audio(handler)
+
+    assert _written_transcripts(handler) == ["Hello"]
+
+
+@pytest.mark.asyncio
 async def test_stt_limit_is_shared_by_http_and_realtime_requests(mock_info, mock_clients):
     """A Realtime session on one connection holds the only slot; an HTTP request on another waits for it to end."""
     from openai.types.audio.transcription import Transcription
