@@ -127,6 +127,15 @@ def _final_transcript(final_text: str | None, snapshot: str) -> str:
     return final_text or snapshot
 
 
+def _cancel_requested() -> bool:
+    """
+    Whether the running task was asked to cancel, as opposed to a CancelledError that reached it from elsewhere, such
+    as a backend client that raises one of its own.
+    """
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Bytes read from the TTS response at a time; WavFramer buffers a header across reads
@@ -694,7 +703,10 @@ class OpenAIEventHandler(AsyncEventHandler):
                 audio_channels,
                 audio_width,
             )
-        except Exception as err:
+        except (Exception, asyncio.CancelledError) as err:
+            if isinstance(err, asyncio.CancelledError) and _cancel_requested():
+                raise
+            # A CancelledError the backend raised of its own fails the session, as other errors do.
             # A server error may arrive before session.update fails on the closed socket. Preserve that cause
             # before cleanup discards the future; exception() still includes the startup exception's traceback.
             failure = self._get_realtime_transcription_failure()
@@ -805,7 +817,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self._write_transcript(transcript)
             transcript_sent = True
             await self.write_event(TranscriptStop().event())
-        except Exception as err:
+        except (Exception, asyncio.CancelledError) as err:
+            if isinstance(err, asyncio.CancelledError) and _cancel_requested():
+                raise
+            # A CancelledError the backend raised of its own fails the request, as other errors do
             _LOGGER.exception("Error during realtime transcription: %s", err)
             if not transcript_sent:
                 # The receiver is stopped first, so no late delta follows the error
@@ -876,6 +891,10 @@ class OpenAIEventHandler(AsyncEventHandler):
         full_text = ""
         try:
             async for event in connection:
+                if _cancel_requested():
+                    # A cleanup is stopping this receiver, but the connection delivered one more event: nothing more
+                    # of the session is written, as a shutdown error may already have ended it
+                    return
                 event_type = getattr(event, "type", "")
                 if event_type == "conversation.item.input_audio_transcription.delta":
                     delta = getattr(event, "delta", "")
@@ -937,25 +956,38 @@ class OpenAIEventHandler(AsyncEventHandler):
     async def _run_stt_request[T](self, request: Coroutine[Any, Any, T]) -> T | None:
         """
         Run the backend part of an STT request, from waiting for a slot to writing its answer, as a task stop() can
-        cancel. Returns its result, or None when stop() cancelled it or had been called before it started; stop()
-        answers the client then.
+        cancel. Returns its result, or None when stop() cancelled it or had been called before it started. stop() then
+        answers the client and closes the connection, which this waits for: the run loop must not close it first, as
+        it would at once for a client that has stopped sending.
         """
         if self._stopping:
             request.close()
+            await self._stopped.wait()
             return None
+        handler_task = asyncio.current_task()
+        cancels_before = handler_task.cancelling() if handler_task is not None else 0
+
+        def handler_cancelled() -> bool:
+            return handler_task is not None and handler_task.cancelling() > cancels_before
+
         task = asyncio.create_task(request, name="stt_request")
         self._stt_request = task
         try:
-            return await task
+            result = await task
         except asyncio.CancelledError:
-            current_task = asyncio.current_task()
-            if current_task is not None and current_task.cancelling():
-                # The handler itself is cancelled, not only its request
+            if handler_cancelled() or not self._stopping:
+                # The handler itself is cancelled, not only its request; only stop() cancels the request alone
                 raise
+            await self._stopped.wait()
             return None
         finally:
             if self._stt_request is task:
                 self._stt_request = None
+        if handler_cancelled():
+            # The handler was cancelled while the request ran, and the request ended without that cancellation, as
+            # with a backend client that catches it: the handler still ends
+            raise asyncio.CancelledError
+        return result
 
     async def _cancel_stt_request(self) -> None:
         """
@@ -999,7 +1031,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 except asyncio.CancelledError:
                     # The receiver ends cancelled. A cancellation of the task cleaning up, as at Ctrl+C or when stop()
                     # cancels the request, goes on once the session is closed below
-                    if (current_task := asyncio.current_task()) is not None and current_task.cancelling():
+                    if _cancel_requested():
                         raise
         finally:
             if transcript_future is not None:
@@ -1040,9 +1072,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         else:
             request = self._handle_http_audio_stop(audio_stream)
         result = await self._run_stt_request(request)
-        # None when stop() cancelled the request. The connection stays open for stop(), which answers the client
-        # and then closes it
-        return True if result is None else result
+        # None when stop() cancelled the request, answered the client and closed the connection
+        return False if result is None else result
 
     async def _handle_http_audio_stop(self, audio_stream: _AudioStreamState) -> bool:
         """Send a /v1/audio/transcriptions recording and emit its transcription. Returns False to close on failure."""
@@ -1147,7 +1178,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             transcript_sent = True
             await self.write_event(TranscriptStop().event())
 
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
+            if isinstance(e, asyncio.CancelledError) and _cancel_requested():
+                raise
+            # A CancelledError the backend raised of its own fails the request, as other errors do
             _LOGGER.exception("Error during transcription: %s", e)
             # As on the Realtime path, the client is told instead of waiting for a transcript
             if not transcript_sent:
