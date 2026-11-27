@@ -7113,7 +7113,7 @@ async def test_mp3_response_fails_naming_it_instead_of_playing_static(
     with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
         assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
 
-    assert "TTS backend returned audio that cannot be played: TTS response is MP3 audio" in caplog.text
+    assert "TTS backend returned audio that cannot be played: TTS response is MP3" in caplog.text
     assert not [call for call in enhanced_handler.write_event.call_args_list if call.args[0].type == "audio-chunk"]
 
 

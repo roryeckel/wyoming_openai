@@ -50,10 +50,10 @@ _FOREIGN_AUDIO_SIGNATURES = (
     (0, b"OggS", "Ogg (Opus or Vorbis)"),
     (0, b"\x1a\x45\xdf\xa3", "WebM or Matroska"),
     (4, b"ftyp", "MP4 or M4A"),
-    # An ID3v2 tag, followed by its major version
-    (0, b"ID3\x02", "MP3"),
-    (0, b"ID3\x03", "MP3"),
-    (0, b"ID3\x04", "MP3"),
+    # An ID3v2 tag, followed by its major version. It usually starts MP3, but can also come before AAC or FLAC
+    (0, b"ID3\x02", "MP3 or other ID3-tagged"),
+    (0, b"ID3\x03", "MP3 or other ID3-tagged"),
+    (0, b"ID3\x04", "MP3 or other ID3-tagged"),
 )
 _SIGNATURE_BYTES = 8  # Enough of a response to tell a WAV file from raw PCM or another kind of audio
 
@@ -75,9 +75,20 @@ class WavFormatError(ValueError):
     a format it does not play, or audio of another kind, such as MP3 or FLAC.
     """
 
+    # Whether a backend sending this might send raw PCM if asked for it, which a malformed header does not show
+    pcm_may_help = False
+
 
 class UnsupportedWavFormatError(WavFormatError):
     """A well-formed WAV file whose audio is in a format the proxy does not play, such as a compressed codec."""
+
+    pcm_may_help = True
+
+
+class ForeignAudioError(WavFormatError):
+    """A response that is audio of another kind than WAV, such as MP3 or FLAC, recognized by its first bytes."""
+
+    pcm_may_help = True
 
 
 class WavHeader(NamedTuple):
@@ -116,7 +127,9 @@ def _reject_foreign_audio(start: bytes) -> None:
     names = [name for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES if start.startswith(signature, offset)]
     name = names[0] if names else _frame_header_audio(start)
     if name:
-        raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only RIFF WAV and raw PCM)")
+        raise ForeignAudioError(
+            f"TTS response is {name} audio, which the proxy does not play (only RIFF WAV and raw PCM)"
+        )
 
 
 def _describe_format(tag: int) -> str:
@@ -298,6 +311,28 @@ class WavFramer:
             WavFormatError: The response is a WAV file whose header cannot be read or whose audio cannot be played,
                 or audio of another kind the proxy recognizes, such as MP3 or FLAC.
         """
+        try:
+            return self._feed(chunk)
+        except WavFormatError as e:
+            self._add_note(e)
+            raise
+
+    def finish(self) -> bytes:
+        """
+        Return the bytes still held when the response ends too short to show it is a WAV file, to be played as raw
+        PCM. A frame the response ends in the middle of is dropped, since its samples are incomplete.
+
+        Raises:
+            WavFormatError: The response is a WAV file that ended before its header reached the audio: it was cut off,
+                or a chunk size in its header is wrong, so the chunks after it were misread.
+        """
+        try:
+            return self._finish()
+        except WavFormatError as e:
+            self._add_note(e)
+            raise
+
+    def _feed(self, chunk: bytes) -> bytes:
         if not self.awaiting_header:
             return self._convert(self._whole_frames(self._bound(chunk)))
 
@@ -306,22 +341,14 @@ class WavFramer:
             if not self._pending.startswith(b"RIFF"):
                 if len(self._pending) < _SIGNATURE_BYTES:
                     return b""
-                try:
-                    _reject_foreign_audio(self._pending)
-                except WavFormatError as e:
-                    raise WavFormatError(f"{e}{self._error_note(pcm_may_help=True)}") from e
+                _reject_foreign_audio(self._pending)
                 # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
                 # Callers report `header_missing`, once for all the responses of a synthesis
                 return self._release_pending()
             self._header = _WavHeaderReader()
             chunk, self._pending = self._pending, b""
 
-        try:
-            header = self._header.feed(chunk)
-        except WavFormatError as e:
-            if note := self._error_note(pcm_may_help=isinstance(e, UnsupportedWavFormatError)):
-                raise type(e)(f"{e}{note}") from e
-            raise
+        header = self._header.feed(chunk)
         if header is None:
             return b""
 
@@ -362,19 +389,11 @@ class WavFramer:
         )
         return self._convert(self._whole_frames(self._bound(available_audio)))
 
-    def finish(self) -> bytes:
-        """
-        Return the bytes still held when the response ends too short to show it is a WAV file, to be played as raw
-        PCM. A frame the response ends in the middle of is dropped, since its samples are incomplete.
-
-        Raises:
-            WavFormatError: The response is a WAV file that ended before its header reached the audio: it was cut off,
-                or a chunk size in its header is wrong, so the chunks after it were misread.
-        """
+    def _finish(self) -> bytes:
         if self._header is not None:
             raise WavFormatError(
                 f"TTS response ended after {self._header.received} bytes, before its WAV header reached the audio; "
-                f"the header is truncated or malformed{self._error_note()}"
+                "the header is truncated or malformed"
             )
         audio = self._release_pending()
         if self._partial:
@@ -382,16 +401,17 @@ class WavFramer:
             self._partial = b""
         return audio
 
-    def _error_note(self, *, pcm_may_help: bool = False) -> str:
-        """
-        What to add to an error about a response, given what was requested; the error already says what it is.
-
-        `pcm_may_help` is for audio a backend may be able to send as raw PCM instead, such as a WAV codec or MP3.
-        """
+    def _add_note(self, error: WavFormatError) -> None:
+        """End an error with what it means for the response_format requested; it already says what came back."""
         if not self._expects_wav:
             # The backend ignores response_format, so asking for raw PCM is not a way around the error
-            return "; raw PCM was requested, so the backend ignores response_format"
-        return _UNSUPPORTED_FORMAT_HINT if pcm_may_help else ""
+            note = "; raw PCM was requested, so the backend ignores response_format"
+        elif error.pcm_may_help:
+            note = _UNSUPPORTED_FORMAT_HINT
+        else:
+            return
+        # Extended in place rather than rebuilt, so the error keeps its type and traceback whatever its class takes
+        error.args = (f"{error}{note}",)
 
     def _release_pending(self) -> bytes:
         """Give up on a WAV header and release the bytes held for it as raw PCM."""

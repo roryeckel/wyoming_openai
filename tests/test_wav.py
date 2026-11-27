@@ -167,7 +167,7 @@ def test_framer_never_reads_realtime_audio_as_a_wav_file():
 
 
 FOREIGN_AUDIO = [
-    (b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64" * 8, "MP3"),
+    (b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64" * 8, "MP3 or other ID3-tagged"),
     (b"fLaC\x00\x00\x00\x22" + bytes(34), "FLAC"),
     (b"OggS\x00\x02" + bytes(22), r"Ogg \(Opus or Vorbis\)"),
     (b"RF64\xff\xff\xff\xffWAVEds64" + bytes(28), r"RF64 \(64-bit WAV\)"),
@@ -182,6 +182,8 @@ FOREIGN_AUDIO = [
     (b"\xff\xfb\x90\x64" * 8, "MP3"),
     # As macOS afconvert writes it
     (bytes.fromhex("fff9586001600000") + bytes(32), r"AAC \(ADTS\)"),
+    # A tag says nothing about the audio after it, here AAC
+    (b"ID3\x04\x00\x00\x00\x00\x00\x00" + bytes.fromhex("fff9586001600000"), "MP3 or other ID3-tagged"),
 ]
 
 
@@ -202,6 +204,7 @@ FOREIGN_AUDIO = [
         "mpeg2-mp3-without-id3",
         "mpeg1-mp3-without-id3",
         "adts-aac",
+        "id3-tagged-aac",
     ],
 )
 @pytest.mark.parametrize("audio_format", [WAV_FORMAT, SPEECH_PCM_FORMAT], ids=["wav-requested", "pcm-requested"])
