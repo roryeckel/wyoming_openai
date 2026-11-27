@@ -101,6 +101,7 @@ creates the draft release. Publishing that draft fires PyPI and Docker
 - **`__main__.py`**: Entry point with argument parsing and server initialization
 - **`utilities.py`**: Helper functions for audio processing and data handling
 - **`wav.py`**: WAV header parsing and `WavFramer`, which turns TTS response bytes into PCM
+- **`concurrency.py`**: `ConcurrencyLimit`, the server-wide STT and TTS request limits
 - **`const.py`**: Version constants and configuration
 
 ### Key Architecture Patterns
@@ -109,6 +110,12 @@ creates the draft release. Publishing that draft fires PyPI and Docker
 2. **Backend Abstraction**: `CustomAsyncOpenAI` wraps different backends (OpenAI, Speaches, LocalAI, etc.) with a unified interface
 3. **Stream Processing**: Handles both streaming and non-streaming transcription modes
 4. **Audio Buffer Management**: Collects audio chunks into complete files for processing
+5. **Shared Limits and Shutdown**: `main()` creates one STT and one TTS `ConcurrencyLimit`, which the handler of every connection shares. Code that sends a request to a backend follows these rules:
+   - The backend part of a Realtime `audio-start` and of an `audio-stop` runs through `_run_stt_request()`, so `stop()` can cancel it, and calls `_check_stt_not_stopping()` before each backend operation after the first. Realtime audio chunks are appended from the event handler directly.
+   - It holds a slot with `async with limit.slot()`, or with `acquire()` when the slot outlives the event that took it, as a Realtime STT session's does.
+   - While it holds a slot, it writes its events with `_write_event_or_fail()`, so a client that stops reading fails the request with `SlowClientError` and frees the slot. Final events are written after the slot is released, and the events of an abort or a shutdown with `_write_event_bounded()`.
+   - An `audio-stop` is answered through `_write_transcript()` or `_report_stt_failure()`, which clear `_stt_answer_owed`, so `stop()` sends its shutdown error only to a request that is still owed an answer.
+   - A Realtime STT session's cleanup detaches it with `_detach_realtime_session()`, synchronously before its first await, then closes it with `_close_realtime_session()`.
 
 ### Wyoming Protocol Flow
 
@@ -142,5 +149,6 @@ Tests are organized by module:
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
 - `test_wav.py`: WAV header parsing and framing
+- `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios
