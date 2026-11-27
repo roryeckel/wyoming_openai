@@ -175,6 +175,9 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--stt-prompt`                          | `STT_PROMPT`                               | None                                          | Optional prompt for STT requests (Text to guide the model's style).   |
 | `--stt-extra-body`                      | `STT_EXTRA_BODY`                           | None                                          | JSON object merged into the `/v1/audio/transcriptions` request body via `extra_body` for backend-specific fields. `response_format` must remain `json`, and `stream` may override the model-derived default when set to `true` or `false`. Not applied to `STT_REALTIME_MODELS`. |
 | `--stt-realtime-extra-body`             | `STT_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the transcription settings (`session.audio.input.transcription`) of `STT_REALTIME_MODELS` sessions, for example `{"keywords": ["Wyoming"]}`. Unlike `TTS_REALTIME_EXTRA_BODY` it is not merged into the session itself, so session settings such as `noise_reduction` cannot be set. Sent for every Realtime model, so only set fields all of them accept. A `null` value drops a field the proxy would otherwise send, for example `{"prompt": null}`. `model` cannot be set; use `STT_REALTIME_MODELS`. |
+| `--stt-prompt-max-chars`                | `STT_PROMPT_MAX_CHARS`                     | 500                                           | Length in characters that the names sent with `transcribe` and read from Home Assistant may bring the STT prompt to. Names that do not fit are left out; `STT_PROMPT` is always kept whole. Whisper keeps at most 224 prompt tokens and drops the start of a longer prompt; 500 characters stays below that in English and most languages written in the Latin alphabet. Lower it for languages that take more tokens per character. |
+| `--stt-hass-token`                      | `STT_HASS_TOKEN`                           | None                                          | Long-lived access token of a Home Assistant administrator. When set, the names Home Assistant exposes to Assist are added to the STT prompt (see [Biasing Speech Recognition toward Names](#biasing-speech-recognition-toward-names)). |
+| `--stt-hass-url`                        | `STT_HASS_URL`                             | None (required with `STT_HASS_TOKEN`)         | Home Assistant URL, such as `http://homeassistant.local:8123`. The names are read over its websocket API (`/api/websocket`). |
 | `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
 | `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible text-to-speech API            |
 | `--tts-models`                          | `TTS_MODELS`                               | None (this, `TTS_STREAMING_MODELS` or `TTS_REALTIME_MODELS` is required for TTS) | Space-separated list of models to use for the TTS service. Example: `gpt-4o-mini-tts` |
@@ -483,6 +486,31 @@ When you make changes to your configuration such as updating models, voices, or 
 1. Go to **Settings** > **Devices & Services**
 2. Find and select your **Wyoming OpenAI** integration
 3. Click on **Reload**
+
+#### Biasing Speech Recognition toward Names
+
+A speech model has never heard of your thermostat: "What's the temperature of the Ecobee?" can come back as "What's the temperature of the incubi?". The proxy adds names to the STT `prompt` of both `/v1/audio/transcriptions` and `/v1/realtime` sessions, so the model has a reason to write them. They come after `STT_PROMPT`, in this order:
+
+1. The `transcript_names` a Wyoming client sends with `transcribe`, then its `transcript_terms`. Home Assistant does not send these yet.
+2. With `STT_HASS_TOKEN` set, the names Home Assistant exposes to Assist.
+
+To use the Home Assistant names:
+
+1. In Home Assistant, open your user profile, go to **Security**, and create a **long-lived access token**. The user must be an administrator, since Home Assistant only lists the exposed entities to administrators.
+2. Set `STT_HASS_TOKEN` and `STT_HASS_URL`, the URL of your Home Assistant, such as `http://homeassistant.local:8123`.
+
+Only entities exposed to Assist (**Settings** > **Voice assistants** > **Expose**) are used, with their aliases, plus the names and aliases of areas and floors, in this order:
+
+1. Areas and floors that hold an exposed entity
+2. Entities that spoken commands usually control (`light`, `switch`, `fan`, `media_player`, `climate`, `scene`, `todo`, `cover`, `lock`)
+3. Areas and floors with no exposed entity
+4. Every other exposed entity, mostly sensors
+
+Names are added until the prompt would grow past `STT_PROMPT_MAX_CHARS`, keeping each entity, area or floor whole with its aliases, and skipping a name already added. `STT_PROMPT` always comes first and is never shortened, giving a prompt like `Smart home commands. Living Room, Kitchen, Ecobee, Thermostat.`. Without any names, the prompt is `STT_PROMPT` as given. The prompt sent is logged at the `DEBUG` level.
+
+The proxy keeps one websocket connection open to Home Assistant, opened in the background at startup. It reads the names when it connects, and again a second after a registry change that can affect them: an entity, device, area or floor that is added, removed or renamed, an entity or device moved to another area, or an entity exposed to Assist or hidden from it. Other changes, such as a device's firmware version, do not cause a read. A rename of an entity that is not in the entity registry, such as one set up in YAML without a unique id, is picked up at the next registry change or reconnection. When the connection fails or closes, as when Home Assistant restarts, the names read before are used, or none if none were ever read, and transcription goes on; a warning is logged once per outage, and the proxy connects again every 30 seconds.
+
+How much a prompt helps depends on the model; a model that ignores the prompt is not affected. Names are not added when the prompt would not reach the model: `gpt-realtime-whisper` Realtime sessions on the `OPENAI` backend take no prompt, so prefer `gpt-live-transcribe` or a `/v1/audio/transcriptions` model; and a `prompt` set in `STT_EXTRA_BODY` or `STT_REALTIME_EXTRA_BODY` replaces the proxy's prompt for the models on that transport (`{"prompt": null}` in `STT_REALTIME_EXTRA_BODY` drops it).
 
 #### Failed Speech Synthesis in Home Assistant
 

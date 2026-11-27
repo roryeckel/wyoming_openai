@@ -100,6 +100,7 @@ creates the draft release. Publishing that draft fires PyPI and Docker
 - **`compatibility.py`**: Provides `CustomAsyncOpenAI` class with backend detection and OpenAI API compatibility layer
 - **`__main__.py`**: Entry point with argument parsing and server initialization
 - **`utilities.py`**: Helper functions for audio processing and data handling
+- **`home_assistant.py`**: `HomeAssistantNames` keeps the names Home Assistant exposes to Assist current over one websocket connection, shared by every Wyoming connection, re-reading them when a registry changes; `utilities.build_prompt` turns names into the STT prompt
 - **`wav.py`**: WAV header parsing and `WavFramer`, which turns TTS response bytes into PCM
 - **`const.py`**: Version constants and configuration
 
@@ -133,6 +134,7 @@ The server accepts both command-line arguments and environment variables. Key co
 - Voice configurations
 - Backend-specific settings (temperature, speed, etc.)
 - STT/TTS extra request body fields (`--stt-extra-body` / `--stt-realtime-extra-body` / `--tts-extra-body` / `--tts-realtime-extra-body`)
+- Names for the STT prompt: `transcript_names`/`transcript_terms` from `transcribe`, and Home Assistant names (`--stt-hass-*`), within `--stt-prompt-max-chars`
 - Realtime transports for OpenAI models (`--stt-realtime-models` / `--tts-realtime-models`)
 
 ## Testing Strategy
@@ -142,5 +144,6 @@ Tests are organized by module:
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
 - `test_wav.py`: WAV header parsing and framing
+- `test_home_assistant.py`: Home Assistant name reading (against a fake websocket server), ranking, and prompt building
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios

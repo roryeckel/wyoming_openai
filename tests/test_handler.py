@@ -197,6 +197,13 @@ def _selected_realtime_stream(handler):
     )
 
 
+async def _selected_realtime_session(handler):
+    """The Realtime session settings, with their prompt, that the handler's current selection would open."""
+    audio_stream = _selected_realtime_stream(handler)
+    prompt = handler._get_stt_prompt(audio_stream)
+    return handler._get_realtime_transcription_session(audio_stream, prompt)
+
+
 def _realtime_stream(rate=24000, width=2, channels=1):
     """A Realtime audio stream with its converter, as audio-start creates it."""
     audio_stream = _AudioStreamState(model=None, language=None, realtime=True, streaming=False)
@@ -2286,7 +2293,8 @@ class TestOpenAIEventHandlerComprehensive:
         session = enhanced_handler._get_realtime_transcription_session(
             _AudioStreamState(
                 model=enhanced_handler._current_asr_model, language="en", realtime=True, streaming=False
-            )
+            ),
+            enhanced_handler._stt_prompt,
         )
 
         assert session["audio"]["input"]["transcription"] == {
@@ -3664,27 +3672,6 @@ async def test_transcribe_vad_sensitivity_logged_and_ignored(enhanced_handler, c
 
 
 @pytest.mark.asyncio
-async def test_transcribe_transcript_names_logged_and_ignored(enhanced_handler, caplog):
-    caplog.set_level(logging.DEBUG, logger="wyoming_openai.handler")
-
-    result = await enhanced_handler.handle_event(
-        Event(
-            type="transcribe",
-            data={
-                "name": "whisper-1",
-                "language": "en",
-                "transcript_names": ["Alice"],
-                "transcript_terms": ["Kubernetes"],
-            },
-        )
-    )
-
-    assert result is True
-    assert "transcript_names" in caplog.text
-    assert "transcript_terms" in caplog.text
-
-
-@pytest.mark.asyncio
 async def test_synthesize_ssml_strips_tags_before_sending(enhanced_handler):
     enhanced_handler._stream_tts_audio = AsyncMock(return_value=123.0)
 
@@ -4311,7 +4298,7 @@ async def test_realtime_transcription_session_uses_plural_languages(enhanced_han
         Event(type="transcribe", data={"language": "en", "name": "gpt-live-transcribe"})
     )
 
-    session = enhanced_handler._get_realtime_transcription_session(_selected_realtime_stream(enhanced_handler))
+    session = await _selected_realtime_session(enhanced_handler)
 
     assert session["audio"]["input"]["transcription"] == {
         "model": "gpt-live-transcribe",
@@ -4723,7 +4710,7 @@ async def test_realtime_transcription_session_applies_stt_extra_body(enhanced_ha
         Event(type="transcribe", data={"language": "en", "name": "gpt-live-transcribe"})
     )
 
-    session = enhanced_handler._get_realtime_transcription_session(_selected_realtime_stream(enhanced_handler))
+    session = await _selected_realtime_session(enhanced_handler)
 
     assert session["audio"]["input"]["transcription"] == {
         "model": "gpt-live-transcribe",
@@ -5157,7 +5144,7 @@ async def test_realtime_transcription_extra_body_languages_replace_the_request_l
 
     assert await enhanced_handler.handle_event(Event(type="transcribe", data={"language": "en", "name": model_name}))
 
-    session = enhanced_handler._get_realtime_transcription_session(_selected_realtime_stream(enhanced_handler))
+    session = await _selected_realtime_session(enhanced_handler)
     transcription = session["audio"]["input"]["transcription"]
     assert transcription == {"model": model_name, **expected}
 
@@ -5183,7 +5170,7 @@ async def test_realtime_transcription_session_leaves_out_an_unsupported_prompt(
 
     assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": model_name}))
 
-    session = enhanced_handler._get_realtime_transcription_session(_selected_realtime_stream(enhanced_handler))
+    session = await _selected_realtime_session(enhanced_handler)
     transcription = session["audio"]["input"]["transcription"]
     assert ("prompt" in transcription) is expect_prompt
 
@@ -6927,7 +6914,7 @@ async def test_realtime_transcription_extra_body_null_drops_a_field(enhanced_han
         Event(type="transcribe", data={"name": "some-promptless-model", "language": "en"})
     )
 
-    session = enhanced_handler._get_realtime_transcription_session(_selected_realtime_stream(enhanced_handler))
+    session = await _selected_realtime_session(enhanced_handler)
     transcription = session["audio"]["input"]["transcription"]
     assert transcription == {"model": "some-promptless-model", "language": "en", "keywords": ["Wyoming"]}
 
@@ -7064,4 +7051,161 @@ async def test_realtime_transcription_times_out_when_the_commit_stalls(
         assert await enhanced_handler.handle_event(Event(type="audio-stop")) is False
 
     assert _event_types(enhanced_handler) == ["transcript-start", "error"]
+    await enhanced_handler._drain_background_tasks()
+
+
+class _StubHassNames:
+    """Stands in for HomeAssistantNames, with fixed name groups."""
+
+    def __init__(self, names):
+        self.names = names
+
+
+HASS_NAMES = (("Kitchen",), ("Ecobee", "Thermostat"))
+
+
+@pytest.mark.asyncio
+async def test_http_transcription_adds_home_assistant_names_after_stt_prompt(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test /v1/audio/transcriptions gets STT_PROMPT and then the names."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    names = _StubHassNames(HASS_NAMES)
+    enhanced_handler._hass_names = names
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1")
+
+    assert call_args["prompt"] == "Test prompt. Kitchen, Ecobee, Thermostat."
+
+
+@pytest.mark.asyncio
+async def test_http_transcription_without_names_sends_stt_prompt_as_given(enhanced_handler, mock_info, mock_clients):
+    """Test STT_PROMPT is sent unchanged when Home Assistant has no names, and no prompt when neither is set."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._hass_names = _StubHassNames(())
+
+    assert (await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1"))["prompt"] == "Test prompt"
+
+    enhanced_handler._stt_prompt = None
+    assert (await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1"))["prompt"] is omit
+
+
+@pytest.mark.asyncio
+async def test_transcribe_names_and_terms_come_before_home_assistant_names(enhanced_handler, mock_info, mock_clients):
+    """Test transcript_names, then transcript_terms, are added ahead of the Home Assistant names, without repeats."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
+
+    transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee", "Rory"], "transcript_terms": ["HVAC", 3]}
+    assert await enhanced_handler.handle_event(Event(type="transcribe", data=transcribe))
+    await _stream_audio(enhanced_handler)
+
+    prompt = stt_client.audio.transcriptions.create.call_args.kwargs["prompt"]
+    assert prompt == "Test prompt. Ecobee, Rory, HVAC, Kitchen, Thermostat."
+
+
+@pytest.mark.asyncio
+async def test_transcribe_names_are_used_without_home_assistant(enhanced_handler, mock_info, mock_clients):
+    """Test the names a client sends are added to the prompt without a Home Assistant token, within the budget."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._stt_prompt_max_chars = len("Test prompt. Ecobee.")
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
+
+    transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee", "Rory"]}
+    assert await enhanced_handler.handle_event(Event(type="transcribe", data=transcribe))
+    await _stream_audio(enhanced_handler)
+    assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt. Ecobee."
+
+    # A transcribe without names drops those of the one before
+    assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "whisper-1"}))
+    await _stream_audio(enhanced_handler)
+    assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt"
+
+
+@pytest.mark.asyncio
+async def test_home_assistant_names_are_not_added_when_the_extra_body_sets_the_prompt(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test a prompt in the extra body replaces the proxy's prompt, which stays STT_PROMPT without the names."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._stt_extra_body = {"prompt": "Own prompt"}
+    names = _StubHassNames(HASS_NAMES)
+    enhanced_handler._hass_names = names
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1")
+
+    assert call_args["prompt"] == "Test prompt"
+    assert call_args["extra_body"]["prompt"] == "Own prompt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "extra_body", "expected_prompt"),
+    [
+        ("gpt-live-transcribe", None, "Test prompt. Kitchen, Ecobee, Thermostat."),
+        # OpenAI's Realtime sessions for this model take no prompt
+        ("gpt-realtime-whisper", None, None),
+        # A null in the extra body still drops the prompt
+        ("gpt-live-transcribe", {"prompt": None}, None),
+    ],
+)
+async def test_realtime_session_adds_home_assistant_names(
+    enhanced_handler, mock_info, mock_clients, model_name, extra_body, expected_prompt
+):
+    """Test a Realtime session gets the names in its prompt, unless the prompt would not reach the model."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name=model_name)
+    stt_client.backend = OpenAIBackend.OPENAI
+    enhanced_handler._stt_realtime_extra_body = extra_body
+    names = _StubHassNames(HASS_NAMES)
+    enhanced_handler._hass_names = names
+    connection = _FakeRealtimeConnection([])
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+    assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": model_name}))
+    await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+
+    transcription = connection.session.update.call_args.kwargs["session"]["audio"]["input"]["transcription"]
+    assert transcription.get("prompt") == expected_prompt
+    await enhanced_handler._drop_audio_stream()
+    await enhanced_handler._drain_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_select_program_without_the_model_drops_the_transcribe_names(multi_program_handler):
+    """Test the names of a transcribe go with its model and language when a program without that model is chosen."""
+    transcribe = {"name": "gpt-4o-transcribe", "transcript_names": ["Ecobee"]}
+    assert await multi_program_handler.handle_event(Event(type="transcribe", data=transcribe))
+    assert multi_program_handler._current_bias_names == (("Ecobee",),)
+
+    assert await multi_program_handler.handle_event(Event(type="select-program", data={"name": "openai"}))
+
+    assert multi_program_handler._current_bias_names == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stt_prompt", "hass", "logged"), [("Test prompt", True, 1), (None, False, 0)])
+async def test_a_left_out_prompt_is_logged_once_when_there_is_one(
+    enhanced_handler, mock_info, mock_clients, caplog, stt_prompt, hass, logged
+):
+    """Test the prompt a promptless Realtime model does not take is reported once per stream, and only if set."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.backend = OpenAIBackend.OPENAI
+    enhanced_handler._stt_prompt = stt_prompt
+    if hass:
+        enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+    connection = _FakeRealtimeConnection([])
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+    assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "gpt-realtime-whisper"}))
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.handler"):
+        await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+
+    assert caplog.text.count("Leaving out the STT prompt") == logged
+    await enhanced_handler._drop_audio_stream()
     await enhanced_handler._drain_background_tasks()
