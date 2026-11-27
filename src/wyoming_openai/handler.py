@@ -417,7 +417,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             # Decided after that await, during which an audio-stop may have queued its own response. Claimed, so an
             # audio-stop still running drops its transcript rather than sending it after this error
             recording = self._audio_stream is not None and not self._audio_stream.failed
-            if recording or self._claim_stt_response():
+            # Sent once, also when stop() is called again while the first error is still being written
+            if not self._shutdown_reported and (recording or self._claim_stt_response()):
                 self._shutdown_reported = True
                 await self._write_event_bounded(Error(text=SHUTDOWN_ERROR).event())
             # The server stops handlers while an audio-stop may still be sending their recording, so that is left
@@ -868,6 +869,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                     if delta:
                         full_text += delta
                         _LOGGER.debug("Realtime transcription chunk: %s", delta)
+                        if self._shutdown_reported:
+                            # The shutdown error ended the request; stop() closes the session
+                            continue
                         # Always the transcript so far: wyoming 1.11 requires whole transcripts from a streaming ASR
                         # service, so there is deliberately no mode that sends the pre-1.11 fragments
                         await self.write_event(TranscriptChunk(text=full_text).event())
@@ -1158,12 +1162,22 @@ class OpenAIEventHandler(AsyncEventHandler):
                 # Closed however it ends, as when the client goes away mid-stream, so the response does not stay
                 # open after its slot is released
                 async with transcription:
+                    # The shutdown error ended the request, so nothing of its transcript follows that error
+                    if self._shutdown_reported:
+                        _LOGGER.info("Dropping the transcript: the client was already told the server is shutting down")
+                        return False
                     await self.write_event(TranscriptStart().event())
                     async for chunk in transcription:
                         if chunk.type == "transcript.text.delta":
                             if chunk.delta:
                                 full_text += chunk.delta
                                 _LOGGER.debug("Transcribed chunk: %s", chunk.delta)
+                                if self._shutdown_reported:
+                                    _LOGGER.info(
+                                        "Dropping the rest of the transcript: the client was told the server is "
+                                        "shutting down"
+                                    )
+                                    return False
                                 # A snapshot, as on the Realtime path, with no pre-1.11 fragment mode
                                 await self.write_event(TranscriptChunk(text=full_text).event())
                         elif chunk.type == "transcript.text.done":
@@ -1184,14 +1198,15 @@ class OpenAIEventHandler(AsyncEventHandler):
             elif isinstance(transcription, TranscriptionCreateResponse):
                 # Handle non-streaming response, which is read whole by create()
                 self._release_stt_slot("http")
-                await self.write_event(TranscriptStart().event())
                 _LOGGER.debug("Handling non-streaming transcription response")
                 if transcription.text:
                     _LOGGER.info("Successfully transcribed: %s", truncate_for_log(transcription.text))
                 else:
                     _LOGGER.warning("Received empty transcription result")
+                # Claimed before transcript-start, which then stands for the transcript that follows it
                 if self._shutdown_answered_stt():
                     return False
+                await self.write_event(TranscriptStart().event())
                 await self.write_event(Transcript(text=transcription.text).event())
 
             else:

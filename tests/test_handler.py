@@ -5567,10 +5567,18 @@ async def test_stop_adds_no_second_response_while_the_final_write_drains(
     assert written.count("transcript") == (1 if terminal == "transcript" else 0)
 
 
-def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients):
+class _HiStream(_FakeTranscriptionStream):
+    """A streamed /v1/audio/transcriptions response: one delta, then the final text."""
+
+    async def __aiter__(self):
+        yield Mock(type="transcript.text.delta", delta="Hi")
+        yield Mock(type="transcript.text.done", text="Hi")
+
+
+def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients, streamed=False):
     """
     Hold the backend's answer to an audio-stop: returns (entered, respond), set once the request reached the
-    backend, and to let a successful "Hi" through.
+    backend, and to let a successful "Hi" through. A streamed answer, or any Realtime one, brings a delta first.
     """
     from openai.types.audio.transcription import Transcription
 
@@ -5584,6 +5592,9 @@ def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_client
             entered.set()
             await respond.wait()
             await connection.events.put(
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hi")
+            )
+            await connection.events.put(
                 _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
             )
 
@@ -5594,21 +5605,23 @@ def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_client
         async def create(**kwargs):
             entered.set()
             await respond.wait()
-            return Transcription(text="Hi")
+            return _HiStream() if streamed else Transcription(text="Hi")
 
         stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
     return entered, respond
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("realtime", [False, True])
+@pytest.mark.parametrize(("realtime", "streamed"), [(False, False), (False, True), (True, False)])
 async def test_stop_that_answers_first_drops_the_late_transcript(
-    enhanced_handler, mock_info, mock_clients, realtime
+    enhanced_handler, mock_info, mock_clients, realtime, streamed
 ):
-    """A shutdown error queued while the backend works is the only response: its late transcript is dropped."""
+    """A shutdown error queued while the backend works ends the request: nothing of the late transcript follows."""
     stt_client, _ = mock_clients
     handler = enhanced_handler
-    entered, respond = _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients)
+    entered, respond = _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients, streamed)
+    stream_patch = patch("wyoming_openai.handler.AsyncStream", _HiStream)
+    stream_patch.start()
     error_queued = asyncio.Event()
     client_reads = asyncio.Event()
     written = []
@@ -5625,17 +5638,20 @@ async def test_stop_that_answers_first_drops_the_late_transcript(
     await handler.handle_event(Event(type="audio-start", data=audio_format))
     await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
 
-    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    stopping = asyncio.create_task(handler.stop())
-    await asyncio.wait_for(error_queued.wait(), timeout=1)
-    respond.set()
-    assert await asyncio.wait_for(audio_stop, timeout=1) is False
-    client_reads.set()
-    await asyncio.wait_for(stopping, timeout=3)
+    try:
+        audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        stopping = asyncio.create_task(handler.stop())
+        await asyncio.wait_for(error_queued.wait(), timeout=1)
+        respond.set()
+        assert await asyncio.wait_for(audio_stop, timeout=1) is False
+        client_reads.set()
+        await asyncio.wait_for(stopping, timeout=3)
+    finally:
+        stream_patch.stop()
 
-    assert written.count("error") == 1
-    assert "transcript" not in written
+    # Nothing follows the error: no transcript, and no transcript-start or chunk of one
+    assert written[written.index("error"):] == ["error"]
 
 
 @pytest.mark.asyncio
@@ -5681,6 +5697,33 @@ async def test_stop_decides_after_stopping_tts_so_a_transcript_queued_meanwhile_
 
     assert written.count("transcript") == 1
     assert "error" not in written
+
+
+@pytest.mark.asyncio
+async def test_repeated_stop_sends_one_shutdown_error_while_recording(enhanced_handler):
+    """A second stop() while the first one's error is still being written does not send another."""
+    handler = enhanced_handler
+    error_queued = asyncio.Event()
+    client_reads = asyncio.Event()
+    written = []
+
+    async def write_event(event):
+        written.append(event.type)
+        if event.type == "error":
+            error_queued.set()
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    await handler.handle_event(Event(type="audio-start", data={"rate": 16000, "width": 2, "channels": 1}))
+
+    first = asyncio.create_task(handler.stop())
+    await asyncio.wait_for(error_queued.wait(), timeout=1)
+    second = asyncio.create_task(handler.stop())
+    await _settle()
+    client_reads.set()
+    await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), timeout=3)
+
+    assert written.count("error") == 1
 
 
 @pytest.mark.asyncio
