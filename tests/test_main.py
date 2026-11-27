@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -1066,6 +1067,74 @@ async def test_main_rejects_invalid_tts_concurrent_requests_env(monkeypatch, cap
 
     assert exc_info.value.code == 2
     assert "--tts-concurrent-requests: expected a whole number of at least 1" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_value", [None, "", "0"])
+async def test_main_leaves_stt_requests_unlimited_by_default(monkeypatch, env_value):
+    if env_value is None:
+        monkeypatch.delenv("STT_CONCURRENT_REQUESTS", raising=False)
+    else:
+        monkeypatch.setenv("STT_CONCURRENT_REQUESTS", env_value)
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    assert handler_kwargs["stt_semaphore"] is None
+
+
+@pytest.mark.asyncio
+async def test_main_reads_stt_concurrent_requests_from_env(monkeypatch):
+    monkeypatch.setenv("STT_CONCURRENT_REQUESTS", "2")
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
+
+    semaphore = handler_kwargs["stt_semaphore"]
+    assert isinstance(semaphore, asyncio.Semaphore)
+    assert semaphore._value == 2
+
+
+@pytest.mark.asyncio
+async def test_main_cli_stt_concurrent_requests_overrides_env(monkeypatch):
+    monkeypatch.setenv("STT_CONCURRENT_REQUESTS", "2")
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--stt-concurrent-requests", "1")
+
+    assert handler_kwargs["stt_semaphore"]._value == 1
+
+
+@pytest.mark.asyncio
+async def test_main_cli_stt_concurrent_requests_zero_overrides_env_limit(monkeypatch):
+    monkeypatch.setenv("STT_CONCURRENT_REQUESTS", "2")
+
+    handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--stt-concurrent-requests", "0")
+
+    assert handler_kwargs["stt_semaphore"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["-1", "two", "1.5"])
+async def test_main_rejects_invalid_stt_concurrent_requests_cli(monkeypatch, capsys, value):
+    monkeypatch.delenv("STT_CONCURRENT_REQUESTS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-concurrent-requests", value])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "--stt-concurrent-requests: expected a whole number of at least 0" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["-1", "two"])
+async def test_main_rejects_invalid_stt_concurrent_requests_env(monkeypatch, capsys, value):
+    monkeypatch.setenv("STT_CONCURRENT_REQUESTS", value)
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 2
+    assert "--stt-concurrent-requests: expected a whole number of at least 0" in capsys.readouterr().err
 
 
 # Logging configuration

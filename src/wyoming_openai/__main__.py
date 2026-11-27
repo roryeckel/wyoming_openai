@@ -201,6 +201,15 @@ async def main():
         help="Space-separated list of STT model names that use Realtime transcription (e.g. gpt-live-transcribe)",
     )
     parser.add_argument(
+        "--stt-concurrent-requests",
+        type=parse_non_negative_int,
+        default=env_default("STT_CONCURRENT_REQUESTS") or 0,
+        help=(
+            "Maximum number of STT requests in flight at once across all connections; further requests wait for a "
+            "free slot. A Realtime session holds its slot from audio-start until it closes (default: 0, no limit)"
+        ),
+    )
+    parser.add_argument(
         "--stt-realtime-extra-body",
         type=stt_realtime_extra_body_parser,
         default=env_default("STT_REALTIME_EXTRA_BODY"),
@@ -538,6 +547,14 @@ async def main():
         else:
             _logger.warning("No TTS models specified")
 
+        # One limit for the whole server, so it is shared by the handler of every connection
+        stt_semaphore = asyncio.Semaphore(args.stt_concurrent_requests) if args.stt_concurrent_requests else None
+        if stt_semaphore is not None:
+            if asr_programs:
+                _logger.info("Limiting STT to %d concurrent requests", args.stt_concurrent_requests)
+            else:
+                _logger.warning("STT concurrent requests is set but unused: STT is not configured")
+
         # Create Wyoming server
         server = AsyncServer.from_uri(args.uri)
 
@@ -562,6 +579,7 @@ async def main():
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
                 tts_concurrent_requests=args.tts_concurrent_requests,
+                stt_semaphore=stt_semaphore,
             )
         )
 

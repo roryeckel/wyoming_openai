@@ -7,7 +7,7 @@ import unicodedata
 import wave
 from collections.abc import AsyncGenerator, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from openai import AsyncStream, omit
 from openai.types.audio.transcription_create_response import TranscriptionCreateResponse
@@ -137,6 +137,9 @@ TTS_FAILED_ERROR = "Text-to-speech synthesis failed"
 STT_FAILED_ERROR = "Speech-to-text transcription failed"
 SHUTDOWN_ERROR = "Server is shutting down"
 
+# The STT transport an STT_CONCURRENT_REQUESTS slot is held for
+_SttSlot = Literal["http", "realtime"]
+
 @dataclass(frozen=True)
 class TtsStreamResult:
     """Container for TTS streaming outcomes."""
@@ -225,6 +228,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         tts_streaming_min_words: int | None = None,
         tts_streaming_max_chars: int | None = None,
         tts_concurrent_requests: int = TTS_CONCURRENT_REQUESTS,
+        stt_semaphore: asyncio.Semaphore | None = None,
         **kwargs,
     ) -> None:
         """
@@ -249,6 +253,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_streaming_min_words (int | None): Minimum words per chunk for streaming TTS.
             tts_streaming_max_chars (int | None): Maximum characters per chunk for streaming TTS.
             tts_concurrent_requests (int): Maximum simultaneous TTS requests per connection.
+            stt_semaphore (asyncio.Semaphore | None): Shared by every connection of the server to limit the STT
+                requests in flight across all of them, or None for no limit. A /v1/audio/transcriptions request
+                holds a slot from audio-stop until its transcript; a Realtime session from audio-start until it closes.
             Note: The caller owns the STT/TTS clients and is responsible for closing them.
             **kwargs: Arbitrary keyword arguments for the superclass.
         """
@@ -266,6 +273,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_extra_body = dict(stt_extra_body) if stt_extra_body else None
         self._stt_realtime_extra_body = dict(stt_realtime_extra_body) if stt_realtime_extra_body else None
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
+        self._stt_semaphore = stt_semaphore
+        self._stt_slot: _SttSlot | None = None  # The transport holding one of the stt_semaphore slots, if any
         if self._has_asr_models():
             validate_stt_extra_body(self._stt_extra_body)
             validate_realtime_stt_extra_body(self._stt_realtime_extra_body)
@@ -634,6 +643,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self._fail_realtime_audio_stream(audio_stream)
             return
 
+        # Held while the session is open, as the backend serves it all that time; _cleanup_realtime_transcription
+        # releases it. The audio that arrives meanwhile waits in the connection until the session opens
+        await self._acquire_stt_slot("realtime")
         try:
             self._realtime_connection_manager = self._connect_realtime_transcription()
             connection = await self._enter_realtime_connection(self._realtime_connection_manager)
@@ -886,8 +898,28 @@ class OpenAIEventHandler(AsyncEventHandler):
             return None
         return transcript_future.exception()
 
+    async def _acquire_stt_slot(self, transport: _SttSlot) -> None:
+        """Wait for one of the STT request slots the server's connections share, unless there is no limit."""
+        semaphore = self._stt_semaphore
+        if semaphore is None or self._stt_slot is not None:
+            return
+        if semaphore.locked():
+            _LOGGER.info("Waiting for a free STT request slot: STT_CONCURRENT_REQUESTS requests are in flight")
+        await semaphore.acquire()
+        self._stt_slot = transport
+
+    def _release_stt_slot(self, transport: _SttSlot) -> None:
+        """Release the STT request slot this connection holds for a transport, if any; safe to call more than once."""
+        if self._stt_slot == transport and self._stt_semaphore is not None:
+            self._stt_slot = None
+            self._stt_semaphore.release()
+
     async def _cleanup_realtime_transcription(self) -> None:
-        """Close the realtime connection and background receive task."""
+        """Close the realtime connection and background receive task, and release the STT slot it held."""
+        # The slot is released first, so a cancelled cleanup cannot keep it; the closing handshake of the websocket
+        # runs in the background and does not count against the limit. A /v1/audio/transcriptions request keeps
+        # its own slot, as stop() cleans up Realtime state while an audio-stop may still be sending a recording
+        self._release_stt_slot("realtime")
         receive_task = self._realtime_receive_task
         self._realtime_receive_task = None
         if receive_task and not receive_task.done():
@@ -980,6 +1012,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             if extra_body:
                 transcription_kwargs["extra_body"] = extra_body
 
+            # Held until the response, streamed or not, has been read; released in the finally below
+            await self._acquire_stt_slot("http")
             transcription = await self._stt_client.audio.transcriptions.create(**transcription_kwargs)
 
             await self.write_event(TranscriptStart().event())
@@ -1028,6 +1062,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await self._report_stt_failure()
                 return False
         finally:
+            self._release_stt_slot("http")
             self._discard_recording()
         return True
 
