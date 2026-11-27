@@ -5375,11 +5375,11 @@ async def test_stt_semaphore_realtime_slot_is_held_until_the_websocket_has_close
 async def test_stt_semaphore_realtime_slot_is_released_when_its_close_is_cancelled(
     enhanced_handler, mock_info, mock_clients
 ):
-    """A closing handshake that a shutdown cuts short still gives the slot back."""
+    """A closing handshake that a shutdown cuts short has its socket aborted, and gives the slot back."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    stt_client.realtime.connect = Mock(
-        side_effect=lambda **kwargs: _GatedCloseManager(_FakeRealtimeConnection([]), asyncio.Event())
-    )
+    connection = _FakeRealtimeConnection([])
+    connection._connection = Mock(transport=Mock())
+    stt_client.realtime.connect = Mock(return_value=_GatedCloseManager(connection, asyncio.Event()))
     semaphore = asyncio.Semaphore(1)
     handler = _stt_limited_handler(mock_info, stt_client, semaphore)
     handler._stt_realtime_models = enhanced_handler._stt_realtime_models
@@ -5388,10 +5388,108 @@ async def test_stt_semaphore_realtime_slot_is_released_when_its_close_is_cancell
     await handler._cleanup_realtime_transcription()
     await _settle()
     assert semaphore.locked()
+    connection._connection.transport.abort.assert_not_called()
 
     await handler._drain_background_tasks(timeout=0)
 
+    connection._connection.transport.abort.assert_called_once()
     assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+async def test_realtime_close_cancelled_before_it_starts_aborts_the_socket_and_frees_its_slot(mock_info, mock_clients):
+    """A close task cancelled before its first step still tears the socket down and releases the slot."""
+    stt_client, _ = mock_clients
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    connection = _FakeRealtimeConnection([])
+    connection._connection = Mock(transport=Mock())
+    manager = _FakeRealtimeConnectionManager(connection)
+    await handler._acquire_stt_slot("realtime")
+    handler._realtime_connection_manager = manager
+    handler._realtime_connection = connection
+
+    # Without a receive task to wait for, cleanup returns before the close task has run at all
+    await handler._cleanup_realtime_transcription()
+    (close_task,) = handler._background_tasks
+    close_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await close_task
+
+    assert manager.exited is False
+    connection._connection.transport.abort.assert_called_once()
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_realtime_cleanups_keep_the_slot_with_the_socket(
+    enhanced_handler, mock_info, mock_clients
+):
+    """stop() cleaning up while a failing audio-stop does cannot release the slot before the socket has closed."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    gate = asyncio.Event()
+    manager = _GatedCloseManager(_FakeRealtimeConnection([]), gate)
+    stt_client.realtime.connect = Mock(return_value=manager)
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+
+    # A receive task that takes a while to stop, so the first cleanup is still waiting for it when the second runs
+    receiver_stops = asyncio.Event()
+    original_receive_task = handler._realtime_receive_task
+    assert original_receive_task is not None
+    original_receive_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await original_receive_task
+
+    async def slow_receiver():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await receiver_stops.wait()
+            raise
+
+    handler._realtime_receive_task = asyncio.create_task(slow_receiver())
+    await _settle()
+
+    first = asyncio.create_task(handler._cleanup_realtime_transcription())
+    await _settle()
+    await handler._cleanup_realtime_transcription()
+    receiver_stops.set()
+    await asyncio.wait_for(first, timeout=1)
+    await _settle()
+
+    assert semaphore.locked()
+    gate.set()
+    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
+    assert manager.exited
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+async def test_stt_semaphore_http_slot_is_released_before_the_error_is_written(mock_info, mock_clients):
+    """A failed request frees its slot even while a client is slow to take the error."""
+    stt_client, _ = mock_clients
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=RuntimeError("backend down"))
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if event.type == "error":
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    request = asyncio.create_task(_stream_audio(handler))
+    await _settle()
+    assert not request.done()
+    assert not semaphore.locked()
+
+    client_reads.set()
+    await asyncio.wait_for(request, timeout=1)
+    assert _written_event_types(handler) == ["error"]
 
 
 @pytest.mark.asyncio

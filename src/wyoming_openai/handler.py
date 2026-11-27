@@ -964,52 +964,20 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task, and release the STT slot it held."""
-        # Taken first, so a cancelled cleanup cannot keep it. A /v1/audio/transcriptions request keeps its own slot,
-        # as stop() cleans up Realtime state while an audio-stop may still be sending a recording
+        # Everything the session owns is detached before the first await, so a cleanup that overlaps this one, as
+        # stop() beside a failing audio-stop, finds nothing left rather than the socket without its slot. A
+        # /v1/audio/transcriptions request keeps its own slot, as stop() cleans up Realtime state while an audio-stop
+        # may still be sending a recording
         release_slot = self._take_stt_slot("realtime")
-        try:
-            await self._close_realtime_transcription(release_slot)
-            # Handed to the close of the websocket, which releases it
-            release_slot = None
-        finally:
-            if release_slot is not None:
-                release_slot()
+        receive_task, self._realtime_receive_task = self._realtime_receive_task, None
+        transcript_future, self._realtime_transcript_future = self._realtime_transcript_future, None
+        connection_manager, self._realtime_connection_manager = self._realtime_connection_manager, None
+        connection, self._realtime_connection = self._realtime_connection, None
 
-    async def _bounded_realtime_close(self, close: Coroutine[Any, Any, Any], connection: Any) -> None:
-        """
-        Close a Realtime transcription websocket within REALTIME_STT_CLOSE_TIMEOUT. The closing handshake waits for
-        the server to read, which websockets does not bound as a whole, so a server that stops reading would keep
-        the session's STT slot forever; past the timeout the socket's transport is aborted instead.
-        """
-        try:
-            async with asyncio.timeout(REALTIME_STT_CLOSE_TIMEOUT):
-                await close
-        except TimeoutError:
-            _LOGGER.warning(
-                "Realtime transcription websocket did not close within %g seconds; aborting it",
-                REALTIME_STT_CLOSE_TIMEOUT,
-            )
-            # The websocket of the SDK connection, when it exposes one; without it the socket is left to the SDK
-            websocket = getattr(connection, "_connection", None)
-            transport = getattr(websocket, "transport", None)
-            abort = getattr(transport, "abort", None)
-            if callable(abort):
-                abort()
-
-    async def _close_realtime_transcription(self, release_slot: Callable[[], None] | None) -> None:
-        """
-        Stop the receive task and close the Realtime session; once the websocket is closed, release_slot is called.
-        Without a session to close it is called right away.
-        """
-        receive_task = self._realtime_receive_task
-        self._realtime_receive_task = None
         if receive_task and not receive_task.done():
+            # Cancelled before the close starts, so it stops reading the socket first
             receive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await receive_task
 
-        transcript_future = self._realtime_transcript_future
-        self._realtime_transcript_future = None
         if transcript_future is not None:
             if not transcript_future.done():
                 # Failed rather than cancelled, so an audio-stop waiting on it, as when stop() interrupts one, ends
@@ -1019,28 +987,64 @@ class OpenAIEventHandler(AsyncEventHandler):
                 # Read, so the failure of a stream that is dropped is not logged later as never retrieved
                 transcript_future.exception()
 
-        connection_manager = self._realtime_connection_manager
-        connection = self._realtime_connection
-        self._realtime_connection_manager = None
-        self._realtime_connection = None
-
         # As with Realtime TTS, the closing handshake must not hold up the Wyoming client. Unlike there, the STT slot
         # is only released once the socket is closed, so the limit also counts sessions that are still closing
-        if connection_manager is not None:
-            close = connection_manager.__aexit__(None, None, None)
-        elif connection is not None:
-            close = connection.close()
-        else:
+        if connection_manager is not None or connection is not None:
+            close_task = self._run_in_background(
+                self._bounded_realtime_close(connection_manager, connection), name="openai_realtime_stt_close"
+            )
+            # A done callback rather than a finally, so the socket is torn down and the slot released even when the
+            # task is cancelled before it starts, as a drain that times out at shutdown may do
+            close_task.add_done_callback(
+                functools.partial(self._finish_realtime_close, connection=connection, release_slot=release_slot)
+            )
+        elif release_slot is not None:
+            release_slot()
+
+        if receive_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await receive_task
+
+    async def _bounded_realtime_close(self, connection_manager: Any, connection: Any) -> bool:
+        """
+        Close a Realtime transcription websocket within REALTIME_STT_CLOSE_TIMEOUT, and return whether it closed.
+        The closing handshake waits for the server to read, which websockets does not bound as a whole, so a server
+        that stops reading would otherwise keep the session's STT slot forever.
+        """
+        try:
+            async with asyncio.timeout(REALTIME_STT_CLOSE_TIMEOUT):
+                if connection_manager is not None:
+                    await connection_manager.__aexit__(None, None, None)
+                else:
+                    await connection.close()
+        except TimeoutError:
+            _LOGGER.warning(
+                "Realtime transcription websocket did not close within %g seconds; aborting it",
+                REALTIME_STT_CLOSE_TIMEOUT,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _finish_realtime_close(
+        close_task: asyncio.Task[bool], *, connection: Any, release_slot: Callable[[], None] | None
+    ) -> None:
+        """
+        Done callback of a Realtime close: a close that did not finish, timed out, failed or was cancelled, even
+        before it started, has the socket's transport aborted. Then the STT slot of the session is released.
+        """
+        try:
+            closed = not close_task.cancelled() and close_task.exception() is None and close_task.result()
+            if not closed:
+                # The websocket of the SDK connection, when it exposes one; without it the socket is left to the SDK
+                websocket = getattr(connection, "_connection", None)
+                transport = getattr(websocket, "transport", None)
+                abort = getattr(transport, "abort", None)
+                if callable(abort):
+                    abort()
+        finally:
             if release_slot is not None:
                 release_slot()
-            return
-        close_task = self._run_in_background(
-            self._bounded_realtime_close(close, connection), name="openai_realtime_stt_close"
-        )
-        if release_slot is not None:
-            # A done callback rather than a finally, so the slot is released even when the task is cancelled
-            # before it starts, as a drain that times out at shutdown may do
-            close_task.add_done_callback(lambda _: release_slot())
 
     async def _handle_audio_stop(self) -> bool:
         """Handle end of audio stream and perform transcription. Returns False to close a connection it failed on."""
@@ -1160,6 +1164,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.info("%s", e)
             else:
                 _LOGGER.exception("Error during transcription: %s", e)
+            # The request has ended, so a client slow to take the error does not hold up other requests
+            self._release_stt_slot("http")
             # As on the Realtime path, the client is told instead of waiting for a transcript
             if not transcript_sent:
                 await self._report_stt_failure()
