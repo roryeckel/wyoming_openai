@@ -7145,38 +7145,154 @@ async def test_realtime_session_without_audio_fails_and_frees_its_slot(
 
     await handler.handle_event(REALTIME_AUDIO_START)
     assert limit.full
-    await asyncio.sleep(0.2)
-    await _settle()
+    # Polled rather than slept for a fixed time, so a slow scheduler only delays the test
+    async with asyncio.timeout(5):
+        while STT_FAILED_ERROR not in written:
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
 
     assert written == ["transcript-start", STT_FAILED_ERROR]
     assert not limit.full
     assert handler._realtime_idle_timer is None
-    assert await handler.handle_event(Event(type="audio-stop")) is False
-    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
     assert manager.exited
+    assert await handler.handle_event(Event(type="audio-stop")) is False
 
 
 @pytest.mark.asyncio
-async def test_realtime_session_that_keeps_getting_audio_outlives_the_idle_limit(
-    enhanced_handler, mock_info, mock_clients, monkeypatch
-):
-    """Each audio chunk restarts the idle limit, so a session longer than it is transcribed normally."""
-    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_IDLE_TIMEOUT", 0.25)
+async def test_only_audio_restarts_the_realtime_idle_limit(enhanced_handler, mock_info, mock_clients):
+    """A chunk with audio moves the idle deadline on; an empty chunk does not, so it cannot keep the session."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     stt_client.realtime.connect = _completing_realtime_connect()
     handler = enhanced_handler
     audio_format = {"rate": 24000, "width": 2, "channels": 1}
 
     await handler.handle_event(Event(type="audio-start", data=audio_format))
-    for _ in range(8):
-        await asyncio.sleep(0.05)
-        await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
-    assert await handler.handle_event(Event(type="audio-stop"))
+    timer = handler._realtime_idle_timer
+    assert timer is not None
+    started_deadline = timer.when()
+    await asyncio.sleep(0.02)
 
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b""))
+    assert handler._realtime_idle_timer is timer
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+    rearmed = handler._realtime_idle_timer
+    assert rearmed is not None and rearmed is not timer
+    assert rearmed.when() > started_deadline
+
+    assert await handler.handle_event(Event(type="audio-stop"))
     assert _written_transcripts(handler) == ["Hi"]
-    assert "error" not in _written_event_types(handler)
     # Stopped with the session, so no timer outlives it
     assert handler._realtime_idle_timer is None
+
+
+@pytest.mark.asyncio
+async def test_audio_right_after_the_idle_limit_expired_keeps_the_session(enhanced_handler, mock_info, mock_clients):
+    """Audio that arrives between the expiry of the idle limit and the failure it schedules keeps the session."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    handler = enhanced_handler
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    audio_stream = handler._audio_stream
+    assert audio_stream is not None
+
+    handler._on_realtime_idle(audio_stream)
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+    await _settle()
+
+    assert not audio_stream.failed
+    assert await handler.handle_event(Event(type="audio-stop"))
+    assert _written_transcripts(handler) == ["Hi"]
+    assert "error" not in _written_event_types(handler)
+
+
+def _slow_to_stop_realtime_connection(receiver_cancelled, receiver_may_stop, *events):
+    """A Realtime connection whose receiver takes until `receiver_may_stop` to stop once cancelled."""
+
+    class _SlowToStopConnection(_FakeRealtimeConnection):
+        async def __aiter__(self):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                receiver_cancelled.set()
+                await receiver_may_stop.wait()
+                raise
+            yield
+
+    return _SlowToStopConnection(list(events))
+
+
+@pytest.mark.asyncio
+async def test_idle_failure_leaves_a_session_started_while_it_closes_alone(enhanced_handler, mock_info, mock_clients):
+    """
+    A new audio-start while the idle failure waits for the old session's receiver opens a healthy session: the idle
+    failure's error came before it, and nothing of the new session is changed afterwards.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    receiver_cancelled = asyncio.Event()
+    receiver_may_stop = asyncio.Event()
+    old_session = _FakeRealtimeConnectionManager(
+        _slow_to_stop_realtime_connection(receiver_cancelled, receiver_may_stop)
+    )
+    new_session = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([]))
+    stt_client.realtime.connect = Mock(side_effect=[old_session, new_session])
+    handler = enhanced_handler
+    written = []
+    handler.write_event = AsyncMock(
+        side_effect=lambda event: written.append(Error.from_event(event).text if event.type == "error" else event.type)
+    )
+    await handler.handle_event(REALTIME_AUDIO_START)
+    await _settle()  # The receiver waits for events
+    old_stream = handler._audio_stream
+    assert old_stream is not None
+
+    handler._on_realtime_idle(old_stream)
+    await asyncio.wait_for(receiver_cancelled.wait(), timeout=1)
+    await handler.handle_event(REALTIME_AUDIO_START)
+    receiver_may_stop.set()
+    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
+
+    new_stream = handler._audio_stream
+    assert new_stream is not None and new_stream is not old_stream
+    assert not new_stream.failed
+    assert handler._is_recording
+    assert handler._realtime_connection is new_session.connection
+    assert written == ["transcript-start", STT_FAILED_ERROR, "transcript-stop", "transcript-start"]
+
+
+@pytest.mark.asyncio
+async def test_idle_failure_is_answered_once_when_audio_stop_and_stop_come_while_it_closes(
+    enhanced_handler, mock_info, mock_clients
+):
+    """
+    An audio-stop and stop() while the idle failure waits for the receiver: the idle failure's error was queued
+    first, and is the one answer, before the connection closes.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    receiver_cancelled = asyncio.Event()
+    receiver_may_stop = asyncio.Event()
+    stt_client.realtime.connect = Mock(
+        return_value=_FakeRealtimeConnectionManager(
+            _slow_to_stop_realtime_connection(receiver_cancelled, receiver_may_stop)
+        )
+    )
+    handler = enhanced_handler
+    await handler.handle_event(REALTIME_AUDIO_START)
+    await _settle()  # The receiver waits for events
+    io_log = _record_client_io(handler)
+    audio_stream = handler._audio_stream
+    assert audio_stream is not None
+
+    handler._on_realtime_idle(audio_stream)
+    await asyncio.wait_for(receiver_cancelled.wait(), timeout=1)
+    assert await handler.handle_event(Event(type="audio-stop")) is False
+    stopping = asyncio.create_task(handler.stop())
+    await _settle()
+    receiver_may_stop.set()
+    await asyncio.wait_for(stopping, timeout=3)
+
+    assert io_log.count("error") == 1
+    assert io_log.index("error") < io_log.index("close")
 
 
 @pytest.mark.asyncio
