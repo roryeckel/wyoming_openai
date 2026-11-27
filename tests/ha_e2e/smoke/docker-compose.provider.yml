@@ -1,0 +1,47 @@
+# The provider lane: one proxy, at the default limits, for one provider defined in providers/<name>.env. Start the
+# smoke stack first; this joins its network. A provider that runs locally has its own engine to start first: its file
+# says how. For a provider that needs a key, set SMOKE_STT_KEY and SMOKE_TTS_KEY, for the side or sides it serves:
+#
+#   SMOKE_PROVIDER=<name> docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
+#   HA_SMOKE_PROVIDER=<name> pytest -m ha_smoke -v -k provider
+#
+# Whatever a provider file leaves unset comes from providers/_speaches.env, the stack's own Speaches. Every request
+# to a paid provider is billed to its key, so the port is published on 127.0.0.1 only. Remove the proxy, and any key
+# with it, by project name, which needs no variables:
+#
+#   docker compose -p ha_smoke_provider down
+name: ha_smoke_provider
+
+services:
+  proxy_provider:
+    image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:smoke}
+    container_name: ha_smoke_proxy_provider
+    restart: "no"
+    labels:
+      # Checked by the tests, so a run cannot test another provider than HA_SMOKE_PROVIDER names
+      smoke.provider: ${SMOKE_PROVIDER:?Set SMOKE_PROVIDER to the name of a file in tests/ha_e2e/smoke/providers}
+    ports:
+      - "127.0.0.1:10406:10300"
+    env_file:
+      - providers/_speaches.env
+      - providers/${SMOKE_PROVIDER:?Set SMOKE_PROVIDER to the name of a file in tests/ha_e2e/smoke/providers}.env
+    environment:
+      WYOMING_URI: tcp://0.0.0.0:10300
+      WYOMING_LOG_LEVEL: INFO
+      WYOMING_LANGUAGES: en
+      STT_OPENAI_KEY: ${SMOKE_STT_KEY:-}
+      TTS_OPENAI_KEY: ${SMOKE_TTS_KEY:-}
+    extra_hosts:
+      # A local engine started from the repository's own compose file publishes its port on the host
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+networks:
+  default:
+    name: ha_smoke_net
+    external: true

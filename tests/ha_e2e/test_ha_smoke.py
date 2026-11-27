@@ -1,9 +1,12 @@
 """Smoke tests of the shared STT and TTS limits with a real Home Assistant controlling devices.
 
-Opt in with the smoke stack up (tests/ha_e2e/smoke/docker-compose.yml), and for the OpenAI Realtime lane also
-tests/ha_e2e/smoke/docker-compose.openai.yml with HA_SMOKE_OPENAI=1:
+Opt in with the smoke stack up (tests/ha_e2e/smoke/docker-compose.yml):
 
     pytest -m ha_smoke -v
+
+The OpenAI Realtime lane adds its cases with tests/ha_e2e/smoke/docker-compose.openai.yml up and HA_SMOKE_OPENAI=1,
+and the provider lane with tests/ha_e2e/smoke/docker-compose.provider.yml up for a provider in
+tests/ha_e2e/smoke/providers and HA_SMOKE_PROVIDER set to its name.
 
 Only an explicit `-m ha_smoke` selects the suite: it carries no `integration` marker, so neither the default run nor
 `-m integration` or `-m ha_e2e`, which CI runs without this stack, picks it up.
@@ -96,9 +99,8 @@ ADMITTED_LOG = "Streaming chunk directly"
 HA_SHUTDOWN_LOG = "Error from Wyoming service: Server is shutting down"
 STT_CANCEL_LOG = "Cancelling the STT request in flight"
 TRANSCRIPTION_POST_LOG = "POST http://speaches:8000/v1/audio/transcriptions"
-# How much later than a log line is written a poll of the logs may see it, so how much earlier than that a reply that
-# waited for it may arrive
-LOG_POLL_SLACK = 1.5
+SYNTHESIS_TEXT_LOG = "Processing final remaining text"
+SYNTHESIS_DONE_LOG = "Successfully completed streaming synthesis"
 
 
 @dataclass(frozen=True)
@@ -110,7 +112,7 @@ class Proxy:
     host_port: int
     stt_limit: int
     tts_limit: int
-    openai: bool = False
+    lane: str = "local"  # "local", "openai" (HA_SMOKE_OPENAI=1) or "provider" (HA_SMOKE_PROVIDER=<name>)
 
 
 DEFAULT = Proxy("default", "ha_smoke_proxy", 10400, 3, 3)
@@ -119,17 +121,25 @@ UNLIMITED = Proxy("unlimited", "ha_smoke_proxy_unlimited", 10402, 0, 0)
 # At limit 1 and logging at debug level, which shows when a sentence's request is admitted. Kept apart from LIMITED,
 # whose many requests would fill its log with request bodies at that level
 LIMITED_DEBUG = Proxy("limited-debug", "ha_smoke_proxy_limited_debug", 10405, 1, 1)
-OPENAI = Proxy("openai", "ha_smoke_proxy_openai", 10403, 3, 3, openai=True)
-OPENAI_LIMITED = Proxy("openai-limited", "ha_smoke_proxy_openai_limited", 10404, 1, 1, openai=True)
+OPENAI = Proxy("openai", "ha_smoke_proxy_openai", 10403, 3, 3, lane="openai")
+OPENAI_LIMITED = Proxy("openai-limited", "ha_smoke_proxy_openai_limited", 10404, 1, 1, lane="openai")
 OPENAI_ENABLED = os.environ.get("HA_SMOKE_OPENAI", "").strip() == "1"
+# The provider lane's one proxy, at the default limits, running the provider tests/ha_e2e/smoke/providers/<name>.env
+PROVIDER_NAME = os.environ.get("HA_SMOKE_PROVIDER", "").strip()
+PROVIDER = Proxy(f"provider-{PROVIDER_NAME or 'none'}", "ha_smoke_proxy_provider", 10406, 3, 3, lane="provider")
+PROVIDER_LABEL = "smoke.provider"
 
 
 def _proxies(*proxies: Proxy) -> list[Any]:
-    skip_openai = pytest.mark.skip(reason="set HA_SMOKE_OPENAI=1 with docker-compose.openai.yml up")
-    return [
-        pytest.param(proxy, id=proxy.name, marks=skip_openai if proxy.openai and not OPENAI_ENABLED else ())
-        for proxy in proxies
-    ]
+    skips = {
+        "openai": (not OPENAI_ENABLED, "set HA_SMOKE_OPENAI=1 with docker-compose.openai.yml up"),
+        "provider": (not PROVIDER_NAME, "set HA_SMOKE_PROVIDER=<name> with docker-compose.provider.yml up"),
+    }
+    params = []
+    for proxy in proxies:
+        skip, reason = skips.get(proxy.lane, (False, ""))
+        params.append(pytest.param(proxy, id=proxy.name, marks=pytest.mark.skip(reason=reason) if skip else ()))
+    return params
 
 
 @dataclass(frozen=True)
@@ -285,6 +295,9 @@ def smoke() -> Iterator[Smoke]:
         custom_entry = ensure_custom_entry(rest, settings, state)
         scripted_agent = _wait_for_entities(rest, ws, custom_entry, ("conversation",))["conversation"]
         proxies = [DEFAULT, LIMITED, UNLIMITED, LIMITED_DEBUG, *((OPENAI, OPENAI_LIMITED) if OPENAI_ENABLED else ())]
+        if PROVIDER_NAME:
+            _check_provider_proxy()
+            proxies.append(PROVIDER)
         devices: dict[str, str] = {}
         scripted: dict[str, str] = {}
         first: PipelineInfo | None = None
@@ -327,6 +340,25 @@ def smoke() -> Iterator[Smoke]:
     yield configured
     _write_summary(configured, ha_version)
     rest.close()
+
+
+def _check_provider_proxy() -> None:
+    """Fail unless the provider lane's proxy runs, for the provider HA_SMOKE_PROVIDER names."""
+
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{index .Config.Labels \"" + PROVIDER_LABEL + "\"}}", PROVIDER.container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    running = result.stdout.strip() if result.returncode == 0 else None
+    if running != PROVIDER_NAME:
+        found = "is not running" if running is None else f"runs {running!r}"
+        pytest.fail(
+            f"HA_SMOKE_PROVIDER is {PROVIDER_NAME!r}, but {PROVIDER.container} {found}. Start it with "
+            f"SMOKE_PROVIDER={PROVIDER_NAME} docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d",
+            pytrace=False,
+        )
 
 
 def _wait_for_demo_entities(rest: HaRestClient) -> None:
@@ -597,7 +629,7 @@ def _timing_notes(outcomes: list[TurnOutcome]) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize("proxy", _proxies(DEFAULT, OPENAI))
+@pytest.mark.parametrize("proxy", _proxies(DEFAULT, OPENAI, PROVIDER))
 async def test_device_conversation(smoke: Smoke, proxy: Proxy) -> None:
     """A few turns of one conversation: lights on, off and dimmed, a garage door opened, asked about and closed."""
 
@@ -609,7 +641,7 @@ async def test_device_conversation(smoke: Smoke, proxy: Proxy) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize("proxy", _proxies(DEFAULT, OPENAI))
+@pytest.mark.parametrize("proxy", _proxies(DEFAULT, OPENAI, PROVIDER))
 async def test_streamed_llm_style_reply(smoke: Smoke, proxy: Proxy) -> None:
     """A long reply streamed in deltas, as from an LLM agent, spoken sentence by sentence."""
 
@@ -634,7 +666,7 @@ async def test_streamed_llm_style_reply(smoke: Smoke, proxy: Proxy) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize("proxy", _proxies(DEFAULT, LIMITED, UNLIMITED, OPENAI, OPENAI_LIMITED))
+@pytest.mark.parametrize("proxy", _proxies(DEFAULT, LIMITED, UNLIMITED, OPENAI, OPENAI_LIMITED, PROVIDER))
 async def test_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
     """Three satellites speak at the same time, each controlling its own device; every turn goes through."""
 
@@ -646,14 +678,14 @@ async def test_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
     _raise_first(results)
     if proxy.stt_limit == 0:
         assert note["stt_waits_logged"] == 0, "a request waited for a slot on a proxy without a limit"
-    elif proxy.openai and proxy.stt_limit == 1:
+    elif proxy.lane == "openai" and proxy.stt_limit == 1:
         # A Realtime session holds its slot from audio-start, and the three start together: two must wait
         assert note["stt_waits_logged"] >= 1, "no Realtime session waited for the only STT slot"
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize("proxy", _proxies(DEFAULT, LIMITED, UNLIMITED, OPENAI, OPENAI_LIMITED))
+@pytest.mark.parametrize("proxy", _proxies(DEFAULT, LIMITED, UNLIMITED, OPENAI, OPENAI_LIMITED, PROVIDER))
 async def test_long_replies_at_once(smoke: Smoke, proxy: Proxy) -> None:
     """Three satellites read out long replies at the same time; each one's audio is complete and in order."""
 
@@ -715,7 +747,7 @@ async def _ensure_running(proxy: Proxy) -> None:
 
 
 async def _when_logged(proxy: Proxy, needle: str, previous_count: int, timeout: float) -> float:
-    """time.monotonic() at which a poll first sees a new log line with `needle`, at most LOG_POLL_SLACK late."""
+    """time.monotonic() at which a poll first sees a new log line with `needle`: when it was written, or later."""
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -777,13 +809,15 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
     """
     A client that stops reading while it holds the only TTS slot fails within the client write limit, and a
     satellite waiting for the slot is answered after it. With that client still connected, the proxy still stops
-    promptly and cleanly. On LIMITED_DEBUG the proxy's log shows when the satellite's request was admitted; the
-    OpenAI proxy, which must not log at debug level with its key, has only the reply's timing to go by.
+    promptly and cleanly. On LIMITED_DEBUG the proxy's log shows when the satellite's request was admitted. The
+    OpenAI proxy must not log at debug level with its key, so its log only shows when the satellite's synthesis
+    finished, which a backend slower to answer than the write limit would also put after the release.
     """
 
     text = "The kitchen lights are on, and the garage door is closed."
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)
     admitted_before = _admitted_count(proxy, text)
+    received_before = _received_count(proxy, text)
     stuck = await _exec_in(proxy, STUCK_TTS_CLIENT, LONG_REPLY, "40")
     freed: asyncio.Task[float] | None = None
     try:
@@ -802,28 +836,32 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
             outcome.first_audio_seconds = _first_audio_seconds(result)
             assert not result.error_events, f"pipeline reported errors: {result.error_events}"
             await _check_tts(smoke, result, text, outcome, long=False)
-            freed_at = await freed
-            progress = result.tts_progress
-            first_audio = None if progress is None else (progress.first_audio_at or progress.first_byte_at)
-            assert first_audio is not None, "the satellite got no audio"
-            outcome.notes["freed_after_s"] = round(freed_at - started, 2)
+            # When a poll saw the release is only a note: the order of the lines in one snapshot is what counts
+            outcome.notes["release_seen_after_s"] = round(await freed - started, 2)
             logs = container_logs(proxy.container)
+            lines = logs.splitlines()
+            failed_line = _nth_line(lines, lambda line: SLOW_CLIENT_LOG in line, slow_before + 1)
+            assert failed_line is not None, "the proxy's log has no new SlowClientError"
             if proxy is LIMITED_DEBUG:
                 # The satellite's request was admitted only once the write limit had failed the stuck client
-                lines = logs.splitlines()
-                failed_line = _nth_line(lines, lambda line: SLOW_CLIENT_LOG in line, slow_before + 1)
                 admitted_line = _nth_line(lines, lambda line: _is_admitted(line, text), admitted_before + 1)
-                assert failed_line is not None and admitted_line is not None, "the proxy's log misses a line"
+                assert admitted_line is not None, "the proxy's log has no admission line for the satellite"
                 assert admitted_line > failed_line, (
                     "the satellite's request was admitted while the stuck client still held the only slot"
                 )
-            # Its audio came after the slot was freed too; without the log line this is what shows the wait, but a
-            # backend slow to answer a request admitted too early would also pass it
-            assert first_audio >= freed_at - LOG_POLL_SLACK, (
-                f"the satellite's audio came {freed_at - first_audio:.1f}s before the stuck client's slot was freed: "
-                "it did not wait for the slot"
-            )
-            outcome.notes["log"] = next(line for line in logs.splitlines()[::-1] if SLOW_CLIENT_LOG in line)[-140:]
+            else:
+                # Its synthesis finished only after the write limit had failed the stuck client
+                received_line = _nth_line(lines, lambda line: _is_received(line, text), received_before + 1)
+                assert received_line is not None, "the proxy's log does not show the satellite's text"
+                done_line = next(
+                    (index for index in range(received_line + 1, len(lines)) if SYNTHESIS_DONE_LOG in lines[index]),
+                    None,
+                )
+                assert done_line is not None, "the proxy's log does not show the satellite's synthesis finishing"
+                assert done_line > failed_line, (
+                    "the satellite's synthesis finished while the stuck client still held the only slot"
+                )
+            outcome.notes["log"] = lines[failed_line][-140:]
             # The stuck client is still connected, with audio it never takes left in its connection
             stop_seconds = await _restart(proxy)
             outcome.notes["stop_with_stuck_client_s"] = round(stop_seconds, 2)
@@ -844,6 +882,14 @@ def _admitted_count(proxy: Proxy, text: str) -> int:
 def _is_admitted(line: str, text: str) -> bool:
     # The log line has the start of the sentence
     return ADMITTED_LOG in line and text[:25] in line
+
+
+def _received_count(proxy: Proxy, text: str) -> int:
+    return sum(_is_received(line, text) for line in container_logs(proxy.container).splitlines())
+
+
+def _is_received(line: str, text: str) -> bool:
+    return SYNTHESIS_TEXT_LOG in line and text[:25] in line
 
 
 def _nth_line(lines: list[str], matches: Any, nth: int) -> int | None:
@@ -880,18 +926,13 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
         waits_before = _log_count(proxy, STT_WAIT_LOG)
         freed = asyncio.create_task(_when_logged(proxy, IDLE_LOG, idle_before, 30))
         outcome = await _device_turn(smoke, "silent-client", proxy, CONVERSATION[0], VOICES[2])
-        freed_at = await freed
+        await freed  # The idle failure has been logged
         # In one snapshot of the log, the satellite's session waited for the slot before the idle limit freed it
         lines = container_logs(proxy.container).splitlines()
         waited_line = _nth_line(lines, lambda line: STT_WAIT_LOG in line, waits_before + 1)
         freed_line = _nth_line(lines, lambda line: IDLE_LOG in line, idle_before + 1)
         assert waited_line is not None and freed_line is not None, "the proxy's log misses a line"
         assert waited_line < freed_line, "the satellite's session did not wait for the slot the silent client held"
-        assert outcome.stt_end_at is not None, "Home Assistant reported no end of the STT stage"
-        assert outcome.stt_end_at >= freed_at - LOG_POLL_SLACK, (
-            f"the satellite was transcribed {freed_at - outcome.stt_end_at:.1f}s before the silent client's slot was "
-            "freed: it did not wait for the slot"
-        )
         logs = container_logs(proxy.container)
         outcome.notes["log"] = next(line for line in logs.splitlines()[::-1] if IDLE_LOG in line)[-120:]
     finally:

@@ -109,6 +109,17 @@ If the CLI, compatibility story, or visible behavior changes, update the relevan
 
 PRs that mainly add support for one provider's custom route, schema, or transport are likely to be declined even if the code works.
 
+## AI Coding Agents
+
+A change made with an AI coding agent follows the same rules as any other, and the agent follows the project's
+agent instructions as well:
+
+- It loads [AGENTS.md](AGENTS.md) before it changes anything. `CLAUDE.md` is a symlink to it, for agents that look
+  for that name.
+- It follows the testing rules there, including when a change needs the Home Assistant smoke suite and on which
+  providers, and it shows you its smoke-testing plan and waits for you to accept it before running it.
+- Its PR says what was tested, on which providers, and what could not be, in the Testing section.
+
 ## Development Setup
 
 Create and activate a virtual environment, then install development dependencies:

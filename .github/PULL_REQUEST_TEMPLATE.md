@@ -18,6 +18,7 @@ reads cleanly out of context.
 - [ ] Tests were added or updated if supported behavior changed.
 - [ ] Docs were updated if user-facing behavior changed.
 - [ ] This does not add a provider-specific custom API without prior maintainer approval.
+- [ ] If an AI coding agent made this change, it loaded AGENTS.md and followed its testing rules, smoke testing included.
 
 ## Details
 

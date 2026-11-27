@@ -82,6 +82,84 @@ or request fields sent only to a backend. When unsure, label it: the run
 costs a few minutes. It can also be started by hand with
 `gh workflow run ha-e2e.yml --ref <branch>`.
 
+## Smoke Testing
+
+Before opening a PR, run the Home Assistant smoke suite (`pytest -m ha_smoke`, see
+"Home Assistant Smoke Tests" in the README) when the change falls in one of the
+first two classes below. The `ha-smoke` skill
+(`.agents/skills/ha-smoke/SKILL.md`) has the steps. The suite needs an NVIDIA
+GPU, and CI does not run it.
+
+| Class | What counts | Before opening the PR |
+|---|---|---|
+| Request shape | What a backend receives changes: request fields or their values (`prompt`, `language`, `response_format`, voice, speed, instructions, the extra-body merge), model or voice resolution, which route or transport is used, Realtime session settings, the audio sent (format, rate, chunking), auth or headers, backend detection or a backend shim | The request-shape check below, then the suite on several providers |
+| Proxy behavior | What Home Assistant sees changes, but not the request: concurrency, queueing, timeouts, event order or content, error reporting, connection lifecycle and shutdown, handling of response audio, streaming versus buffering, startup | The suite on one provider; the local Speaches lane is enough |
+| Neither | Docs, tests, logging, CLI parsing without a behavior change, refactors the unit tests cover | No smoke run |
+
+When unsure, take the stricter class. Adding names to the STT prompt (#133) is
+a request-shape change; limiting concurrent requests (#135) is a proxy-behavior
+change. These classes are separate from the `ha-e2e` label above: a change can
+need both.
+
+### Request-shape check
+
+Ground it in the code, before anything runs:
+
+1. List every field, value, route or transport the change adds or alters, and
+   for which models and backends.
+2. Trace what each backend receives: `transcription_kwargs` and
+   `_get_realtime_transcription_session()` for STT, `_iter_tts_audio()` and
+   `_get_realtime_tts_session()` for TTS (all in `handler.py`), the backend
+   shims in `compatibility.py`, and the extra-body validators in
+   `utilities.py`.
+3. Compare that with each provider's documented request schema, with
+   [OpenAI's API reference](https://platform.openai.com/docs/api-reference) as
+   the contract, and record whether each provider accepts, ignores or rejects
+   it.
+
+Official OpenAI is the strictest requirement: a change that breaks it on any
+transport it touches does not ship. A break elsewhere is fixed in the same
+work, for example by sending a field only to the backends that take it. If that
+fix is hard or outside the change's scope, raise it with the developer before
+opening the PR rather than ship the break.
+
+### Providers
+
+A request-shape change runs on:
+
+- official OpenAI, on every transport the change touches: HTTP in the provider
+  lane (`openai`), Realtime in the OpenAI lane
+- every backend shim its code path reaches: `SPEACHES` (the local lane),
+  `KOKORO_FASTAPI` (`kokoro-fastapi`), `LOCALAI` (`localai`)
+- one third-party provider on the plain `OPENAI` backend:
+  `speaches-openai-backend` is free, and `groq`, `mistral`, `openai-edge-tts` or
+  `chatterbox` count too
+
+Paid providers are not a hard requirement. Run one when its key is available;
+otherwise say in the plan and in the PR which providers did not run, and rely on
+the request-shape check for them. A key counts as available, and as permission
+to use it for smoke testing, only when it is clearly set for this project: an
+uncommented entry in this repository's `.env`, such as `STT_OPENAI_KEY`. A
+commented-out key, or one found anywhere else, needs the developer's go-ahead
+first. Never print a key or put it on a command line: pass it through the
+environment, and remove the containers that hold it when the run is done.
+
+### The plan comes first
+
+Before running anything, show the developer the smoke plan and wait for them to
+accept it:
+
+- the change's class, and why
+- the request-shape findings, per provider
+- which lanes and providers will run, and which won't, and why
+- which keys will be used, and where they come from
+- what the run costs: paid requests, images to pull, roughly how long it takes
+
+Report the results in the PR's Testing section: what ran, on which providers,
+and what failed. Tell a model's fault (a misheard command, a sentence returned
+as silence, a reply it made up) from the proxy's, by running the same case on
+`main` when unsure.
+
 ## Releases
 
 Releases off `main` go through the **Bump Version** GitHub Action
@@ -152,3 +230,5 @@ Tests are organized by module:
 - `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios
+- `ha_e2e/test_ha_e2e.py`: Home Assistant E2E suite, the CI gate (see Pull Requests)
+- `ha_e2e/test_ha_smoke.py`: Home Assistant smoke suite, on a GPU (see Smoke Testing)
