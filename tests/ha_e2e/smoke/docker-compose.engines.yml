@@ -1,0 +1,146 @@
+# Local engines for the provider lane, one profile each, with the same images and settings as the repository's own
+# compose files for them. They run in a project of their own (ha_smoke_engines), with ha_smoke_* container names, on
+# the smoke stack's network and without host ports, so nothing they do touches a proxy or an engine the developer
+# runs. Start the smoke stack first, then the engine a provider file names:
+#
+#   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
+#
+# Remove every engine the smoke run started, by project name:
+#
+#   docker compose -p ha_smoke_engines down
+name: ha_smoke_engines
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["${SMOKE_GPU:-0}"]
+            capabilities: [gpu]
+
+services:
+  kokoro:
+    <<: *gpu
+    profiles: [kokoro-fastapi]
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    container_name: ha_smoke_kokoro
+    restart: "no"
+    environment:
+      USE_GPU: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8880/v1/test"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+
+  localai:
+    <<: *gpu
+    profiles: [localai]
+    image: localai/localai:latest-gpu-nvidia-cuda12
+    container_name: ha_smoke_localai
+    restart: "no"
+    environment:
+      MODELS_PATH: /models
+      GO_TAGS: tts
+    volumes:
+      - localai-models:/models
+      - localai-config:/config
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # One-shot: installs the models localai.env uses, and exits once LocalAI lists them all, as the installs it
+  # starts finish in the background. Run it with: docker compose ... --profile localai run --rm init-localai
+  init-localai:
+    profiles: [localai]
+    image: alpine:latest
+    container_name: ha_smoke_localai_init
+    restart: "no"
+    environment:
+      LOCALAI_URL: http://localai:8080
+      INSTALL: whisper-base voice-en-us-amy-low voice-en-us-ryan-medium
+      REQUIRED: whisper-base en-us-amy-low.onnx en-us-ryan-medium.onnx
+    depends_on:
+      localai:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache curl > /dev/null
+        for model in $$INSTALL; do
+          curl -sf "$$LOCALAI_URL/models/apply" -H "Content-Type: application/json" \
+            -d "{\"id\": \"localai@$$model\"}" > /dev/null || { echo "could not install $$model"; exit 1; }
+        done
+        missing="$$REQUIRED"
+        for attempt in $$(seq 180); do
+          listed=$$(curl -sf "$$LOCALAI_URL/v1/models")
+          missing=""
+          for model in $$REQUIRED; do
+            echo "$$listed" | grep -q "\"$$model\"" || missing="$$missing $$model"
+          done
+          [ -z "$$missing" ] && { echo "LocalAI lists every model"; exit 0; }
+          sleep 10
+        done
+        echo "LocalAI never listed:$$missing"
+        exit 1
+
+  openai-edge-tts:
+    profiles: [openai-edge-tts]
+    image: travisvn/openai-edge-tts:latest
+    container_name: ha_smoke_openai_edge_tts
+    restart: "no"
+    environment:
+      PORT: "5050"
+      DEFAULT_SPEED: "1.0"
+      DEFAULT_LANGUAGE: en-US
+      REQUIRE_API_KEY: "False"
+      REMOVE_FILTER: "False"
+      EXPAND_API: "False"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5050/v1/models', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  chatterbox-tts:
+    # On the GPU, which the repository's own compose file leaves it off: on the CPU long replies time out
+    <<: *gpu
+    profiles: [chatterbox]
+    image: travisvn/chatterbox-tts-api:latest
+    container_name: ha_smoke_chatterbox
+    restart: "no"
+    environment:
+      PORT: "4123"
+      HOST: 0.0.0.0
+      EXAGGERATION: "0.5"
+      CFG_WEIGHT: "0.5"
+      TEMPERATURE: "0.8"
+      MAX_CHUNK_LENGTH: "280"
+      MAX_TOTAL_LENGTH: "3000"
+      DEVICE: auto
+      MODEL_CACHE_DIR: /cache
+    volumes:
+      - chatterbox-models:/cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4123/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+
+networks:
+  default:
+    name: ha_smoke_net
+    external: true
+
+volumes:
+  localai-models:
+  localai-config:
+  chatterbox-models:

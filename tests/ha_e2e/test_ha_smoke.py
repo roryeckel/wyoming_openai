@@ -190,11 +190,11 @@ LONG_TEXTS = (
 )
 
 STUCK_TTS_CLIENT = r"""
-import asyncio, socket, sys
+import asyncio, os, socket, sys, time
 from wyoming.event import async_write_event
 from wyoming.tts import Synthesize
 
-async def main(text, seconds):
+async def main(text, release, seconds):
     sock = socket.socket()
     # A small receive buffer, so the proxy's writes back up quickly once nothing is read
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -202,9 +202,12 @@ async def main(text, seconds):
     sock.setblocking(False)
     _, writer = await asyncio.open_connection(sock=sock)
     await async_write_event(Synthesize(text=text).event(), writer)
-    await asyncio.sleep(seconds)  # Never reads
+    # Never reads, and stays connected until the test creates the release file, or for at most `seconds`
+    deadline = time.monotonic() + seconds
+    while not os.path.exists(release) and time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
 
-asyncio.run(main(sys.argv[1], float(sys.argv[2])))
+asyncio.run(main(sys.argv[1], sys.argv[2], float(sys.argv[3])))
 """
 
 IDLE_STT_CLIENT = r"""
@@ -828,7 +831,8 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
     text = "The kitchen lights are on, and the garage door is closed."
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)
     admitted_before = _admitted_count(proxy, text)
-    stuck = await _exec_in(proxy, STUCK_TTS_CLIENT, LONG_REPLY, "40")
+    release = f"/tmp/smoke-release-{secrets.token_hex(6)}"
+    stuck = await _exec_in(proxy, STUCK_TTS_CLIENT, LONG_REPLY, release, "240")
     freed: asyncio.Task[float] | None = None
     try:
         # Long enough for its synthesis to take the slot and fill the buffers its client does not read
@@ -861,6 +865,7 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
                 )
             outcome.notes["log"] = lines[failed_line][-140:]
             # The stuck client is still connected, with audio it never takes left in its connection
+            assert stuck.returncode is None, "the stuck client ended before the stop: the stop would not test it"
             stop_seconds = await _restart(proxy)
             outcome.notes["stop_with_stuck_client_s"] = round(stop_seconds, 2)
             assert stop_seconds < 8, f"stopping the proxy took {stop_seconds:.1f}s with the stuck client connected"
@@ -870,7 +875,22 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
             raise
     finally:
         await _reap(freed)
+        # The restart ended it already when the test got that far; otherwise it is told to go
+        if stuck.returncode is None and await asyncio.to_thread(_container_running, proxy.container):
+            await _exec_quiet(proxy, "touch", release)
         await _finish(stuck)
+
+
+async def _exec_quiet(proxy: Proxy, *command: str) -> None:
+    process = await asyncio.create_subprocess_exec(
+        "docker", "exec", proxy.container, *command,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await asyncio.wait_for(process.wait(), 30)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
 
 
 def _admitted_count(proxy: Proxy, text: str) -> int:

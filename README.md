@@ -798,19 +798,20 @@ HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
 
 The OpenAI cases also test the Realtime models themselves, so a misheard command, a sentence returned as silence, or a reply the model makes up in place of the text fails a turn.
 
-The provider lane runs the first four scenarios against one other provider, defined in a file under [`tests/ha_e2e/smoke/providers/`](tests/ha_e2e/smoke/providers): official OpenAI over HTTP, streamed (`openai`) or not (`openai-unstreamed`), GroqCloud, Mistral, Kokoro-FastAPI, LocalAI, openai-edge-tts, Chatterbox, or the stack's own Speaches on the plain `OPENAI` backend. Whatever a file leaves unset stays on the stack's Speaches. Its header says which service and request mode it serves, whether it needs a key, and how to start its engine if it runs locally. Set `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` for the side or sides a paid provider serves:
+The provider lane runs the first four scenarios against one other provider, defined in a file under [`tests/ha_e2e/smoke/providers/`](tests/ha_e2e/smoke/providers): official OpenAI over HTTP, streamed (`openai`) or not (`openai-unstreamed`), GroqCloud, Mistral, Kokoro-FastAPI, LocalAI, openai-edge-tts, Chatterbox, or the stack's own Speaches on the plain `OPENAI` backend. Whatever a file leaves unset stays on the stack's Speaches. Its header says which service and request mode it serves, whether it needs a key, and, for a provider that runs locally, how to start its engine from [`docker-compose.engines.yml`](tests/ha_e2e/smoke/docker-compose.engines.yml). The engines run in a project of their own, without host ports, so they don't clash with an engine you already run. Set `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` for the side or sides a paid provider serves:
 
 ```bash
-docker compose -f docker-compose.kokoro-fastapi.yml up -d --wait kokoro   # an engine that runs locally
+docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
 SMOKE_PROVIDER=kokoro-fastapi docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
 HA_SMOKE_PROVIDER=kokoro-fastapi pytest -m ha_smoke -v -k provider
 docker compose -p ha_smoke_provider down
 ```
 
-The tests check that the provider proxy is running, and is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) sets out which changes need which providers. Tear everything down with the following. The first two commands need no key:
+The tests check that the provider proxy is running, and is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) sets out which changes need which providers. Tear everything down with the following. None of the commands needs a key:
 
 ```bash
 docker compose -p ha_smoke_openai down
 docker compose -p ha_smoke_provider down
+docker compose -p ha_smoke_engines down
 docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v
 ```

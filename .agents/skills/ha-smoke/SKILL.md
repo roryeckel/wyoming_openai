@@ -45,9 +45,10 @@ scope.
   `Serves:` line which service and request mode it runs; count it only for
   those. A local provider's header names its engine and how to start it. Note
   the images that would have to be pulled, and their size.
-- **Ports:** the stack uses 127.0.0.1 ports 8010, 8124 and 10400-10406. A local
-  engine publishes the port its compose file names (for example 8880 for
-  Kokoro-FastAPI).
+- **Ports:** the stack uses 127.0.0.1 ports 8010, 8124 and 10400-10406. Local
+  engines run from `tests/ha_e2e/smoke/docker-compose.engines.yml`, in their own
+  project, with `ha_smoke_*` container names and no host ports, so they don't
+  clash with an engine the developer runs.
 
 ## 4. Propose the plan, and wait
 
@@ -74,7 +75,8 @@ docker compose -f tests/ha_e2e/smoke/docker-compose.yml up -d --wait
 pytest -m ha_smoke -v                                  # the local lane
 ```
 
-For each provider in the plan, start its engine if it runs locally, then its
+For each provider in the plan, start its engine if it runs locally (its file's
+`Engine:` line, from `tests/ha_e2e/smoke/docker-compose.engines.yml`), then its
 proxy, run the lane, and take the proxy down before the next one:
 
 ```bash
@@ -141,10 +143,11 @@ repeated. One that is the model's or the provider's is reported, not hidden.
 
 Take down what the run started: `docker compose -p ha_smoke_provider down` and
 `docker compose -p ha_smoke_openai down` (both need no key, and remove the
-containers that hold one), each local engine's compose project, and the stack
-with `docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v` unless
-the developer wants it kept. Pulled images stay unless the developer asks to
-remove them.
+containers that hold one), `docker compose -p ha_smoke_engines down` for the
+local engines, and the stack with
+`docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v` unless the
+developer wants it kept. Each of these touches only what the smoke run
+started. Pulled images stay unless the developer asks to remove them.
 
 ## 8. Report
 

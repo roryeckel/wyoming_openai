@@ -145,6 +145,13 @@ A provider counts only for the service and mode it runs, which its file in
 provider does not count for an STT change, and a streamed preset does not count
 for a change on the unstreamed path.
 
+Some combinations have no preset: no third-party preset streams STT or speaks
+Realtime, for example. The plan names each such combination as not covered,
+gives the request-shape check's finding for it, citing the provider's
+documentation, and asks the developer whether that is enough before anything
+runs. Where a provider does serve the mode, a new preset for it is the better
+answer, and part of the same work.
+
 Paid providers are not a hard requirement. Run one when its key is available;
 otherwise say in the plan and in the PR which providers did not run, and rely on
 the request-shape check for them. A key counts as available, and as permission

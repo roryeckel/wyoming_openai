@@ -1,6 +1,7 @@
 # The provider lane: one proxy, at the default limits, for one provider defined in providers/<name>.env. Start the
-# smoke stack first; this joins its network. A provider that runs locally has its own engine to start first: its file
-# says how. For a provider that needs a key, set SMOKE_STT_KEY and SMOKE_TTS_KEY, for the side or sides it serves:
+# smoke stack first; this joins its network. A provider that runs locally has its engine in docker-compose.engines.yml,
+# to start first: its file says how. For a provider that needs a key, set SMOKE_STT_KEY and SMOKE_TTS_KEY, for the
+# side or sides it serves:
 #
 #   SMOKE_PROVIDER=<name> docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
 #   HA_SMOKE_PROVIDER=<name> pytest -m ha_smoke -v -k provider
@@ -31,9 +32,6 @@ services:
       WYOMING_LANGUAGES: en
       STT_OPENAI_KEY: ${SMOKE_STT_KEY:-}
       TTS_OPENAI_KEY: ${SMOKE_TTS_KEY:-}
-    extra_hosts:
-      # A local engine started from the repository's own compose file publishes its port on the host
-      - host.docker.internal:host-gateway
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()"]
       interval: 5s
