@@ -5223,6 +5223,8 @@ async def test_stt_semaphore_holds_a_realtime_slot_from_audio_start_until_the_se
     assert await second.handle_event(Event(type="audio-stop"))
     assert _written_transcripts(first) == ["Hi"]
     assert _written_transcripts(second) == ["Hi"]
+    # Released once its websocket has closed, which happens in the background
+    await second._drain_background_tasks()
     assert not semaphore.locked()
 
 
@@ -5276,6 +5278,157 @@ async def test_realtime_cleanup_keeps_the_slot_of_an_http_request(mock_info, moc
     assert not semaphore.locked()
     # Released once, so a second release cannot raise the limit
     assert semaphore._value == 1
+
+
+class _GatedCloseManager(_FakeRealtimeConnectionManager):
+    """A Realtime connection manager whose closing handshake lasts until the gate opens."""
+
+    def __init__(self, connection, gate):
+        super().__init__(connection)
+        self.gate = gate
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.gate.wait()
+        await super().__aexit__(exc_type, exc, tb)
+
+
+@pytest.mark.asyncio
+async def test_stt_semaphore_realtime_slot_is_held_until_the_websocket_has_closed(
+    enhanced_handler, mock_info, mock_clients
+):
+    """The client gets its transcript without waiting for the close, but the next session waits for it."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    gate = asyncio.Event()
+
+    def connect(**kwargs):
+        completed = _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
+        return _GatedCloseManager(_FakeRealtimeConnection([completed]), gate)
+
+    stt_client.realtime.connect = Mock(side_effect=connect)
+    semaphore = asyncio.Semaphore(1)
+    first, second = (_stt_limited_handler(mock_info, stt_client, semaphore) for _ in range(2))
+    for handler in (first, second):
+        handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    audio_start = Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+
+    await first.handle_event(audio_start)
+    assert await first.handle_event(Event(type="audio-stop"))
+    assert _written_transcripts(first) == ["Hi"]
+    await _settle()
+    assert semaphore.locked()
+
+    second_start = asyncio.create_task(second.handle_event(audio_start))
+    await _settle()
+    assert stt_client.realtime.connect.call_count == 1
+    assert not second_start.done()
+
+    gate.set()
+    await asyncio.wait_for(second_start, timeout=1)
+    assert stt_client.realtime.connect.call_count == 2
+
+    assert await second.handle_event(Event(type="audio-stop"))
+    await second._drain_background_tasks()
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+async def test_stt_semaphore_realtime_slot_is_released_when_its_close_is_cancelled(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A closing handshake that a shutdown cuts short still gives the slot back."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = Mock(
+        side_effect=lambda **kwargs: _GatedCloseManager(_FakeRealtimeConnection([]), asyncio.Event())
+    )
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+
+    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    await handler._cleanup_realtime_transcription()
+    await _settle()
+    assert semaphore.locked()
+
+    await handler._drain_background_tasks(timeout=0)
+
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime", [False, True])
+async def test_stt_request_waiting_for_a_slot_is_not_sent_after_stop(
+    enhanced_handler, mock_info, mock_clients, realtime
+):
+    """A request still queued when the server stops gives back the slot it gets and never reaches the backend."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client, _ = mock_clients
+    if realtime:
+        _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hi"))
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()  # Held by another connection
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+
+    async def stream():
+        await handler.handle_event(Event(type="audio-start", data=audio_format))
+        await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+        return await handler.handle_event(Event(type="audio-stop"))
+
+    request = asyncio.create_task(stream())
+    await _settle()
+    assert not request.done()
+
+    await handler.stop()
+    semaphore.release()  # The other connection is stopped too
+    await asyncio.wait_for(request, timeout=1)
+
+    stt_client.realtime.connect.assert_not_called()
+    stt_client.audio.transcriptions.create.assert_not_called()
+    assert "transcript" not in _written_event_types(handler)
+    assert not semaphore.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_stt_semaphore_http_slot_is_released_before_the_transcript_is_written(
+    mock_info, mock_clients, streamed
+):
+    """A client slow to take the transcript does not hold the slot once the backend's response is read."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client, _ = mock_clients
+
+    class _Stream:
+        async def __aiter__(self):
+            yield Mock(type="transcript.text.delta", delta="Hi")
+            yield Mock(type="transcript.text.done", text="Hi")
+
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=_Stream() if streamed else Transcription(text="Hi"))
+    semaphore = asyncio.Semaphore(1)
+    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if Transcript.is_type(event.type):
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    with patch("wyoming_openai.handler.AsyncStream", _Stream):
+        request = asyncio.create_task(_stream_audio(handler))
+        await _settle()
+        assert not request.done()
+        assert not semaphore.locked()
+
+        client_reads.set()
+        await asyncio.wait_for(request, timeout=1)
+
+    assert _written_transcripts(handler) == ["Hi"]
+    assert not semaphore.locked()
 
 
 @pytest.mark.asyncio

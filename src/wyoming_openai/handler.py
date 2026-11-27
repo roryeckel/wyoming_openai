@@ -5,7 +5,7 @@ import functools
 import logging
 import unicodedata
 import wave
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -255,7 +255,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             tts_concurrent_requests (int): Maximum simultaneous TTS requests per connection.
             stt_semaphore (asyncio.Semaphore | None): Shared by every connection of the server to limit the STT
                 requests in flight across all of them, or None for no limit. A /v1/audio/transcriptions request
-                holds a slot from audio-stop until its transcript; a Realtime session from audio-start until it closes.
+                holds a slot from audio-stop until its response is read; a Realtime session from audio-start until
+                its websocket has closed.
             Note: The caller owns the STT/TTS clients and is responsible for closing them.
             **kwargs: Arbitrary keyword arguments for the superclass.
         """
@@ -304,6 +305,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._transcribe_rejected = False
         self._audio_stream: _AudioStreamState | None = None  # Between audio-start and audio-stop
         self._shutdown_reported = False  # stop() told the client its transcription was cut short
+        self._stopping = False  # stop() was called; no STT request is started from then on
 
         # State for realtime transcription
         self._realtime_connection_manager: Any | None = None
@@ -399,6 +401,8 @@ class OpenAIEventHandler(AsyncEventHandler):
 
     async def stop(self) -> None:
         """Stop the event handler without closing shared OpenAI clients."""
+        # Set before the first await, so a request waiting for an STT slot cannot start once one is free
+        self._stopping = True
         try:
             # The client is still connected, so it is told about a synthesis or a transcription cut short before the
             # writer is closed: a stream being recorded, or an audio-stop waiting for its transcript
@@ -643,10 +647,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             await self._fail_realtime_audio_stream(audio_stream)
             return
 
-        # Held while the session is open, as the backend serves it all that time; _cleanup_realtime_transcription
-        # releases it. The audio that arrives meanwhile waits in the connection until the session opens
-        await self._acquire_stt_slot("realtime")
         try:
+            # Held while the session is open, as the backend serves it all that time; _cleanup_realtime_transcription
+            # releases it once the websocket is closed. Audio that arrives meanwhile waits in the connection
+            await self._acquire_stt_slot("realtime")
             self._realtime_connection_manager = self._connect_realtime_transcription()
             connection = await self._enter_realtime_connection(self._realtime_connection_manager)
             self._realtime_connection = connection
@@ -899,27 +903,69 @@ class OpenAIEventHandler(AsyncEventHandler):
         return transcript_future.exception()
 
     async def _acquire_stt_slot(self, transport: _SttSlot) -> None:
-        """Wait for one of the STT request slots the server's connections share, unless there is no limit."""
+        """
+        Wait for one of the STT request slots the server's connections share, unless there is no limit.
+
+        Raises:
+            RuntimeError: When stop() has been called, before or while waiting: the request must not reach the
+                backend once the server is shutting down, which the caller reports as a failed transcription.
+        """
         semaphore = self._stt_semaphore
         if semaphore is None or self._stt_slot is not None:
             return
+        if self._stopping:
+            raise RuntimeError(f"Not starting an STT request: {SHUTDOWN_ERROR}")
         if semaphore.locked():
             _LOGGER.info("Waiting for a free STT request slot: STT_CONCURRENT_REQUESTS requests are in flight")
         await semaphore.acquire()
+        if self._stopping:
+            # stop() ran while this request was waiting, as the handlers it stops give their slots back
+            semaphore.release()
+            raise RuntimeError(f"Not starting an STT request: {SHUTDOWN_ERROR}")
         self._stt_slot = transport
+
+    def _take_stt_slot(self, transport: _SttSlot) -> Callable[[], None] | None:
+        """
+        Hand over the STT request slot this connection holds for a transport, if any, as a function that releases
+        it once. The connection holds no slot afterwards, so the next stream waits for one of its own.
+        """
+        semaphore = self._stt_semaphore
+        if self._stt_slot != transport or semaphore is None:
+            return None
+        self._stt_slot = None
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                semaphore.release()
+
+        return release
 
     def _release_stt_slot(self, transport: _SttSlot) -> None:
         """Release the STT request slot this connection holds for a transport, if any; safe to call more than once."""
-        if self._stt_slot == transport and self._stt_semaphore is not None:
-            self._stt_slot = None
-            self._stt_semaphore.release()
+        if (release := self._take_stt_slot(transport)) is not None:
+            release()
 
     async def _cleanup_realtime_transcription(self) -> None:
         """Close the realtime connection and background receive task, and release the STT slot it held."""
-        # The slot is released first, so a cancelled cleanup cannot keep it; the closing handshake of the websocket
-        # runs in the background and does not count against the limit. A /v1/audio/transcriptions request keeps
-        # its own slot, as stop() cleans up Realtime state while an audio-stop may still be sending a recording
-        self._release_stt_slot("realtime")
+        # Taken first, so a cancelled cleanup cannot keep it. A /v1/audio/transcriptions request keeps its own slot,
+        # as stop() cleans up Realtime state while an audio-stop may still be sending a recording
+        release_slot = self._take_stt_slot("realtime")
+        try:
+            await self._close_realtime_transcription(release_slot)
+            # Handed to the close of the websocket, which releases it
+            release_slot = None
+        finally:
+            if release_slot is not None:
+                release_slot()
+
+    async def _close_realtime_transcription(self, release_slot: Callable[[], None] | None) -> None:
+        """
+        Stop the receive task and close the Realtime session; once the websocket is closed, release_slot is called.
+        Without a session to close it is called right away.
+        """
         receive_task = self._realtime_receive_task
         self._realtime_receive_task = None
         if receive_task and not receive_task.done():
@@ -943,11 +989,21 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._realtime_connection_manager = None
         self._realtime_connection = None
 
-        # As with Realtime TTS, the closing handshake must not hold up the Wyoming client
+        # As with Realtime TTS, the closing handshake must not hold up the Wyoming client. Unlike there, the STT slot
+        # is only released once the socket is closed, so the limit also counts sessions that are still closing
         if connection_manager is not None:
-            self._run_in_background(connection_manager.__aexit__(None, None, None), name="openai_realtime_stt_close")
+            close = connection_manager.__aexit__(None, None, None)
         elif connection is not None:
-            self._run_in_background(connection.close(), name="openai_realtime_stt_close")
+            close = connection.close()
+        else:
+            if release_slot is not None:
+                release_slot()
+            return
+        close_task = self._run_in_background(close, name="openai_realtime_stt_close")
+        if release_slot is not None:
+            # A done callback rather than a finally, so the slot is released even when the task is cancelled
+            # before it starts, as a drain that times out at shutdown may do
+            close_task.add_done_callback(lambda _: release_slot())
 
     async def _handle_audio_stop(self) -> bool:
         """Handle end of audio stream and perform transcription. Returns False to close a connection it failed on."""
@@ -1012,9 +1068,12 @@ class OpenAIEventHandler(AsyncEventHandler):
             if extra_body:
                 transcription_kwargs["extra_body"] = extra_body
 
-            # Held until the response, streamed or not, has been read; released in the finally below
+            # Held until the response, streamed or not, has been read, and not while the final events are written
+            # to a client that may be slow to take them; the finally below releases it on failure
             await self._acquire_stt_slot("http")
             transcription = await self._stt_client.audio.transcriptions.create(**transcription_kwargs)
+            if not isinstance(transcription, AsyncStream):
+                self._release_stt_slot("http")
 
             await self.write_event(TranscriptStart().event())
 
@@ -1030,6 +1089,8 @@ class OpenAIEventHandler(AsyncEventHandler):
                             await self.write_event(TranscriptChunk(text=full_text).event())
                     elif chunk.type == "transcript.text.done":
                         full_text = _final_transcript(chunk.text, full_text)
+                # The stream is read to its end, which closes the response
+                self._release_stt_slot("http")
                 if full_text:
                     _LOGGER.info("Successfully transcribed stream: %s", truncate_for_log(full_text))
                 else:
@@ -1407,9 +1468,9 @@ class OpenAIEventHandler(AsyncEventHandler):
         # Its failure is reported by whoever awaits it
         return self._track_task(coro, name=name, tasks=self._synthesis_tasks, log_failure=False)
 
-    def _run_in_background(self, coro: Any, *, name: str) -> None:
+    def _run_in_background(self, coro: Any, *, name: str) -> asyncio.Task[Any]:
         """Run cleanup that should not delay the audio stream; awaited when the client disconnects."""
-        self._track_task(coro, name=name, tasks=self._background_tasks, log_failure=True)
+        return self._track_task(coro, name=name, tasks=self._background_tasks, log_failure=True)
 
     async def _drain_background_tasks(self, timeout: float | None = None) -> None:
         """Wait for pending background cleanup; what a timeout leaves unfinished is cancelled."""
