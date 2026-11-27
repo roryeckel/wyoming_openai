@@ -743,11 +743,16 @@ async def _stop_container(proxy: Proxy) -> float:
 
     started = time.monotonic()
     stopping = asyncio.ensure_future(asyncio.to_thread(stop_container, proxy.container))
-    try:
-        await asyncio.shield(stopping)
-    except asyncio.CancelledError:
-        await asyncio.gather(stopping, return_exceptions=True)
-        raise
+    cancelled = False
+    while not stopping.done():
+        try:
+            await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            # Waited for through every cancellation, however many come
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    stopping.result()
     return time.monotonic() - started
 
 
@@ -868,20 +873,20 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
     await asyncio.to_thread(smoke.audio, CONVERSATION[0].phrase, VOICES[2])
     idle = await _exec_in(proxy, IDLE_STT_CLIENT, "30")
     freed: asyncio.Task[float] | None = None
-    queued: asyncio.Task[float] | None = None
     try:
         # Its session is open, and holds the only slot
         await _when_logged(proxy, REALTIME_RECORDING_LOG, recording_before, 20)
         assert _log_count(proxy, IDLE_LOG) == idle_before, "the silent client was failed before the satellite spoke"
         waits_before = _log_count(proxy, STT_WAIT_LOG)
         freed = asyncio.create_task(_when_logged(proxy, IDLE_LOG, idle_before, 30))
-        queued = asyncio.create_task(_when_logged(proxy, STT_WAIT_LOG, waits_before, 30))
         outcome = await _device_turn(smoke, "silent-client", proxy, CONVERSATION[0], VOICES[2])
         freed_at = await freed
-        queued_at = await queued
-        # The proxy logged the satellite's session waiting for the slot while the silent client held it
-        assert queued_at < freed_at, "the satellite's session did not wait for the slot the silent client held"
-        outcome.notes["queued_for_s"] = round(freed_at - queued_at, 2)
+        # In one snapshot of the log, the satellite's session waited for the slot before the idle limit freed it
+        lines = container_logs(proxy.container).splitlines()
+        waited_line = _nth_line(lines, lambda line: STT_WAIT_LOG in line, waits_before + 1)
+        freed_line = _nth_line(lines, lambda line: IDLE_LOG in line, idle_before + 1)
+        assert waited_line is not None and freed_line is not None, "the proxy's log misses a line"
+        assert waited_line < freed_line, "the satellite's session did not wait for the slot the silent client held"
         assert outcome.stt_end_at is not None, "Home Assistant reported no end of the STT stage"
         assert outcome.stt_end_at >= freed_at - LOG_POLL_SLACK, (
             f"the satellite was transcribed {freed_at - outcome.stt_end_at:.1f}s before the silent client's slot was "
@@ -891,7 +896,6 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
         outcome.notes["log"] = next(line for line in logs.splitlines()[::-1] if IDLE_LOG in line)[-120:]
     finally:
         await _reap(freed)
-        await _reap(queued)
         await _finish(idle)
 
 
