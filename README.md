@@ -498,7 +498,7 @@ docker run --rm -p 10300:10300 ghcr.io/roryeckel/wyoming_openai:pr-123
 
 1. **Start Services**: Run the appropriate Docker Compose command based on your deployment option.
 2. **Verify Deployment**: Ensure that all services are running by checking the logs with `docker compose logs -f` or accessing the Wyoming OpenAI proxy through its exposed port (e.g., 10300) to ensure it responds as expected.
-3. **Configuration Changes**: You can modify environment variables in the `.env` file or directly within your Docker Compose configuration files to adjust settings such as languages, models, and voices without rebuilding containers.
+3. **Configuration Changes**: Adjust settings such as languages, models, and voices in the `environment` of your Docker Compose file, and keep `.env` for secrets: a setting in `.env` that the compose file also sets is ignored. Run the same `docker compose ... up -d` command again to apply the change; nothing needs rebuilding.
 
 ## Usage in Home Assistant
 
