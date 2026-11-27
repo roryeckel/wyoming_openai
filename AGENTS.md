@@ -61,12 +61,25 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 ## Pull Requests
 
 Every PR runs lint, tests, integration, Docker and CodeQL checks. The **Home
-Assistant E2E** suite (`.github/workflows/ha-e2e.yml`) is skipped unless the PR
-carries the `ha-e2e` label, so on an unlabeled PR a skipped `ha-e2e` check is
-not a pass. Before merging a PR that changes runtime behavior (anything under
-`src/`, the Docker or compose files), add the label with
-`gh pr edit <PR#> --add-label ha-e2e` and wait for that run to pass; a
-docs-only or test-only PR doesn't need it. It can also be run manually with
+Assistant E2E** suite (`.github/workflows/ha-e2e.yml`) only runs on a PR with
+the `ha-e2e` label; without it the check shows as skipped, which is not a pass.
+
+Add the label (`gh pr edit <PR#> --add-label ha-e2e`) and wait for a passing
+run before merging when a change could alter what Home Assistant sees over the
+Wyoming connection, or when it sees it:
+
+- which events are sent, their order or their content (`info`, transcripts,
+  audio, errors), including new event types the handler answers
+- when a connection is closed, or how a failure is reported
+- the timing of a request: waiting, queuing, timeouts, concurrency limits,
+  streaming versus buffering
+- audio format handling or conversion
+- startup, the Docker image or compose files
+
+The label is usually not needed for docs, tests, logging, CLI parsing or
+validation that doesn't change behavior, refactors the unit tests cover,
+or request fields sent only to a backend. When unsure, label it: the run
+costs a few minutes. It can also be started by hand with
 `gh workflow run ha-e2e.yml --ref <branch>`.
 
 ## Releases
