@@ -18,8 +18,11 @@ from websockets.asyncio.client import ClientConnection, connect
 
 from .const import (
     HASS_CHANGE_DEBOUNCE_SECONDS,
+    HASS_CHANGE_MAX_WAIT_SECONDS,
+    HASS_CLOSE_TIMEOUT,
     HASS_NAME_EVENTS,
     HASS_PRIORITY_DOMAINS,
+    HASS_REFRESH_SECONDS,
     HASS_REQUEST_TIMEOUT,
     HASS_RETRY_SECONDS,
 )
@@ -27,14 +30,25 @@ from .utilities import NameGroup, clean_name
 
 _LOGGER = logging.getLogger(__name__)
 
+# Paths a Home Assistant URL can already end in, such as the REST API URL wyoming-faster-whisper's --hass-api takes
+_HASS_API_PATHS = ("/api/websocket", "/api")
+
 
 class HomeAssistantError(Exception):
     """Raised when the names cannot be read from Home Assistant."""
 
 
+class HomeAssistantAuthError(HomeAssistantError):
+    """
+    Raised when Home Assistant rejects the access token. Home Assistant counts each attempt as a failed login, which
+    it reports and can answer by banning the address, so a rejected token is not tried again.
+    """
+
+
 def hass_websocket_url(url: str) -> str:
     """
-    The websocket API URL of a Home Assistant instance at a URL such as http://homeassistant.local:8123.
+    The websocket API URL of a Home Assistant instance at a URL such as http://homeassistant.local:8123. A URL that
+    already ends in /api or /api/websocket is taken for the same instance.
 
     Raises:
         ValueError: When the URL is not an http or https URL with a host.
@@ -45,7 +59,12 @@ def hass_websocket_url(url: str) -> str:
             f"Home Assistant URL must be an http or https URL such as http://homeassistant.local:8123, got '{url}'"
         )
     scheme = "wss" if parts.scheme == "https" else "ws"
-    return urlunsplit((scheme, parts.netloc, f"{parts.path.rstrip('/')}/api/websocket", "", ""))
+    path = parts.path.rstrip("/")
+    for api_path in _HASS_API_PATHS:
+        if path.endswith(api_path):
+            path = path.removesuffix(api_path)
+            break
+    return urlunsplit((scheme, parts.netloc, f"{path}/api/websocket", "", ""))
 
 
 def parse_hass_names(
@@ -61,18 +80,22 @@ def parse_hass_names(
     prompt:
 
     1. Areas and floors that hold an exposed entity
-    2. Entities in HASS_PRIORITY_DOMAINS, which spoken commands usually control
+    2. Entities in HASS_PRIORITY_DOMAINS, which spoken commands usually control, with the domains taking turns: the
+       first entity of each domain, then the second of each, and so on
     3. Areas and floors without an exposed entity
     4. Every other exposed entity, mostly sensors
+    5. Entities that are unavailable, so they are the first left out of a prompt that runs out of room
 
-    A reply that does not have this shape raises, and fetch_names reports it as a failure.
+    A reply that does not have this shape raises, and HomeAssistantNames reports it as a failure.
     """
     friendly_names = {state["entity_id"]: state["attributes"].get("friendly_name") for state in states}
+    unavailable_ids = {state["entity_id"] for state in states if state.get("state") == "unavailable"}
     device_areas = {device["id"]: device.get("area_id") for device in devices}
 
     used_area_ids: set[str] = set()
-    priority_entities: list[NameGroup] = []
+    priority_entities: dict[str, list[NameGroup]] = {}  # By domain, in the order of the entity ids
     other_entities: list[NameGroup] = []
+    unavailable_entities: list[NameGroup] = []
     for entity_id in exposed_ids:
         # An entity that is not in the entity registry, such as one set up in YAML without a unique id, has no entry
         entry = entity_entries.get(entity_id) or {}
@@ -88,10 +111,16 @@ def parse_hass_names(
             or clean_name(entry.get("name"))
             or clean_name(entry.get("original_name"))
         )
-        if name is not None:
-            domain = entity_id.split(".", 1)[0]
-            target = priority_entities if domain in HASS_PRIORITY_DOMAINS else other_entities
-            target.append(_name_group(name, entry.get("aliases")))
+        if name is None:
+            continue
+        group = _name_group(name, entry.get("aliases"))
+        domain = entity_id.split(".", 1)[0]
+        if entity_id in unavailable_ids:
+            unavailable_entities.append(group)
+        elif domain in HASS_PRIORITY_DOMAINS:
+            priority_entities.setdefault(domain, []).append(group)
+        else:
+            other_entities.append(group)
 
     used_floor_ids: set[str] = set()
     used_areas: list[NameGroup] = []
@@ -109,7 +138,13 @@ def parse_hass_names(
         target = used_areas if floor["floor_id"] in used_floor_ids else empty_areas
         target.append(_name_group(name, floor.get("aliases")))
 
-    return (*used_areas, *priority_entities, *empty_areas, *other_entities)
+    return (*used_areas, *_take_turns(priority_entities), *empty_areas, *other_entities, *unavailable_entities)
+
+
+def _take_turns(groups_by_domain: dict[str, list[NameGroup]]) -> list[NameGroup]:
+    """The groups of every domain in turn: the first of each domain, then the second of each, and so on."""
+    turns = itertools.zip_longest(*groups_by_domain.values())
+    return [group for turn in turns for group in turn if group is not None]
 
 
 def _name_group(name: str, aliases: Iterable[object] | None) -> NameGroup:
@@ -123,9 +158,10 @@ class HomeAssistantNames:
     The names Home Assistant exposes to Assist, kept current over one websocket connection shared by every Wyoming
     connection.
 
-    The names are read when the connection opens, and again whenever the entity, device, area or floor registry
-    changes, which includes exposing an entity to Assist or hiding it. A connection that fails or closes is opened
-    again after a while; meanwhile the names read before are used, or none when none were ever read.
+    The names are read when the connection opens, again whenever the entity, device, area or floor registry changes,
+    which includes exposing an entity to Assist or hiding it, and again every refresh_seconds for changes no registry
+    event reports. A connection that fails or closes is opened again after a while; meanwhile the names read before
+    are used, or none when none were ever read. A rejected access token is not tried again.
     """
 
     def __init__(
@@ -136,6 +172,8 @@ class HomeAssistantNames:
         request_timeout: float = HASS_REQUEST_TIMEOUT,
         retry_seconds: float = HASS_RETRY_SECONDS,
         debounce_seconds: float = HASS_CHANGE_DEBOUNCE_SECONDS,
+        max_wait_seconds: float = HASS_CHANGE_MAX_WAIT_SECONDS,
+        refresh_seconds: float = HASS_REFRESH_SECONDS,
     ) -> None:
         """
         Raises:
@@ -146,6 +184,8 @@ class HomeAssistantNames:
         self._request_timeout = request_timeout
         self._retry_seconds = retry_seconds
         self._debounce_seconds = debounce_seconds
+        self._max_wait_seconds = max_wait_seconds
+        self._refresh_seconds = refresh_seconds
         self._names: tuple[NameGroup, ...] = ()
         self._task: asyncio.Task[None] | None = None
 
@@ -171,16 +211,44 @@ class HomeAssistantNames:
         failing = False
         while True:
             try:
-                async with connect(self.websocket_url, max_size=None, open_timeout=self._request_timeout) as websocket:
-                    async for names in _Session(websocket, self._token, self._request_timeout, self._debounce_seconds):
-                        if failing:
-                            _LOGGER.info("Reading names from Home Assistant works again")
-                            failing = False
-                        if names != self._names:
-                            # The first names read are worth seeing in the log; later changes only when debugging
-                            level = logging.INFO if not self._names else logging.DEBUG
-                            _LOGGER.log(level, "Read %d names from Home Assistant", sum(len(group) for group in names))
+                async with connect(
+                    self.websocket_url,
+                    max_size=None,
+                    open_timeout=self._request_timeout,
+                    close_timeout=HASS_CLOSE_TIMEOUT,
+                    # Home Assistant is usually on the local network: a proxy set in the environment for the STT and TTS
+                    # APIs would get the access token, or fail to reach Home Assistant at all
+                    proxy=None,
+                ) as websocket:
+                    session = _Session(
+                        websocket,
+                        self._token,
+                        request_timeout=self._request_timeout,
+                        debounce_seconds=self._debounce_seconds,
+                        max_wait_seconds=self._max_wait_seconds,
+                        refresh_seconds=self._refresh_seconds,
+                    )
+                    first = True
+                    async for names in session:
+                        # The first read of each connection is worth seeing in the log, even when it finds no names or
+                        # the ones read before; later reads only when debugging, and only when the names changed
+                        if first or names != self._names:
+                            _LOGGER.log(
+                                logging.INFO if first else logging.DEBUG,
+                                "Read %d names from Home Assistant",
+                                sum(len(group) for group in names),
+                            )
+                        first = failing = False
                         self._names = names
+            except HomeAssistantAuthError as err:
+                _LOGGER.error(
+                    "%s. Not connecting to Home Assistant at %s again, since each attempt counts as a failed login; "
+                    "using %s until the token is fixed and the server restarted",
+                    err,
+                    self.websocket_url,
+                    "the names read before" if self._names else "no Home Assistant names",
+                )
+                return
             except Exception as err:
                 # Logged as a warning once per outage
                 _LOGGER.log(
@@ -218,15 +286,26 @@ def _changes_names(event: dict[str, Any]) -> bool:
 class _Session:
     """
     One websocket connection to Home Assistant, iterated for the names: once it opens, then each time the registries
-    change. A single reader takes every message in order: command results, and the registry change events it
-    subscribes to, which mark the names as changed.
+    change, and every refresh_seconds without a change. A single reader takes every message in order: command
+    results, and the registry change events it subscribes to, which mark the names as changed.
     """
 
-    def __init__(self, websocket: ClientConnection, token: str, request_timeout: float, debounce_seconds: float):
+    def __init__(
+        self,
+        websocket: ClientConnection,
+        token: str,
+        *,
+        request_timeout: float,
+        debounce_seconds: float,
+        max_wait_seconds: float,
+        refresh_seconds: float,
+    ):
         self._websocket = websocket
         self._token = token
         self._request_timeout = request_timeout
         self._debounce_seconds = debounce_seconds
+        self._max_wait_seconds = max_wait_seconds
+        self._refresh_seconds = refresh_seconds
         self._message_ids = itertools.count(1)
         self._changed = False
 
@@ -240,13 +319,30 @@ class _Session:
             async with asyncio.timeout(self._request_timeout):
                 names = await self._read_names()
             yield names
-            if not self._changed:
+            # A change that arrived during the read, or one within refresh_seconds, is read once the burst it is part of
+            # ends; without one, the names are read again anyway
+            if self._changed or await self._wait_for_change(self._refresh_seconds):
+                await self._settle()
+
+    async def _wait_for_change(self, timeout: float) -> bool:
+        """Wait up to timeout seconds for a registry change that can change the names, and return whether one came."""
+        try:
+            async with asyncio.timeout(timeout):
                 await self._receive_event()
-            # A change usually comes as several events, such as a new entity and then its exposure; read once they stop
-            with contextlib.suppress(TimeoutError):
-                while True:
-                    async with asyncio.timeout(self._debounce_seconds):
-                        await self._receive_event()
+        except TimeoutError:
+            return False
+        return True
+
+    async def _settle(self) -> None:
+        """
+        Wait for a burst of changes to end, such as a new entity and then its exposure: until debounce_seconds pass
+        without another change, or max_wait_seconds pass in all, so a steady stream of changes cannot put off the read.
+        """
+        deadline = asyncio.get_running_loop().time() + self._max_wait_seconds
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout_at(deadline):
+                while await self._wait_for_change(self._debounce_seconds):
+                    pass
 
     async def _receive(self) -> dict[str, Any]:
         message = json.loads(await self._websocket.recv())
@@ -264,8 +360,13 @@ class _Session:
         if (message := await self._receive()).get("type") != "auth_required":
             raise HomeAssistantError(f"Expected auth_required from Home Assistant, got {message.get('type')}")
         await self._websocket.send(json.dumps({"type": "auth", "access_token": self._token}))
-        if (message := await self._receive()).get("type") != "auth_ok":
-            raise HomeAssistantError(f"Home Assistant rejected the access token: {message.get('message', message)}")
+        message = await self._receive()
+        if message.get("type") == "auth_invalid":
+            raise HomeAssistantAuthError(
+                f"Home Assistant rejected the access token: {message.get('message', 'no reason given')}"
+            )
+        if message.get("type") != "auth_ok":
+            raise HomeAssistantError(f"Expected auth_ok from Home Assistant, got {message.get('type')}")
 
     async def _command(self, command_type: str, **fields: Any) -> Any:
         message_id = next(self._message_ids)

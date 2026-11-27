@@ -1278,15 +1278,15 @@ async def _capture_hass_settings(monkeypatch, *cli_args):
     started = []
     monkeypatch.setattr(main_module.HomeAssistantNames, "start", lambda self: started.append(self))
     kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args)
-    return kwargs["stt_hass_names"], kwargs["stt_prompt_max_chars"], started
+    return kwargs["stt_hass_names"], kwargs["stt_prompt_max_tokens"], started
 
 
 @pytest.mark.asyncio
 async def test_main_leaves_home_assistant_names_off_without_a_token(monkeypatch):
-    names, max_chars, started = await _capture_hass_settings(monkeypatch)
+    names, max_tokens, started = await _capture_hass_settings(monkeypatch)
 
     assert names is None
-    assert max_chars == 500
+    assert max_tokens == 200
     assert started == []
 
 
@@ -1305,13 +1305,13 @@ async def test_main_connects_to_home_assistant_in_the_background(monkeypatch):
 async def test_main_reads_home_assistant_settings_from_env(monkeypatch):
     monkeypatch.setenv("STT_HASS_TOKEN", "env-token")
     monkeypatch.setenv("STT_HASS_URL", "https://ha.example.com")
-    monkeypatch.setenv("STT_PROMPT_MAX_CHARS", "300")
+    monkeypatch.setenv("STT_PROMPT_MAX_TOKENS", "150")
 
-    names, max_chars, _ = await _capture_hass_settings(monkeypatch)
+    names, max_tokens, _ = await _capture_hass_settings(monkeypatch)
 
     assert names._token == "env-token"
     assert names.websocket_url == "wss://ha.example.com/api/websocket"
-    assert max_chars == 300
+    assert max_tokens == 150
 
 
 @pytest.mark.asyncio
@@ -1320,7 +1320,8 @@ async def test_main_reads_home_assistant_settings_from_env(monkeypatch):
     [
         (["--stt-hass-token", "t", "--stt-hass-url", "ftp://ha"], "Home Assistant URL must be"),
         (["--stt-hass-token", "t"], "--stt-hass-url (STT_HASS_URL) is required"),
-        (["--stt-prompt-max-chars", "0"], "--stt-prompt-max-chars"),
+        (["--stt-prompt-max-tokens", "0"], "--stt-prompt-max-tokens"),
+        (["--stt-transcript-names", "maybe"], "--stt-transcript-names"),
     ],
 )
 async def test_main_rejects_invalid_home_assistant_settings(monkeypatch, capsys, cli_args, message):
@@ -1338,3 +1339,34 @@ async def test_main_warns_about_an_unused_home_assistant_token(monkeypatch, capl
     with caplog.at_level(logging.WARNING):
         await main()
     assert "Home Assistant token is set but unused" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cli_args", "env", "expected"),
+    [
+        # Off unless asked for, since a client's names would otherwise change the prompt without a config change
+        ([], None, False),
+        (["--stt-transcript-names"], None, True),
+        (["--stt-transcript-names", "false"], "true", False),
+        ([], "true", True),
+        ([], "0", False),
+    ],
+)
+async def test_main_reads_whether_to_use_transcript_names(monkeypatch, cli_args, env, expected):
+    if env is not None:
+        monkeypatch.setenv("STT_TRANSCRIPT_NAMES", env)
+
+    kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, *cli_args)
+
+    assert kwargs["stt_transcript_names"] is expected
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_an_invalid_transcript_names_environment_value(monkeypatch, capsys):
+    monkeypatch.setenv("STT_TRANSCRIPT_NAMES", "sometimes")
+    monkeypatch.setattr(sys, "argv", ["wyoming_openai", "--stt-models", "whisper-1"])
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+    assert exc_info.value.code == 2
+    assert "expected true or false, got 'sometimes'" in capsys.readouterr().err

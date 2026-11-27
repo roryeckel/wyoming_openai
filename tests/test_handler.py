@@ -47,6 +47,7 @@ from wyoming_openai.utilities import (
     decode_pcm_samples,
     downmix_pcm_samples,
     encode_pcm16_samples,
+    estimate_prompt_tokens,
 )
 from wyoming_openai.wav import TtsAudioFormat, WavFramer, parse_wav_header
 
@@ -7056,6 +7057,7 @@ async def test_transcribe_names_and_terms_come_before_home_assistant_names(enhan
     """Test transcript_names, then transcript_terms, are added ahead of the Home Assistant names, without repeats."""
     stt_client, _ = mock_clients
     mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._stt_transcript_names = True
     enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
     stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
 
@@ -7072,7 +7074,8 @@ async def test_transcribe_names_are_used_without_home_assistant(enhanced_handler
     """Test the names a client sends are added to the prompt without a Home Assistant token, within the budget."""
     stt_client, _ = mock_clients
     mock_info.asr[0].models[0].name = "whisper-1"
-    enhanced_handler._stt_prompt_max_chars = len("Test prompt. Ecobee.")
+    enhanced_handler._stt_transcript_names = True
+    enhanced_handler._stt_prompt_max_tokens = estimate_prompt_tokens("Test prompt. Ecobee.")
     stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
 
     transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee", "Rory"]}
@@ -7084,6 +7087,38 @@ async def test_transcribe_names_are_used_without_home_assistant(enhanced_handler
     assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "whisper-1"}))
     await _stream_audio(enhanced_handler)
     assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_names_are_ignored_unless_turned_on(enhanced_handler, mock_info, mock_clients, caplog):
+    """Test the names a client sends only reach the prompt with --stt-transcript-names."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
+
+    transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee"], "transcript_terms": ["HVAC"]}
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.handler"):
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data=transcribe))
+    await _stream_audio(enhanced_handler)
+
+    assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt"
+    assert "--stt-transcript-names is off" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_transcribe_during_the_recording_replaces_the_names(enhanced_handler, mock_info, mock_clients):
+    """Test a transcribe that arrives during a /v1/audio/transcriptions recording sends its own names with it."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._stt_transcript_names = True
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
+
+    assert await enhanced_handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "transcript_names": ["Ecobee"]})
+    )
+    await _stream_audio(enhanced_handler, transcribe={"name": "whisper-1", "transcript_names": ["Rory"]})
+
+    assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt. Rory."
 
 
 @pytest.mark.asyncio
@@ -7138,6 +7173,7 @@ async def test_realtime_session_adds_home_assistant_names(
 @pytest.mark.asyncio
 async def test_select_program_without_the_model_drops_the_transcribe_names(multi_program_handler):
     """Test the names of a transcribe go with its model and language when a program without that model is chosen."""
+    multi_program_handler._stt_transcript_names = True
     transcribe = {"name": "gpt-4o-transcribe", "transcript_names": ["Ecobee"]}
     assert await multi_program_handler.handle_event(Event(type="transcribe", data=transcribe))
     assert multi_program_handler._current_bias_names == (("Ecobee",),)

@@ -18,10 +18,12 @@ from wyoming_openai.utilities import (
     create_json_object_parser,
     decode_pcm_samples,
     downmix_pcm_samples,
+    estimate_prompt_tokens,
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     language_tags_match,
+    parse_bool,
     parse_finite_float,
     parse_non_negative_int,
     parse_voice_labels,
@@ -639,23 +641,74 @@ def test_realtime_converter_rejects_an_unsupported_pcm_format(width, channels):
 
 def test_build_prompt_puts_stt_prompt_first():
     groups = [("Kitchen",), ("Ecobee", "Thermostat")]
-    assert build_prompt("Smart home commands", groups, 500) == "Smart home commands. Kitchen, Ecobee, Thermostat."
-    assert build_prompt("Commands:", groups, 500) == "Commands: Kitchen, Ecobee, Thermostat."
-    assert build_prompt(None, groups, 500) == "Kitchen, Ecobee, Thermostat."
+    assert build_prompt("Smart home commands", groups, 200) == "Smart home commands. Kitchen, Ecobee, Thermostat."
+    assert build_prompt("Commands:", groups, 200) == "Commands: Kitchen, Ecobee, Thermostat."
+    assert build_prompt(None, groups, 200) == "Kitchen, Ecobee, Thermostat."
+
+
+@pytest.mark.parametrize("prefix", ["家庭命令。", "家庭命令！", "Befehle;"])
+def test_build_prompt_keeps_a_prefix_that_already_ends_a_sentence(prefix):
+    assert build_prompt(prefix, [("厨房",)], 200) == f"{prefix} 厨房."
 
 
 def test_build_prompt_skips_names_added_before():
-    groups = [("Kitchen",), ("kitchen", "Kitchen  Light"), ("KITCHEN",), (" ",)]
-    assert build_prompt(None, groups, 500) == "Kitchen, Kitchen Light."
+    groups = [("Kitchen",), ("kitchen", "Kitchen  Light"), ("KITCHEN",), (" ",), ("Lamp", "lamp")]
+    assert build_prompt(None, groups, 200) == "Kitchen, Kitchen Light, Lamp."
 
 
-def test_build_prompt_drops_whole_groups_that_do_not_fit():
-    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("Lamp",)]
-    # The group after Kitchen does not fit whole, and the shorter one after it is not tried
-    assert build_prompt(None, groups, len("Kitchen, Ecobee.")) == "Kitchen."
+def test_build_prompt_leaves_out_a_group_that_does_not_fit_and_goes_on():
+    # Kitchen costs 3 estimated tokens, Ecobee and Thermostat 7 together, and Lamp 2
+    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("Lamp",), ("Ecobee",)]
+    # The group after Kitchen does not fit whole, but the shorter ones after it do, even a name of the group left out
+    assert build_prompt(None, groups, 8) == "Kitchen, Lamp, Ecobee."
+    assert build_prompt(None, groups, 10) == "Kitchen, Ecobee, Thermostat."
 
 
 @pytest.mark.parametrize("prefix", ["A long prompt that does not leave room for any name ", None])
 def test_build_prompt_keeps_stt_prompt_as_given_when_no_names_fit(prefix):
-    assert build_prompt(prefix, [("Kitchen",)], 5) == prefix
-    assert build_prompt(prefix, [], 500) == prefix
+    assert build_prompt(prefix, [("Kitchen",)], 2) == prefix
+    assert build_prompt(prefix, [], 200) == prefix
+
+
+@pytest.mark.parametrize(
+    ("text", "tokens"),
+    [
+        ("Kitchen, Ecobee.", 6),
+        ("RT-AX82U-0F90", 9),
+        ("Smart home commands.", 6),
+        # A letter outside ASCII is a token of its own
+        ("Küche", 3),
+        ("Кухня", 5),
+        ("厨房, 客厅.", 6),
+        ("", 0),
+    ],
+)
+def test_estimate_prompt_tokens(text, tokens):
+    assert estimate_prompt_tokens(text) == tokens
+
+
+def test_build_prompt_counts_the_budget_in_tokens_for_any_script():
+    """Test a prompt of names in a script that takes a token per character stays within the budget."""
+    groups = [(f"卧室{number}",) for number in range(300)]
+    prompt = build_prompt("家庭命令。", groups, 200)
+    assert prompt is not None
+    assert estimate_prompt_tokens(prompt) <= 200
+    # A budget in characters would have let in far more than Whisper's 223 tokens
+    assert len(prompt) < 400
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        *[(value, True) for value in ("true", "Yes", " on ", "1")],
+        *[(value, False) for value in ("false", "NO", "off", "0")],
+    ],
+)
+def test_parse_bool(value, expected):
+    assert parse_bool(value) is expected
+
+
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_parse_bool_rejects_other_values(value):
+    with pytest.raises(argparse.ArgumentTypeError, match="expected true or false"):
+        parse_bool(value)

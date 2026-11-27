@@ -350,9 +350,11 @@ class SsmlTextTransformer:
 # A name followed by its aliases, kept together so a prompt that runs out of room drops whole entities or areas
 NameGroup = tuple[str, ...]
 
-# A prefix that already ends a sentence or a list is not given another period
-_PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?")
+# A prefix that already ends a sentence or a list, in ASCII or full-width punctuation, is not given another period
+_PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?", "。", "．", "：", "，", "、", "；", "！", "？")
 _WHITESPACE = re.compile(r"\s+")
+# The pieces a prompt is counted in: a word of ASCII letters, a number, or any other character on its own
+_PROMPT_TOKEN_PIECES = re.compile(r"(?P<word>[A-Za-z]+)|(?P<number>[0-9]+)|\S")
 
 
 def clean_name(name: object) -> str | None:
@@ -362,31 +364,57 @@ def clean_name(name: object) -> str | None:
     return _WHITESPACE.sub(" ", name).strip() or None
 
 
-def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_chars: int) -> str | None:
+def estimate_prompt_tokens(text: str) -> int:
     """
-    The STT prompt: the prefix (STT_PROMPT) first, then as many whole name groups as fit in max_chars, in the form
-    "<prefix>. Name1, Name2.". Names already added, compared case-insensitively, are skipped. The prefix is never
-    shortened, and when no names fit, or there are none, the prompt is the prefix exactly as given.
+    An estimate of how many tokens Whisper's tokenizer makes of a prompt, which errs high so a prompt within a budget
+    stays within Whisper's limit: a word of ASCII letters is a token per 4 letters, a number a token per 2 digits, and
+    any other character a token. A letter outside ASCII is a token of its own, so a word in a script such as Cyrillic
+    or Chinese counts at least as many tokens as Whisper makes of it, and usually more.
+    """
+    tokens = 0
+    for piece in _PROMPT_TOKEN_PIECES.finditer(text):
+        length = len(piece.group())
+        if piece.lastgroup == "word":
+            tokens += -(-length // 4)
+        elif piece.lastgroup == "number":
+            tokens += -(-length // 2)
+        else:
+            tokens += 1
+    return tokens
+
+
+def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: int) -> str | None:
+    """
+    The STT prompt: the prefix (STT_PROMPT) first, then the name groups that fit in max_tokens estimated tokens (see
+    estimate_prompt_tokens), in the form "<prefix>. Name1, Name2.". A group goes in whole or not at all; one that does
+    not fit is left out, and a later, shorter one can still take the room left. Names already added, compared
+    case-insensitively, are skipped. The prefix is never shortened, and when no names fit, or there are none, the
+    prompt is the prefix exactly as given.
     """
     head = (prefix or "").strip()
     if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
         head += "."
 
+    # The estimate of a joined prompt is the sum of its parts: each name adds its own tokens, and one for the ", " or
+    # the "." after it
+    tokens = estimate_prompt_tokens(head)
     seen: set[str] = set()
     chosen: list[str] = []
     for group in groups:
-        unique = []
+        unique: dict[str, str] = {}
         for name in group:
             cleaned = clean_name(name)
-            if cleaned is not None and cleaned.casefold() not in seen:
-                seen.add(cleaned.casefold())
-                unique.append(cleaned)
+            if cleaned is not None and (key := cleaned.casefold()) not in seen:
+                unique.setdefault(key, cleaned)
         if not unique:
             continue
-        if len(_join_prompt(head, [*chosen, *unique])) > max_chars:
-            # Greedy and in order, so the most useful names are kept and the prompt is the same for the same names
-            break
-        chosen.extend(unique)
+        cost = sum(estimate_prompt_tokens(name) + 1 for name in unique.values())
+        if tokens + cost > max_tokens:
+            # In order, so the most useful names are kept and the prompt is the same for the same names
+            continue
+        tokens += cost
+        seen.update(unique)
+        chosen.extend(unique.values())
 
     if not chosen:
         return prefix
@@ -521,6 +549,25 @@ def parse_finite_float(value: str) -> float:
         raise argparse.ArgumentTypeError(f"expected a finite number, got {number}")
 
     return number
+
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def parse_bool(value: str) -> bool:
+    """
+    Parse an argparse value that must be true or false: true, yes, on or 1, or false, no, off or 0, in any case.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is none of these.
+    """
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got '{value}'")
 
 
 def parse_positive_int(value: str) -> int:

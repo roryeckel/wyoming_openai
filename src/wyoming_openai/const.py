@@ -59,12 +59,18 @@ OPENAI_SPEECH_ONLY_TTS_VOICES = tuple(
 )
 
 # Biasing STT toward names: those a client sends with transcribe, and those Home Assistant exposes to Assist.
-# Whisper keeps at most 224 prompt tokens and drops the start of a longer prompt, which holds STT_PROMPT; 500
-# characters stay below that in English and most other languages written in the Latin alphabet
-DEFAULT_STT_PROMPT_MAX_CHARS = 500
+# Whisper keeps at most 223 prompt tokens and drops the start of a longer prompt, which holds STT_PROMPT and the most
+# useful names. The budget is in estimated tokens (see utilities.estimate_prompt_tokens), which overcount, so a prompt
+# within it stays within Whisper's limit in any script; wyoming-faster-whisper uses the same 200-token default
+DEFAULT_STT_PROMPT_MAX_TOKENS = 200
 HASS_REQUEST_TIMEOUT = 10.0  # Seconds to connect to Home Assistant, or to read the names from it
+HASS_CLOSE_TIMEOUT = 2.0  # Seconds to wait for Home Assistant to close the websocket, so it cannot hold up shutdown
 HASS_RETRY_SECONDS = 30.0  # Seconds before connecting to Home Assistant again after the connection failed
 HASS_CHANGE_DEBOUNCE_SECONDS = 1.0  # Seconds without another registry change before the names are read again
+HASS_CHANGE_MAX_WAIT_SECONDS = 10.0  # Longest a burst of registry changes can put off reading the names again
+# Seconds after which the names are read again without a registry change, for what no registry event reports: the
+# state that makes an entity unavailable, a name set by an integration or customize, or an entity outside the registry
+HASS_REFRESH_SECONDS = 300.0
 # The registry events that can change the names, with the fields whose update can, or None when any change can. An
 # entity's exposure to Assist is kept in its options; a device's name is part of its entities' displayed names
 HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
@@ -85,7 +91,8 @@ HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
     "area_registry_updated": None,
     "floor_registry_updated": None,
 }
-# Entities in these domains are named first, since they are the ones spoken commands control
+# Entities in these domains are named first, since they are the ones spoken commands control; the domains take turns,
+# so a home with many lights still gets its locks, switches and scenes into a short prompt
 HASS_PRIORITY_DOMAINS = frozenset(
     {"light", "switch", "fan", "media_player", "climate", "scene", "todo", "cover", "lock"}
 )

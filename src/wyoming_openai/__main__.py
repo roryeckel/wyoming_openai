@@ -24,7 +24,7 @@ from .const import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
     DEFAULT_OPENAI_BASE_URL,
-    DEFAULT_STT_PROMPT_MAX_CHARS,
+    DEFAULT_STT_PROMPT_MAX_TOKENS,
     REALTIME_TTS_MAX_SPEED,
     REALTIME_TTS_MIN_SPEED,
     __version__,
@@ -36,6 +36,7 @@ from .utilities import (
     create_enum_parser,
     create_json_object_parser,
     get_realtime_tts_speed,
+    parse_bool,
     parse_finite_float,
     parse_non_negative_int,
     parse_positive_int,
@@ -180,13 +181,24 @@ async def main():
     )
     parser.add_argument("--stt-prompt", default=os.getenv("STT_PROMPT", None), help="Optional prompt for STT requests")
     parser.add_argument(
-        "--stt-prompt-max-chars",
+        "--stt-prompt-max-tokens",
         type=parse_positive_int,
-        default=env_default("STT_PROMPT_MAX_CHARS") or DEFAULT_STT_PROMPT_MAX_CHARS,
+        default=env_default("STT_PROMPT_MAX_TOKENS") or DEFAULT_STT_PROMPT_MAX_TOKENS,
         help=(
-            "Length in characters the names sent with transcribe and read from Home Assistant may bring the STT "
-            "prompt to; names that do not fit are left out, while --stt-prompt is always kept whole "
-            f"(default: {DEFAULT_STT_PROMPT_MAX_CHARS})"
+            "Estimated tokens the names sent with transcribe and read from Home Assistant may bring the STT prompt "
+            "to; names that do not fit are left out, while --stt-prompt is always kept whole. The estimate errs high, "
+            f"so the prompt stays within Whisper's 223 tokens (default: {DEFAULT_STT_PROMPT_MAX_TOKENS})"
+        ),
+    )
+    parser.add_argument(
+        "--stt-transcript-names",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=env_default("STT_TRANSCRIPT_NAMES") or False,
+        help=(
+            "Add the transcript_names, then transcript_terms, a Wyoming client sends with transcribe to the STT "
+            "prompt (default: false)"
         ),
     )
     parser.add_argument(
@@ -598,7 +610,8 @@ async def main():
                 tts_instructions=args.tts_instructions,
                 stt_prompt=args.stt_prompt,
                 stt_hass_names=hass_names,
-                stt_prompt_max_chars=args.stt_prompt_max_chars,
+                stt_transcript_names=args.stt_transcript_names,
+                stt_prompt_max_tokens=args.stt_prompt_max_tokens,
                 stt_extra_body=args.stt_extra_body,
                 stt_realtime_models=args.stt_realtime_models,
                 stt_realtime_extra_body=args.stt_realtime_extra_body,

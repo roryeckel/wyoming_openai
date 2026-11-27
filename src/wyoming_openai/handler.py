@@ -37,7 +37,7 @@ from .compatibility import CustomAsyncOpenAI, OpenAIBackend, TtsVoiceModel, pars
 from .const import (
     DEFAULT_AUDIO_CHANNELS,
     DEFAULT_AUDIO_WIDTH,
-    DEFAULT_STT_PROMPT_MAX_CHARS,
+    DEFAULT_STT_PROMPT_MAX_TOKENS,
     OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES,
     OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES,
     REALTIME_AUDIO_FORMAT,
@@ -221,7 +221,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         stt_temperature: float | None = None,
         stt_prompt: str | None = None,
         stt_hass_names: HomeAssistantNames | None = None,
-        stt_prompt_max_chars: int = DEFAULT_STT_PROMPT_MAX_CHARS,
+        stt_transcript_names: bool = False,
+        stt_prompt_max_tokens: int = DEFAULT_STT_PROMPT_MAX_TOKENS,
         stt_extra_body: dict[str, object] | None = None,
         stt_realtime_models: list[str] | set[str] | None = None,
         stt_realtime_extra_body: dict[str, object] | None = None,
@@ -248,8 +249,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             stt_hass_names (HomeAssistantNames | None): Names read from Home Assistant, added to the STT prompt
                 after stt_prompt and the names sent with transcribe. They are shared by every connection and owned by
                 the caller.
-            stt_prompt_max_chars (int): The length the names may bring the STT prompt to; stt_prompt is never
-                shortened.
+            stt_transcript_names (bool): Whether the transcript_names, then transcript_terms, a client sends with
+                transcribe are added to the STT prompt after stt_prompt, ahead of the Home Assistant names.
+            stt_prompt_max_tokens (int): The estimated tokens the names may bring the STT prompt to; stt_prompt is
+                never shortened.
             stt_extra_body (dict[str, object] | None): Optional JSON body fields merged into STT requests.
             stt_realtime_models (list[str] | set[str] | None): STT models that use OpenAI Realtime transcription.
             stt_realtime_extra_body (dict[str, object] | None): Optional fields merged into Realtime
@@ -277,7 +280,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         self._stt_temperature = stt_temperature
         self._stt_prompt = stt_prompt
         self._hass_names = stt_hass_names
-        self._stt_prompt_max_chars = stt_prompt_max_chars
+        self._stt_transcript_names = stt_transcript_names
+        self._stt_prompt_max_tokens = stt_prompt_max_tokens
         self._stt_extra_body = dict(stt_extra_body) if stt_extra_body else None
         self._stt_realtime_extra_body = dict(stt_realtime_extra_body) if stt_realtime_extra_body else None
         self._stt_realtime_models = set(stt_realtime_models or self._get_asr_program_model_names("openai-realtime"))
@@ -497,14 +501,7 @@ class OpenAIEventHandler(AsyncEventHandler):
 
         self._current_asr_model = None
         self._current_language = None
-        # Names bias the transcription through the STT prompt, ahead of the terms and the Home Assistant names
-        self._current_bias_names = tuple(
-            (name,)
-            for field in (transcribe.transcript_names, transcribe.transcript_terms)
-            if isinstance(field, list)
-            for name in field
-            if isinstance(name, str)
-        )
+        self._current_bias_names = self._get_transcribe_bias_names(transcribe)
         self._transcribe_rejected = True
 
         if requested_model:
@@ -526,6 +523,23 @@ class OpenAIEventHandler(AsyncEventHandler):
         if abandoned_stream is None or not abandoned_stream.failed:
             await self._report_stt_failure()
         return False
+
+    def _get_transcribe_bias_names(self, transcribe: Transcribe) -> tuple[NameGroup, ...]:
+        """
+        The transcript_names, then transcript_terms, of a transcribe, for the STT prompt, ahead of the Home Assistant
+        names. Off unless --stt-transcript-names is set: a backend that takes no prompt, or a model that writes the
+        prompt's names into the transcript of silence, would otherwise change with the client rather than this config.
+        """
+        fields = (transcribe.transcript_names, transcribe.transcript_terms)
+        if not self._stt_transcript_names:
+            if any(fields):
+                _LOGGER.debug(
+                    "Ignoring Transcribe fields transcript_names and transcript_terms: --stt-transcript-names is off"
+                )
+            return ()
+        return tuple(
+            (name,) for field in fields if isinstance(field, list) for name in field if isinstance(name, str)
+        )
 
     def _apply_transcribe_to_audio_stream(
         self, audio_stream: _AudioStreamState, model: AsrModel, language: str | None
@@ -824,7 +838,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 _LOGGER.debug("Leaving out the STT prompt: %s does not support one", model.name)
             return None
         groups = audio_stream.bias_names + hass_names
-        prompt = build_prompt(self._stt_prompt, groups, self._stt_prompt_max_chars)
+        prompt = build_prompt(self._stt_prompt, groups, self._stt_prompt_max_tokens)
         if groups:
             _LOGGER.debug("STT prompt: %s", prompt)
         return prompt
