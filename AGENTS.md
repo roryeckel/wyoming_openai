@@ -101,6 +101,7 @@ creates the draft release. Publishing that draft fires PyPI and Docker
 - **`__main__.py`**: Entry point with argument parsing and server initialization
 - **`utilities.py`**: Helper functions for audio processing and data handling
 - **`wav.py`**: WAV header parsing and `WavFramer`, which turns TTS response bytes into PCM
+- **`concurrency.py`**: `ConcurrencyLimit`, the STT (server-wide) and TTS (per connection) request limits
 - **`const.py`**: Version constants and configuration
 
 ### Key Architecture Patterns
@@ -142,5 +143,6 @@ Tests are organized by module:
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
 - `test_wav.py`: WAV header parsing and framing
+- `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios

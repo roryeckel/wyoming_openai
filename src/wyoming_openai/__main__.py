@@ -20,6 +20,7 @@ from .compatibility import (
     tts_voice_to_string,
     uses_openai_realtime_voices,
 )
+from .concurrency import ConcurrencyLimit
 from .const import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
@@ -207,7 +208,7 @@ async def main():
         default=env_default("STT_CONCURRENT_REQUESTS"),
         help=(
             "Maximum number of STT requests in flight at once across all connections; further requests wait for a "
-            "free slot. A Realtime session holds its slot from audio-start until it closes "
+            "free slot. A Realtime session holds its slot from audio-start until it ends "
             f"(default: {STT_CONCURRENT_REQUESTS}, no limit; 0 means no limit)"
         ),
     )
@@ -577,8 +578,8 @@ async def main():
         )
 
         # One limit for the whole server, so it is shared by the handler of every connection
-        stt_semaphore = asyncio.Semaphore(stt_concurrent_requests) if stt_concurrent_requests else None
-        if stt_semaphore is not None and asr_programs:
+        stt_limit = ConcurrencyLimit(stt_concurrent_requests, name="STT request")
+        if stt_concurrent_requests and asr_programs:
             _logger.info("Limiting STT to %d concurrent requests", stt_concurrent_requests)
 
         # Create Wyoming server
@@ -605,7 +606,7 @@ async def main():
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
                 tts_concurrent_requests=tts_concurrent_requests,
-                stt_semaphore=stt_semaphore,
+                stt_limit=stt_limit,
             )
         )
 

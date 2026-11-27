@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import sys
@@ -11,6 +10,7 @@ from conftest import WYOMING_CONFIG_ENV_PREFIXES
 import wyoming_openai.__main__ as main_module
 from wyoming_openai.__main__ import main
 from wyoming_openai.compatibility import create_tts_voices
+from wyoming_openai.concurrency import ConcurrencyLimit
 from wyoming_openai.const import DEFAULT_LOG_BACKUP_COUNT, DEFAULT_LOG_MAX_BYTES
 
 
@@ -1185,7 +1185,7 @@ async def test_main_leaves_stt_requests_unlimited_by_default(monkeypatch, env_va
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
 
-    assert handler_kwargs["stt_semaphore"] is None
+    assert handler_kwargs["stt_limit"].limit == 0
 
 
 @pytest.mark.asyncio
@@ -1194,9 +1194,9 @@ async def test_main_reads_stt_concurrent_requests_from_env(monkeypatch):
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch)
 
-    semaphore = handler_kwargs["stt_semaphore"]
-    assert isinstance(semaphore, asyncio.Semaphore)
-    assert semaphore._value == 2
+    stt_limit = handler_kwargs["stt_limit"]
+    assert isinstance(stt_limit, ConcurrencyLimit)
+    assert stt_limit.limit == 2
 
 
 @pytest.mark.asyncio
@@ -1205,7 +1205,7 @@ async def test_main_cli_stt_concurrent_requests_overrides_env(monkeypatch):
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--stt-concurrent-requests", "1")
 
-    assert handler_kwargs["stt_semaphore"]._value == 1
+    assert handler_kwargs["stt_limit"].limit == 1
 
 
 @pytest.mark.asyncio
@@ -1214,7 +1214,7 @@ async def test_main_cli_stt_concurrent_requests_zero_overrides_env_limit(monkeyp
 
     handler_kwargs = await _run_main_and_capture_handler_kwargs(monkeypatch, "--stt-concurrent-requests", "0")
 
-    assert handler_kwargs["stt_semaphore"] is None
+    assert handler_kwargs["stt_limit"].limit == 0
 
 
 @pytest.mark.asyncio

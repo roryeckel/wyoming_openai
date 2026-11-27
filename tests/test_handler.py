@@ -35,6 +35,7 @@ from wyoming_openai.compatibility import (
     create_tts_programs,
     create_tts_voices,
 )
+from wyoming_openai.concurrency import ConcurrencyLimit
 from wyoming_openai.handler import (
     SHUTDOWN_ERROR,
     STT_FAILED_ERROR,
@@ -317,17 +318,21 @@ async def test_shared_clients_remain_usable_after_handler_stop(dummy_info, dummy
     mock_transcription.text = "Shared client transcription"
     stt_client.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
 
-    handler = OpenAIEventHandler(
-        dummy_reader_writer[0],
-        dummy_reader_writer[1],
-        info=dummy_info,
-        stt_client=stt_client,
-        tts_client=tts_client,
-    )
-    handler.write_event = AsyncMock()
+    def new_handler():
+        handler = OpenAIEventHandler(
+            dummy_reader_writer[0],
+            dummy_reader_writer[1],
+            info=dummy_info,
+            stt_client=stt_client,
+            tts_client=tts_client,
+        )
+        handler.write_event = AsyncMock()
+        return handler
 
-    await handler.stop()
+    await new_handler().stop()
 
+    # The handler of the next connection transcribes with the clients the stopped one shared
+    handler = new_handler()
     transcribe_event = Event(type="transcribe", data={"language": "en", "name": "m1"})
     assert await handler.handle_event(transcribe_event) is True
 
@@ -1346,25 +1351,35 @@ class TestOpenAIEventHandlerComprehensive:
         assert [Error.from_event(event).text for event in written] == ([SHUTDOWN_ERROR] if teardown == "stop" else [])
 
     @pytest.mark.asyncio
-    async def test_stop_leaves_the_recording_to_an_audio_stop_in_progress(self, enhanced_handler, mock_clients):
-        """A server stopping while a recording is being sent does not close the file under the upload."""
-        from openai.types.audio.transcription import Transcription
-
+    async def test_stop_cancels_an_upload_in_progress_before_closing_its_recording(
+        self, enhanced_handler, mock_clients
+    ):
+        """A server stopping while a recording is being sent cancels the upload, then closes the file, not before."""
         stt_client, _ = mock_clients
+        uploading = asyncio.Event()
+        upload = {}
 
-        async def stop_during_upload(**kwargs):
-            await enhanced_handler.stop()
-            assert not kwargs["file"].closed
-            return Transcription(text="Hello")
+        async def slow_upload(**kwargs):
+            upload["file"] = kwargs["file"]
+            uploading.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                upload["closed_when_cancelled"] = kwargs["file"].closed
+                raise
 
-        stt_client.audio.transcriptions.create = AsyncMock(side_effect=stop_during_upload)
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=slow_upload)
 
-        await _stream_audio(enhanced_handler)
+        request = asyncio.create_task(_stream_audio(enhanced_handler))
+        await asyncio.wait_for(uploading.wait(), timeout=1)
+        await enhanced_handler.stop()
+        await asyncio.wait_for(request, timeout=1)
 
-        stt_client.audio.transcriptions.create.assert_awaited_once()
-        # The client was told before the writer closed; what the upload writes after it no longer reaches it
-        first = enhanced_handler.write_event.call_args_list[0].args[0]
-        assert Error.from_event(first).text == SHUTDOWN_ERROR
+        assert upload["closed_when_cancelled"] is False
+        assert upload["file"].closed
+        # The client was told before the writer closed
+        written = [call.args[0] for call in enhanced_handler.write_event.call_args_list]
+        assert [Error.from_event(event).text for event in written] == [SHUTDOWN_ERROR]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2006,10 +2021,10 @@ class TestOpenAIEventHandlerComprehensive:
         assert "exception was never retrieved" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_stop_during_a_realtime_audio_stop_fails_the_transcription(
+    async def test_stop_during_a_realtime_audio_stop_cancels_the_transcription(
         self, enhanced_handler, mock_info, mock_clients, caplog
     ):
-        """A server shutdown while the transcript is awaited ends that audio stop as a failure, not a cancelled task."""
+        """A server shutdown while the transcript is awaited cancels that audio stop, which closes the connection."""
         stt_client, _ = mock_clients
         mock_info.asr[0].models[0].name = "gpt-realtime-whisper"
         enhanced_handler._stt_realtime_models = {"gpt-realtime-whisper"}
@@ -2025,7 +2040,7 @@ class TestOpenAIEventHandlerComprehensive:
         enhanced_handler.writer.close = Mock(side_effect=lambda: written.append("<closed>"))
 
         await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-        with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
+        with caplog.at_level(logging.INFO, logger="wyoming_openai.handler"):
             stopping = asyncio.create_task(enhanced_handler.handle_event(Event(type="audio-stop")))
             for _ in range(3):
                 await asyncio.sleep(0)
@@ -2033,8 +2048,9 @@ class TestOpenAIEventHandlerComprehensive:
             await enhanced_handler.stop()
             assert await stopping is False
 
-        assert "Realtime transcription session was closed" in caplog.text
-        # Told before the writer closes, and only once: the failed audio stop does not write after the close
+        assert "Cancelling the STT request in flight" in caplog.text
+        assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+        # Told before the writer closes, and only once: the cancelled audio stop writes nothing
         assert written == ["transcript-start", SHUTDOWN_ERROR, "<closed>"]
         await enhanced_handler._drain_background_tasks()
 
@@ -5175,13 +5191,13 @@ def test_init_rejects_negative_tts_concurrent_requests(dummy_info, dummy_clients
         )
 
 
-def _stt_limited_handler(info, stt_client, semaphore):
-    """A handler for one more connection of a server whose connections share the STT semaphore."""
+def _stt_limited_handler(info, stt_client, limit):
+    """A handler for one more connection of a server whose connections share the STT limit."""
     writer = MagicMock(name="writer")
     writer.wait_closed = AsyncMock()
     writer.transport = Mock()
     handler = OpenAIEventHandler(
-        MagicMock(name="reader"), writer, info=info, stt_client=stt_client, tts_client=None, stt_semaphore=semaphore
+        MagicMock(name="reader"), writer, info=info, stt_client=stt_client, tts_client=None, stt_limit=limit
     )
     handler.write_event = AsyncMock()
     return handler
@@ -5206,8 +5222,8 @@ def _written_transcripts(handler):
 
 
 @pytest.mark.asyncio
-async def test_stt_semaphore_limits_http_transcriptions_across_connections(mock_info, mock_clients):
-    """Connections sharing a one-slot semaphore send their recordings one at a time, and all are transcribed."""
+async def test_stt_limit_applies_to_http_transcriptions_across_connections(mock_info, mock_clients):
+    """Connections sharing a one-slot limit send their recordings one at a time, and all are transcribed."""
     from openai.types.audio.transcription import Transcription
 
     stt_client, _ = mock_clients
@@ -5224,8 +5240,8 @@ async def test_stt_semaphore_limits_http_transcriptions_across_connections(mock_
         return Transcription(text="Hello")
 
     stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
-    semaphore = asyncio.Semaphore(1)
-    handlers = [_stt_limited_handler(mock_info, stt_client, semaphore) for _ in range(3)]
+    limit = ConcurrencyLimit(1)
+    handlers = [_stt_limited_handler(mock_info, stt_client, limit) for _ in range(3)]
 
     tasks = [asyncio.create_task(_stream_audio(handler)) for handler in handlers]
     await _settle()
@@ -5237,11 +5253,11 @@ async def test_stt_semaphore_limits_http_transcriptions_across_connections(mock_
     assert peak == 1
     assert stt_client.audio.transcriptions.create.await_count == 3
     assert [_written_transcripts(handler) for handler in handlers] == [["Hello"]] * 3
-    assert not semaphore.locked()
+    assert not limit.full
 
 
 @pytest.mark.asyncio
-async def test_stt_semaphore_slot_is_released_when_an_http_transcription_fails(mock_info, mock_clients):
+async def test_stt_limit_slot_is_released_when_an_http_transcription_fails(mock_info, mock_clients):
     """A failed request frees its slot, so the next connection is not held up."""
     from openai.types.audio.transcription import Transcription
 
@@ -5249,16 +5265,73 @@ async def test_stt_semaphore_slot_is_released_when_an_http_transcription_fails(m
     stt_client.audio.transcriptions.create = AsyncMock(
         side_effect=[RuntimeError("backend down"), Transcription(text="Hi")]
     )
-    semaphore = asyncio.Semaphore(1)
-    failing, succeeding = (_stt_limited_handler(mock_info, stt_client, semaphore) for _ in range(2))
+    limit = ConcurrencyLimit(1)
+    failing, succeeding = (_stt_limited_handler(mock_info, stt_client, limit) for _ in range(2))
 
     await _stream_audio(failing)
-    assert not semaphore.locked()
+    assert not limit.full
     await asyncio.wait_for(_stream_audio(succeeding), timeout=1)
 
     assert "error" in _written_event_types(failing)
     assert _written_transcripts(succeeding) == ["Hi"]
-    assert not semaphore.locked()
+    assert not limit.full
+
+
+@pytest.mark.asyncio
+async def test_stt_limit_http_slot_is_released_before_the_error_is_written(mock_info, mock_clients):
+    """A failed request frees its slot even while a client is slow to take the error."""
+    stt_client, _ = mock_clients
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=RuntimeError("backend down"))
+    limit = ConcurrencyLimit(1)
+    handler = _stt_limited_handler(mock_info, stt_client, limit)
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if event.type == "error":
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    request = asyncio.create_task(_stream_audio(handler))
+    await _settle()
+    assert not request.done()
+    assert not limit.full
+
+    client_reads.set()
+    await asyncio.wait_for(request, timeout=1)
+    assert _written_event_types(handler) == ["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_stt_limit_http_slot_is_released_before_the_transcript_is_written(mock_info, mock_clients, streamed):
+    """A client slow to take the transcript does not hold the slot once the backend's response is read."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client, _ = mock_clients
+    stt_client.audio.transcriptions.create = AsyncMock(
+        return_value=_HiStream() if streamed else Transcription(text="Hi")
+    )
+    limit = ConcurrencyLimit(1)
+    handler = _stt_limited_handler(mock_info, stt_client, limit)
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if Transcript.is_type(event.type):
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    with patch("wyoming_openai.handler.AsyncStream", _HiStream):
+        request = asyncio.create_task(_stream_audio(handler))
+        await _settle()
+        assert not request.done()
+        assert not limit.full
+
+        client_reads.set()
+        await asyncio.wait_for(request, timeout=1)
+
+    assert _written_transcripts(handler) == ["Hi"]
 
 
 def _completing_realtime_connect(transcript="Hi"):
@@ -5272,22 +5345,30 @@ def _completing_realtime_connect(transcript="Hi"):
     return Mock(side_effect=connect)
 
 
+def _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, count):
+    """Handlers for `count` connections that transcribe over Realtime and share the STT limit."""
+    handlers = [_stt_limited_handler(mock_info, stt_client, limit) for _ in range(count)]
+    for handler in handlers:
+        handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    return handlers
+
+
+REALTIME_AUDIO_START = Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+
+
 @pytest.mark.asyncio
-async def test_stt_semaphore_holds_a_realtime_slot_from_audio_start_until_the_session_closes(
+async def test_stt_limit_holds_a_realtime_slot_from_audio_start_until_the_session_ends(
     enhanced_handler, mock_info, mock_clients
 ):
-    """A second Realtime stream opens its session only once the first one has closed."""
+    """A second Realtime stream opens its session only once the first one has ended."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     stt_client.realtime.connect = _completing_realtime_connect()
-    semaphore = asyncio.Semaphore(1)
-    first, second = (_stt_limited_handler(mock_info, stt_client, semaphore) for _ in range(2))
-    for handler in (first, second):
-        handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-    audio_start = Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+    limit = ConcurrencyLimit(1)
+    first, second = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 2)
 
-    await first.handle_event(audio_start)
-    assert semaphore.locked()
-    second_start = asyncio.create_task(second.handle_event(audio_start))
+    await first.handle_event(REALTIME_AUDIO_START)
+    assert limit.full
+    second_start = asyncio.create_task(second.handle_event(REALTIME_AUDIO_START))
     await _settle()
 
     assert stt_client.realtime.connect.call_count == 1
@@ -5300,65 +5381,43 @@ async def test_stt_semaphore_holds_a_realtime_slot_from_audio_start_until_the_se
     await asyncio.wait_for(second_start, timeout=1)
 
     assert stt_client.realtime.connect.call_count == 2
-    assert semaphore.locked()
+    assert limit.full
     assert await second.handle_event(Event(type="audio-stop"))
     assert _written_transcripts(first) == ["Hi"]
     assert _written_transcripts(second) == ["Hi"]
-    # Released once its websocket has closed, which happens in the background
-    await second._drain_background_tasks()
-    assert not semaphore.locked()
+    assert not limit.full
 
 
 @pytest.mark.asyncio
-async def test_stt_semaphore_realtime_slot_is_released_when_the_client_disconnects(
+async def test_stt_limit_realtime_slot_is_released_when_the_client_disconnects(
     enhanced_handler, mock_info, mock_clients
 ):
     """A Realtime stream the client never stops frees its slot when the connection goes away."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     stt_client.realtime.connect = _completing_realtime_connect()
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
 
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-    assert semaphore.locked()
+    await handler.handle_event(REALTIME_AUDIO_START)
+    assert limit.full
     await handler.disconnect()
 
-    assert not semaphore.locked()
+    assert not limit.full
 
 
 @pytest.mark.asyncio
-async def test_stt_semaphore_realtime_slot_is_released_when_the_session_cannot_open(
+async def test_stt_limit_realtime_slot_is_released_when_the_session_cannot_open(
     enhanced_handler, mock_info, mock_clients
 ):
     """A Realtime session that fails to open does not keep the slot it waited for."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     stt_client.realtime.connect = Mock(side_effect=RuntimeError("cannot connect"))
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
 
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    await handler.handle_event(REALTIME_AUDIO_START)
 
-    assert not semaphore.locked()
-
-
-@pytest.mark.asyncio
-async def test_realtime_cleanup_keeps_the_slot_of_an_http_request(mock_info, mock_clients):
-    """stop() cleans up Realtime state while an audio-stop may still be sending a recording, which keeps its slot."""
-    stt_client, _ = mock_clients
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-
-    await handler._acquire_stt_slot("http")
-    await handler._cleanup_realtime_transcription()
-    assert semaphore.locked()
-
-    handler._release_stt_slot("http")
-    handler._release_stt_slot("http")
-    assert not semaphore.locked()
-    # Released once, so a second release cannot raise the limit
-    assert semaphore._value == 1
+    assert not limit.full
 
 
 class _GatedCloseManager(_FakeRealtimeConnectionManager):
@@ -5374,10 +5433,10 @@ class _GatedCloseManager(_FakeRealtimeConnectionManager):
 
 
 @pytest.mark.asyncio
-async def test_stt_semaphore_realtime_slot_is_held_until_the_websocket_has_closed(
+async def test_stt_limit_realtime_slot_is_released_while_the_websocket_is_still_closing(
     enhanced_handler, mock_info, mock_clients
 ):
-    """The client gets its transcript without waiting for the close, but the next session waits for it."""
+    """As for Realtime TTS, the limit counts sessions in flight: the next one does not wait for the last close."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     gate = asyncio.Event()
 
@@ -5386,126 +5445,55 @@ async def test_stt_semaphore_realtime_slot_is_held_until_the_websocket_has_close
         return _GatedCloseManager(_FakeRealtimeConnection([completed]), gate)
 
     stt_client.realtime.connect = Mock(side_effect=connect)
-    semaphore = asyncio.Semaphore(1)
-    first, second = (_stt_limited_handler(mock_info, stt_client, semaphore) for _ in range(2))
-    for handler in (first, second):
-        handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-    audio_start = Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1})
+    limit = ConcurrencyLimit(1)
+    first, second = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 2)
 
-    await first.handle_event(audio_start)
+    await first.handle_event(REALTIME_AUDIO_START)
     assert await first.handle_event(Event(type="audio-stop"))
+    await _settle()
     assert _written_transcripts(first) == ["Hi"]
-    await _settle()
-    assert semaphore.locked()
+    assert first._background_tasks  # Its websocket is still closing
+    assert not limit.full
 
-    second_start = asyncio.create_task(second.handle_event(audio_start))
-    await _settle()
-    assert stt_client.realtime.connect.call_count == 1
-    assert not second_start.done()
-
-    gate.set()
-    await asyncio.wait_for(second_start, timeout=1)
+    await asyncio.wait_for(second.handle_event(REALTIME_AUDIO_START), timeout=1)
     assert stt_client.realtime.connect.call_count == 2
 
-    assert await second.handle_event(Event(type="audio-stop"))
-    await second._drain_background_tasks()
-    assert not semaphore.locked()
-
-
-@pytest.mark.asyncio
-async def test_stt_semaphore_realtime_slot_is_released_when_its_close_is_cancelled(
-    enhanced_handler, mock_info, mock_clients
-):
-    """A closing handshake that a shutdown cuts short has its socket aborted, and gives the slot back."""
-    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    connection = _FakeRealtimeConnection([])
-    connection._connection = Mock(transport=Mock())
-    stt_client.realtime.connect = Mock(return_value=_GatedCloseManager(connection, asyncio.Event()))
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-    await handler._cleanup_realtime_transcription()
-    await _settle()
-    assert semaphore.locked()
-    connection._connection.transport.abort.assert_not_called()
-
-    await handler._drain_background_tasks(timeout=0)
-
-    connection._connection.transport.abort.assert_called_once()
-    assert not semaphore.locked()
-
-
-@pytest.mark.asyncio
-async def test_realtime_close_cancelled_before_it_starts_aborts_the_socket_and_frees_its_slot(mock_info, mock_clients):
-    """A close task cancelled before its first step still tears the socket down and releases the slot."""
-    stt_client, _ = mock_clients
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    connection = _FakeRealtimeConnection([])
-    connection._connection = Mock(transport=Mock())
-    manager = _FakeRealtimeConnectionManager(connection)
-    await handler._acquire_stt_slot("realtime")
-    handler._realtime_connection_manager = manager
-    handler._realtime_connection = connection
-
-    # Without a receive task to wait for, cleanup returns before the close task has run at all
-    await handler._cleanup_realtime_transcription()
-    (close_task,) = handler._background_tasks
-    close_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await close_task
-
-    assert manager.exited is False
-    connection._connection.transport.abort.assert_called_once()
-    assert not semaphore.locked()
-
-
-@pytest.mark.asyncio
-async def test_overlapping_realtime_cleanups_keep_the_slot_with_the_socket(
-    enhanced_handler, mock_info, mock_clients
-):
-    """stop() cleaning up while a failing audio-stop does cannot release the slot before the socket has closed."""
-    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    gate = asyncio.Event()
-    manager = _GatedCloseManager(_FakeRealtimeConnection([]), gate)
-    stt_client.realtime.connect = Mock(return_value=manager)
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-
-    # A receive task that takes a while to stop, so the first cleanup is still waiting for it when the second runs
-    receiver_stops = asyncio.Event()
-    original_receive_task = handler._realtime_receive_task
-    assert original_receive_task is not None
-    original_receive_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await original_receive_task
-
-    async def slow_receiver():
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await receiver_stops.wait()
-            raise
-
-    handler._realtime_receive_task = asyncio.create_task(slow_receiver())
-    await _settle()
-
-    first = asyncio.create_task(handler._cleanup_realtime_transcription())
-    await _settle()
-    await handler._cleanup_realtime_transcription()
-    receiver_stops.set()
-    await asyncio.wait_for(first, timeout=1)
-    await _settle()
-
-    assert semaphore.locked()
     gate.set()
-    await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
+    assert await second.handle_event(Event(type="audio-stop"))
+    await asyncio.wait_for(asyncio.gather(first._drain_background_tasks(), second._drain_background_tasks()), 1)
+    assert not limit.full
+
+
+@pytest.mark.asyncio
+async def test_completed_realtime_session_closes_before_the_transcript_is_written(
+    enhanced_handler, mock_info, mock_clients
+):
+    """A client slow to take the transcript does not keep the finished session, or its slot, open."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    completed = _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
+    manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([completed]))
+    stt_client.realtime.connect = Mock(return_value=manager)
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if Transcript.is_type(event.type):
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    await handler.handle_event(REALTIME_AUDIO_START)
+    request = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    await _settle()
+
+    assert not request.done()
     assert manager.exited
-    assert not semaphore.locked()
+    assert not limit.full
+
+    client_reads.set()
+    assert await asyncio.wait_for(request, timeout=1)
+    assert _written_event_types(handler) == ["transcript-start", "transcript", "transcript-stop"]
 
 
 def _record_client_io(handler):
@@ -5520,9 +5508,123 @@ def _record_client_io(handler):
     return io_log
 
 
+class _HiStream(_FakeTranscriptionStream):
+    """A streamed /v1/audio/transcriptions response: one delta, then the final text."""
+
+    async def __aiter__(self):
+        yield Mock(type="transcript.text.delta", delta="Hi")
+        yield Mock(type="transcript.text.done", text="Hi")
+
+
+def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients):
+    """
+    Hold the backend's answer to an audio-stop: returns (entered, respond), set once the request reached the
+    backend, and to let a successful "Hi" through. A Realtime answer brings a delta first.
+    """
+    from openai.types.audio.transcription import Transcription
+
+    entered = asyncio.Event()
+    respond = asyncio.Event()
+    if realtime:
+        _use_realtime_stt_model(handler, mock_info, mock_clients)
+        connection = _FakeRealtimeConnection([])
+
+        async def commit():
+            entered.set()
+            await respond.wait()
+            await connection.events.put(
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hi")
+            )
+            await connection.events.put(
+                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
+            )
+
+        connection.input_audio_buffer.commit = commit
+        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    else:
+
+        async def create(**kwargs):
+            entered.set()
+            await respond.wait()
+            return Transcription(text="Hi")
+
+        stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
+    return entered, respond
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime", [False, True])
+async def test_stop_cancels_the_stt_request_in_flight(enhanced_handler, mock_info, mock_clients, caplog, realtime):
+    """
+    stop() cancels a request the backend is still working on and answers it with the shutdown error, before the
+    connection closes; nothing of the request follows, even once the backend would have answered.
+    """
+    stt_client, _ = mock_clients
+    handler = enhanced_handler
+    entered, respond = _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+    io_log = _record_client_io(handler)
+
+    with caplog.at_level(logging.INFO, logger="wyoming_openai.handler"):
+        audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(handler.stop(), timeout=3)
+        assert await asyncio.wait_for(audio_stop, timeout=1) is False
+        respond.set()
+        await _settle()
+
+    assert "Cancelling the STT request in flight" in caplog.text
+    # Cut short by the shutdown, which is not a backend failure
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert [entry for entry in io_log if entry != "close"] == ["error"]
+    assert io_log.index("error") < io_log.index("close")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime", [False, True])
+async def test_stt_request_waiting_for_a_slot_is_not_sent_after_stop(
+    enhanced_handler, mock_info, mock_clients, caplog, realtime
+):
+    """A request still waiting for a slot when the server stops is cancelled and never reaches the backend."""
+    from openai.types.audio.transcription import Transcription
+
+    stt_client, _ = mock_clients
+    if realtime:
+        _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hi"))
+    limit = ConcurrencyLimit(1)
+    other = await limit.acquire()  # Held by another connection
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+
+    async def stream():
+        await handler.handle_event(Event(type="audio-start", data=audio_format))
+        await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+        return await handler.handle_event(Event(type="audio-stop"))
+
+    request = asyncio.create_task(stream())
+    await _settle()
+    assert not request.done()
+
+    with caplog.at_level(logging.INFO, logger="wyoming_openai.handler"):
+        await handler.stop()
+        other.release()  # The other connection is stopped too
+        await asyncio.wait_for(request, timeout=1)
+
+    assert "Cancelling the STT request in flight" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    stt_client.realtime.connect.assert_not_called()
+    stt_client.audio.transcriptions.create.assert_not_called()
+    assert _written_event_types(handler) == ["error"]
+    assert not limit.full
+
+
 @pytest.mark.asyncio
 async def test_stop_reports_a_realtime_failure_that_is_still_cleaning_up(enhanced_handler, mock_info, mock_clients):
-    """stop() during the cleanup of a failed commit still sends its error before closing the connection."""
+    """stop() during the cleanup of a failed commit adds no second error to the failure's, sent before the close."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     connection = _FakeRealtimeConnection([])
     connection.input_audio_buffer.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
@@ -5556,7 +5658,6 @@ async def test_stop_reports_a_realtime_failure_that_is_still_cleaning_up(enhance
     receiver_stops.set()
     await asyncio.wait_for(asyncio.gather(audio_stop, stopping), timeout=1)
 
-    # One error, the shutdown's, before the connection closes; the failure report does not add a second
     assert io_log.count("error") == 1
     assert io_log.index("error") < io_log.index("close")
     assert "transcript" not in io_log
@@ -5606,93 +5707,6 @@ async def test_stop_adds_no_second_response_while_the_final_write_drains(
 
     assert written.count("error") == (1 if terminal == "error" else 0)
     assert written.count("transcript") == (1 if terminal == "transcript" else 0)
-
-
-class _HiStream(_FakeTranscriptionStream):
-    """A streamed /v1/audio/transcriptions response: one delta, then the final text."""
-
-    async def __aiter__(self):
-        yield Mock(type="transcript.text.delta", delta="Hi")
-        yield Mock(type="transcript.text.done", text="Hi")
-
-
-def _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients, streamed=False):
-    """
-    Hold the backend's answer to an audio-stop: returns (entered, respond), set once the request reached the
-    backend, and to let a successful "Hi" through. A streamed answer, or any Realtime one, brings a delta first.
-    """
-    from openai.types.audio.transcription import Transcription
-
-    entered = asyncio.Event()
-    respond = asyncio.Event()
-    if realtime:
-        _use_realtime_stt_model(handler, mock_info, mock_clients)
-        connection = _FakeRealtimeConnection([])
-
-        async def commit():
-            entered.set()
-            await respond.wait()
-            await connection.events.put(
-                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hi")
-            )
-            await connection.events.put(
-                _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
-            )
-
-        connection.input_audio_buffer.commit = commit
-        stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
-    else:
-
-        async def create(**kwargs):
-            entered.set()
-            await respond.wait()
-            return _HiStream() if streamed else Transcription(text="Hi")
-
-        stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
-    return entered, respond
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("realtime", "streamed"), [(False, False), (False, True), (True, False)])
-async def test_stop_that_answers_first_drops_the_late_transcript(
-    enhanced_handler, mock_info, mock_clients, realtime, streamed
-):
-    """A shutdown error queued while the backend works ends the request: nothing of the late transcript follows."""
-    stt_client, _ = mock_clients
-    handler = enhanced_handler
-    entered, respond = _gate_backend_response(handler, stt_client, realtime, mock_info, mock_clients, streamed)
-    stream_patch = patch("wyoming_openai.handler.AsyncStream", _HiStream)
-    stream_patch.start()
-    error_queued = asyncio.Event()
-    client_reads = asyncio.Event()
-    written = []
-
-    async def write_event(event):
-        written.append(event.type)
-        if event.type == "error":
-            # The shutdown error is queued, and its drain waits on a client slow to read
-            error_queued.set()
-            await client_reads.wait()
-
-    handler.write_event = AsyncMock(side_effect=write_event)
-    audio_format = {"rate": 24000, "width": 2, "channels": 1}
-    await handler.handle_event(Event(type="audio-start", data=audio_format))
-    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
-
-    try:
-        audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        stopping = asyncio.create_task(handler.stop())
-        await asyncio.wait_for(error_queued.wait(), timeout=1)
-        respond.set()
-        assert await asyncio.wait_for(audio_stop, timeout=1) is False
-        client_reads.set()
-        await asyncio.wait_for(stopping, timeout=3)
-    finally:
-        stream_patch.stop()
-
-    # Nothing follows the error: no transcript, and no transcript-start or chunk of one
-    assert written[written.index("error"):] == ["error"]
 
 
 @pytest.mark.asyncio
@@ -5790,10 +5804,8 @@ async def test_stop_during_the_http_transcript_start_sends_one_terminal_error(
 
 
 @pytest.mark.asyncio
-async def test_realtime_session_opened_after_the_shutdown_error_starts_no_transcript(
-    enhanced_handler, mock_info, mock_clients
-):
-    """A session whose settings are still being sent when stop() reports does not write transcript-start after it."""
+async def test_stop_cancels_a_realtime_session_still_opening(enhanced_handler, mock_info, mock_clients):
+    """stop() while the session's settings are being sent cancels the opening: only the shutdown error is written."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     connection = _FakeRealtimeConnection([])
     settings_sent = asyncio.Event()
@@ -5804,39 +5816,71 @@ async def test_realtime_session_opened_after_the_shutdown_error_starts_no_transc
         await settings_sent.wait()
 
     connection.session.update = AsyncMock(side_effect=update)
-    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+    manager = _FakeRealtimeConnectionManager(connection)
+    stt_client.realtime.connect = Mock(return_value=manager)
     handler = enhanced_handler
     written = []
     handler.write_event = AsyncMock(side_effect=lambda event: written.append(event.type))
 
-    audio_start = asyncio.create_task(
-        handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-    )
+    audio_start = asyncio.create_task(handler.handle_event(REALTIME_AUDIO_START))
     await asyncio.wait_for(update_entered.wait(), timeout=1)
-    stopping = asyncio.create_task(handler.stop())
-    await _settle()
+    await asyncio.wait_for(handler.stop(), timeout=3)
+    await asyncio.wait_for(audio_start, timeout=1)
     settings_sent.set()
-    await asyncio.wait_for(asyncio.gather(audio_start, stopping), timeout=3)
+    await _settle()
 
     assert written == ["error"]
+    assert manager.exited
 
 
 @pytest.mark.asyncio
-async def test_refused_transcribe_after_the_shutdown_error_sends_no_transcript_stop(
-    enhanced_handler, mock_info, mock_clients
-):
-    """A started Realtime stream abandoned after stop() reported does not close its transcript after that error."""
+async def test_stt_events_after_stop_are_ignored(enhanced_handler, mock_info, mock_clients):
+    """Once stop() has answered the stream in progress, later STT events start nothing and write nothing."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
     stt_client.realtime.connect = _completing_realtime_connect()
     handler = enhanced_handler
     written = []
     handler.write_event = AsyncMock(side_effect=lambda event: written.append(event.type))
 
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    await handler.handle_event(REALTIME_AUDIO_START)
     await handler.stop()
-    assert await handler.handle_event(Event(type="transcribe", data={"name": "no-such-model"})) is False
+    for event in (
+        Event(type="transcribe", data={"name": "no-such-model"}),
+        REALTIME_AUDIO_START,
+        Event(type="audio-chunk", data={"rate": 24000, "width": 2, "channels": 1}, payload=b"\x00\x01" * 10),
+        Event(type="audio-stop"),
+    ):
+        assert await handler.handle_event(event) is True
 
     assert written == ["transcript-start", "error"]
+    assert stt_client.realtime.connect.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_audio_start_that_stop_overtakes_opens_no_session(enhanced_handler, mock_info, mock_clients):
+    """An audio-start still closing the stream before it when stop() runs does not open a session afterwards."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    stt_client.realtime.connect = _completing_realtime_connect()
+    handler = enhanced_handler
+    await handler.handle_event(REALTIME_AUDIO_START)
+    stop_queued = asyncio.Event()
+    client_reads = asyncio.Event()
+
+    async def write_event(event):
+        if event.type == "transcript-stop":
+            # The abandoned stream's transcript-stop drains on a client slow to read
+            stop_queued.set()
+            await client_reads.wait()
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+
+    audio_start = asyncio.create_task(handler.handle_event(REALTIME_AUDIO_START))
+    await asyncio.wait_for(stop_queued.wait(), timeout=1)
+    await asyncio.wait_for(handler.stop(), timeout=3)
+    client_reads.set()
+    await asyncio.wait_for(audio_start, timeout=1)
+
+    assert stt_client.realtime.connect.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -5864,194 +5908,6 @@ async def test_repeated_stop_sends_one_shutdown_error_while_recording(enhanced_h
     await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), timeout=3)
 
     assert written.count("error") == 1
-
-
-@pytest.mark.asyncio
-async def test_stop_reports_an_http_request_still_waiting_for_its_response(enhanced_handler, mock_clients):
-    """An audio-stop whose backend has not answered yet is told about the shutdown."""
-    stt_client, _ = mock_clients
-    responds = asyncio.Event()
-
-    async def create(**kwargs):
-        await responds.wait()
-        raise RuntimeError("cut off by the shutdown")
-
-    stt_client.audio.transcriptions.create = AsyncMock(side_effect=create)
-    handler = enhanced_handler
-    io_log = _record_client_io(handler)
-
-    audio_stop = asyncio.create_task(_stream_audio(handler))
-    await _settle()
-    await handler.stop()
-    responds.set()
-    await asyncio.wait_for(audio_stop, timeout=1)
-
-    assert io_log.count("error") == 1
-    assert io_log.index("error") < io_log.index("close")
-
-
-@pytest.mark.asyncio
-async def test_stt_semaphore_http_slot_is_released_before_the_error_is_written(mock_info, mock_clients):
-    """A failed request frees its slot even while a client is slow to take the error."""
-    stt_client, _ = mock_clients
-    stt_client.audio.transcriptions.create = AsyncMock(side_effect=RuntimeError("backend down"))
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    client_reads = asyncio.Event()
-
-    async def write_event(event):
-        if event.type == "error":
-            await client_reads.wait()
-
-    handler.write_event = AsyncMock(side_effect=write_event)
-
-    request = asyncio.create_task(_stream_audio(handler))
-    await _settle()
-    assert not request.done()
-    assert not semaphore.locked()
-
-    client_reads.set()
-    await asyncio.wait_for(request, timeout=1)
-    assert _written_event_types(handler) == ["error"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("realtime", [False, True])
-async def test_stt_request_waiting_for_a_slot_is_not_sent_after_stop(
-    enhanced_handler, mock_info, mock_clients, caplog, realtime
-):
-    """A request still queued when the server stops gives back the slot it gets and never reaches the backend."""
-    from openai.types.audio.transcription import Transcription
-
-    stt_client, _ = mock_clients
-    if realtime:
-        _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    stt_client.realtime.connect = _completing_realtime_connect()
-    stt_client.audio.transcriptions.create = AsyncMock(return_value=Transcription(text="Hi"))
-    semaphore = asyncio.Semaphore(1)
-    await semaphore.acquire()  # Held by another connection
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-    audio_format = {"rate": 24000, "width": 2, "channels": 1}
-
-    async def stream():
-        await handler.handle_event(Event(type="audio-start", data=audio_format))
-        await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
-        return await handler.handle_event(Event(type="audio-stop"))
-
-    request = asyncio.create_task(stream())
-    await _settle()
-    assert not request.done()
-
-    with caplog.at_level(logging.INFO, logger="wyoming_openai.handler"):
-        await handler.stop()
-        semaphore.release()  # The other connection is stopped too
-        await asyncio.wait_for(request, timeout=1)
-
-    # A request the shutdown cut short is not a backend failure
-    assert "Not starting an STT request" in caplog.text
-    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
-    stt_client.realtime.connect.assert_not_called()
-    stt_client.audio.transcriptions.create.assert_not_called()
-    assert "transcript" not in _written_event_types(handler)
-    assert not semaphore.locked()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streamed", [False, True])
-async def test_stt_semaphore_http_slot_is_released_before_the_transcript_is_written(
-    mock_info, mock_clients, streamed
-):
-    """A client slow to take the transcript does not hold the slot once the backend's response is read."""
-    from openai.types.audio.transcription import Transcription
-
-    stt_client, _ = mock_clients
-
-    class _Stream(_FakeTranscriptionStream):
-        async def __aiter__(self):
-            yield Mock(type="transcript.text.delta", delta="Hi")
-            yield Mock(type="transcript.text.done", text="Hi")
-
-    stt_client.audio.transcriptions.create = AsyncMock(return_value=_Stream() if streamed else Transcription(text="Hi"))
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    client_reads = asyncio.Event()
-
-    async def write_event(event):
-        if Transcript.is_type(event.type):
-            await client_reads.wait()
-
-    handler.write_event = AsyncMock(side_effect=write_event)
-
-    with patch("wyoming_openai.handler.AsyncStream", _Stream):
-        request = asyncio.create_task(_stream_audio(handler))
-        await _settle()
-        assert not request.done()
-        assert not semaphore.locked()
-
-        client_reads.set()
-        await asyncio.wait_for(request, timeout=1)
-
-    assert _written_transcripts(handler) == ["Hi"]
-    assert not semaphore.locked()
-
-
-@pytest.mark.asyncio
-async def test_completed_realtime_session_closes_before_the_transcript_is_written(
-    enhanced_handler, mock_info, mock_clients
-):
-    """A client slow to take the transcript does not keep the finished session, or its slot, open."""
-    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    completed = _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.completed", transcript="Hi")
-    manager = _FakeRealtimeConnectionManager(_FakeRealtimeConnection([completed]))
-    stt_client.realtime.connect = Mock(return_value=manager)
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-    client_reads = asyncio.Event()
-
-    async def write_event(event):
-        if Transcript.is_type(event.type):
-            await client_reads.wait()
-
-    handler.write_event = AsyncMock(side_effect=write_event)
-
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-    request = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
-    await _settle()
-
-    assert not request.done()
-    assert manager.exited
-    assert not semaphore.locked()
-
-    client_reads.set()
-    assert await asyncio.wait_for(request, timeout=1)
-    assert _written_event_types(handler) == ["transcript-start", "transcript", "transcript-stop"]
-
-
-@pytest.mark.asyncio
-async def test_realtime_close_that_stalls_is_aborted_and_frees_its_slot(
-    enhanced_handler, mock_info, mock_clients, monkeypatch, caplog
-):
-    """A server that never finishes the closing handshake has its socket aborted, and the slot comes back."""
-    monkeypatch.setattr("wyoming_openai.handler.REALTIME_STT_CLOSE_TIMEOUT", 0.01)
-    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
-    connection = _FakeRealtimeConnection([])
-    transport = Mock()
-    connection._connection = Mock(transport=transport)
-    stt_client.realtime.connect = Mock(return_value=_GatedCloseManager(connection, asyncio.Event()))
-    semaphore = asyncio.Semaphore(1)
-    handler = _stt_limited_handler(mock_info, stt_client, semaphore)
-    handler._stt_realtime_models = enhanced_handler._stt_realtime_models
-
-    await handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
-    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
-        await handler._cleanup_realtime_transcription()
-        await asyncio.wait_for(handler._drain_background_tasks(), timeout=1)
-
-    transport.abort.assert_called_once()
-    assert "did not close within" in caplog.text
-    assert not semaphore.locked()
 
 
 @pytest.mark.asyncio
@@ -7729,7 +7585,7 @@ async def test_sentence_that_waited_for_a_request_slot_is_streamed_once_it_is_pl
     """Test a sentence whose request only starts when playback reaches it is not buffered whole first."""
     _, tts_client = mock_clients
     mock_info.tts[0].supports_synthesize_streaming = True
-    enhanced_handler._tts_semaphore = asyncio.Semaphore(1)
+    enhanced_handler._tts_limit = ConcurrencyLimit(1)
     enhanced_handler._tts_extra_body = {"response_format": "pcm"}
     log = []
 
