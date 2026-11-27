@@ -127,6 +127,15 @@ def _final_transcript(final_text: str | None, snapshot: str) -> str:
     return final_text or snapshot
 
 
+def _cancel_once(task: asyncio.Task[Any]) -> None:
+    """
+    Cancel a task unless it is done or already handling a cancellation, which a second one would cut short, as when
+    the drains of stop() and disconnect() overlap.
+    """
+    if not task.done() and not task.cancelling():
+        task.cancel()
+
+
 DEFAULT_ASR_AUDIO_RATE = 16000  # Hz (Wyoming default)
 TTS_AUDIO_RATE = 24000  # Hz (OpenAI spec, fallback)
 TTS_CHUNK_SIZE = 2048  # Bytes read from the TTS response at a time; WavFramer buffers a header across reads
@@ -407,9 +416,12 @@ class OpenAIEventHandler(AsyncEventHandler):
                 # writer stays open for it, but neither the recording nor a Realtime session is left open, as they
                 # would be if stop() was cancelled too
                 self._discard_recording()
-                await self._cleanup_realtime_transcription()
-                # The websocket close that schedules is waited for here, as stop() may have drained its own already
-                await self._drain_background_tasks(SHUTDOWN_DRAIN_TIMEOUT)
+                try:
+                    await self._cleanup_realtime_transcription()
+                finally:
+                    # The websocket close that schedules is waited for here, as stop() may have drained its own
+                    # already, also when a second cancellation cuts the wait for the receiver short
+                    await self._drain_background_tasks(SHUTDOWN_DRAIN_TIMEOUT)
                 raise
         try:
             task = asyncio.current_task()
@@ -1596,7 +1608,7 @@ class OpenAIEventHandler(AsyncEventHandler):
         try:
             _, pending = await asyncio.wait(tasks, timeout=timeout)
             for task in pending:
-                task.cancel()
+                _cancel_once(task)
             if pending:
                 _, pending = await asyncio.wait(pending, timeout=timeout)
                 if pending:
@@ -1606,7 +1618,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                     )
         except asyncio.CancelledError:
             for task in tasks:
-                task.cancel()
+                _cancel_once(task)
             raise
 
     async def _close_writer(self) -> None:

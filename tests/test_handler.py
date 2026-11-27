@@ -6788,6 +6788,106 @@ async def test_disconnect_cancelled_twice_leaves_no_websocket_close_behind(enhan
 
 
 @pytest.mark.asyncio
+async def test_overlapping_drains_cancel_a_cleanup_task_once(enhanced_handler):
+    """
+    A drain interrupted while a close it shares with an earlier, timed-out drain still unwinds from that drain's
+    cancellation does not cancel it again, which would cut its own cleanup short.
+    """
+    handler = enhanced_handler
+    unwinding = asyncio.Event()
+    may_finish = asyncio.Event()
+    outcome = {}
+
+    async def close():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            try:
+                await may_finish.wait()
+                outcome["finished"] = True
+            except asyncio.CancelledError:
+                outcome["finished"] = False
+                raise
+            raise
+
+    handler._run_in_background(close(), name="close")
+    # As stop()'s drain: times out, cancels the close, and gives up on it while it unwinds
+    await handler._drain_background_tasks(0.01)
+    assert unwinding.is_set()
+    # As disconnect()'s, over the same close, and itself interrupted
+    draining = asyncio.create_task(handler._drain_background_tasks())
+    await _settle()
+    draining.cancel()
+    await asyncio.gather(draining, return_exceptions=True)
+    may_finish.set()
+    await _settle()
+
+    assert outcome == {"finished": True}
+    assert not handler._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancelled_again_while_stopping_the_receiver_still_waits_for_the_close(
+    enhanced_handler, mock_info, mock_clients
+):
+    """
+    A disconnect() cancelled again while its cleanup waits for the Realtime receiver still waits for the websocket
+    close that cleanup starts.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    receiver_cancelled = asyncio.Event()
+
+    class _SlowToStopConnection(_FakeRealtimeConnection):
+        async def __aiter__(self):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                receiver_cancelled.set()
+                await asyncio.Event().wait()
+            yield
+
+    socket_closed = asyncio.Event()
+    manager = _GatedCloseManager(_SlowToStopConnection([]), socket_closed)
+    stt_client.realtime.connect = Mock(return_value=manager)
+    limit = ConcurrencyLimit(1)
+    (handler,) = _realtime_limited_handlers(enhanced_handler, mock_info, stt_client, limit, 1)
+    client_closed = asyncio.Event()
+
+    async def wait_closed():
+        await client_closed.wait()
+
+    handler.writer.wait_closed = AsyncMock(side_effect=wait_closed)
+
+    await handler.handle_event(REALTIME_AUDIO_START)
+    await _settle()  # The receiver waits for events
+    # stop() is cancelled before it closes the session, and disconnect() while it waits for stop()
+    audio_stop = asyncio.create_task(handler.handle_event(Event(type="audio-stop")))
+    stopping = asyncio.create_task(handler.stop())
+    await asyncio.sleep(0)
+    stopping.cancel()
+    assert await asyncio.wait_for(audio_stop, timeout=1) is False
+    await _settle()
+    disconnecting = asyncio.create_task(handler.disconnect())
+    await _settle()
+    disconnecting.cancel()
+    await asyncio.wait_for(receiver_cancelled.wait(), timeout=1)
+    await _settle()
+    # Cancelled again while its cleanup waits for the receiver
+    disconnecting.cancel()
+    await _settle()
+
+    assert not disconnecting.done()  # Waiting for the websocket close
+    socket_closed.set()
+    await asyncio.gather(disconnecting, return_exceptions=True)
+    assert manager.exited
+    assert not handler._background_tasks
+    assert not limit.full
+    client_closed.set()
+    await asyncio.gather(stopping, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_no_read_of_a_streamed_response_starts_after_a_transcript_start_that_outlived_the_shutdown(
     enhanced_handler, mock_clients
 ):
