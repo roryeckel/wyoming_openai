@@ -46,7 +46,7 @@ services:
       GO_TAGS: tts
     volumes:
       - localai-models:/models
-      - localai-config:/config
+      - localai-config:/configuration
       # The backends init-localai installs, kept between runs
       - localai-backends:/backends
     healthcheck:

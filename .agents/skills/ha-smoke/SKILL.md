@@ -44,7 +44,8 @@ scope.
 - **Providers:** each file in `tests/ha_e2e/smoke/providers/` says in its
   `Serves:` line which service and request mode it runs; count it only for
   those. A local provider's header names its engine and how to start it. Note
-  the images that would have to be pulled, and their size.
+  the images that would have to be pulled, and their size, and the models a
+  local engine downloads on its first start.
 - **Ports:** the stack uses 127.0.0.1 ports 8010, 8124 and 10400-10406. Local
   engines run from `tests/ha_e2e/smoke/docker-compose.engines.yml`, in their own
   project, with `ha_smoke_*` container names and no host ports, so they don't
@@ -150,7 +151,9 @@ containers that hold one), `docker compose -p ha_smoke_engines down` for the
 local engines, and the stack with
 `docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v` unless the
 developer wants it kept. Each of these touches only what the smoke run
-started. Pulled images stay unless the developer asks to remove them.
+started. Pulled images stay unless the developer asks to remove them, and so do
+the engines' model and backend volumes, so the next run skips those downloads;
+`docker compose -p ha_smoke_engines down -v` removes them.
 
 ## 8. Report
 

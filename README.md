@@ -807,7 +807,7 @@ HA_SMOKE_PROVIDER=kokoro-fastapi pytest -m ha_smoke -v -k provider
 docker compose -p ha_smoke_provider down
 ```
 
-The tests check that the provider proxy is running, and is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) sets out which changes need which providers. Tear everything down with the following. None of the commands needs a key:
+The tests check that the provider proxy is running, and is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) sets out which changes need which providers. Tear everything down with the following. None of the commands needs a key. The engines' model and backend volumes stay, so the next run skips those downloads; add `-v` to the engines command to remove them:
 
 ```bash
 docker compose -p ha_smoke_openai down
