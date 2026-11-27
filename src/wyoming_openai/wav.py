@@ -39,7 +39,7 @@ _WAVE_FORMAT_NAMES = {
 }
 # Where a response that is audio of a kind the proxy does not play has which bytes, named so it fails saying what it
 # is instead of playing as noise. Raw PCM has one of these only by a chance too small to matter. MP3 without an ID3
-# tag and ADTS AAC are not recognized: their frame sync, a run of set bits, is also how near-silent 16-bit PCM starts
+# tag and ADTS AAC have no signature and are recognized by their first frame header instead
 _FOREIGN_AUDIO_SIGNATURES = (
     (0, b"RF64", "RF64 WAV"),
     (0, b"BW64", "BW64 WAV"),
@@ -70,7 +70,10 @@ class TtsAudioFormat:
 
 
 class WavFormatError(ValueError):
-    """A response that starts as a WAV file but whose header cannot be read or whose audio cannot be played."""
+    """
+    A TTS response the proxy recognizes but cannot play: a WAV file whose header cannot be read or whose audio is in
+    a format it does not play, or audio of another kind, such as MP3 or FLAC.
+    """
 
 
 class UnsupportedWavFormatError(WavFormatError):
@@ -86,11 +89,34 @@ class WavHeader(NamedTuple):
     sample_format: int  # WAVE_FORMAT_PCM or WAVE_FORMAT_IEEE_FLOAT, after unwrapping EXTENSIBLE
 
 
+def _frame_header_audio(start: bytes) -> str | None:
+    """
+    Name the audio a response is when it starts with the header of an MP3 or ADTS AAC frame.
+
+    Both start with a run of set bits, as near-silent 16-bit PCM does, so the fields after it are checked too.
+    16-bit PCM then matches only when its first sample is one of ten values from -1025 to -7425, -30 dBFS or
+    louder, which speech that starts from silence does not have.
+    """
+    if len(start) < 3 or start[0] != 0xFF:
+        return None
+    second, third = start[1], start[2]
+    # MPEG 1, 2 or 2.5 Layer III: an 11-bit sync, a version that is not reserved, layer bits 01, and a bitrate and
+    # sample rate that are neither free-format nor reserved
+    if second & 0xE0 == 0xE0 and (second >> 3) & 3 != 1 and (second >> 1) & 3 == 1:
+        if (third >> 4) not in (0, 15) and (third >> 2) & 3 != 3:
+            return "MP3"
+    # ADTS AAC: a 12-bit sync, layer bits 00, and a sampling frequency index that is defined
+    if second & 0xF6 == 0xF0 and (third >> 2) & 0xF < 13:
+        return "AAC (ADTS)"
+    return None
+
+
 def _reject_foreign_audio(start: bytes) -> None:
     """Raise for a response whose first bytes show it is a kind of audio the proxy does not play."""
-    for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES:
-        if start.startswith(signature, offset):
-            raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only WAV and raw PCM)")
+    names = [name for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES if start.startswith(signature, offset)]
+    name = names[0] if names else _frame_header_audio(start)
+    if name:
+        raise WavFormatError(f"TTS response is {name} audio, which the proxy does not play (only WAV and raw PCM)")
 
 
 def _describe_format(tag: int) -> str:

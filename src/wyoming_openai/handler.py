@@ -2260,6 +2260,8 @@ class OpenAIEventHandler(AsyncEventHandler):
             async with contextlib.aclosing(chunks) as audio_stream:
                 async for chunk in audio_stream:
                     audio_data = framer.feed(chunk)
+                    # As soon as the first bytes show it, while a response played as raw PCM may still be going on
+                    self._report_tts_container(framer)
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
                     if audio_data or (not sentence and not framer.awaiting_header):
@@ -2296,8 +2298,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             _LOGGER.exception("Error streaming TTS audio: %s", e)
             return False
         finally:
-            # Also when the response failed or was cancelled midway: a response played as raw PCM that then
-            # failed still needs its warning, which may be the only clue to why it sounded like static
+            # A response too short to show what it is until finish(), or that failed before the check above ran
             self._report_tts_container(framer)
 
     def _report_tts_container(self, framer: WavFramer) -> None:

@@ -7091,15 +7091,24 @@ async def test_wav_response_to_a_pcm_request_is_played_by_its_header(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mp3",
+    [
+        b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64" * 100,
+        # As Microsoft Edge TTS sends it for any format when it has no ffmpeg
+        bytes.fromhex("fff364c4") * 100,
+    ],
+    ids=["tagged", "untagged"],
+)
 @pytest.mark.parametrize("response_format", ["wav", "pcm"])
 async def test_mp3_response_fails_naming_it_instead_of_playing_static(
-    enhanced_handler, mock_info, mock_clients, caplog, response_format
+    enhanced_handler, mock_info, mock_clients, caplog, response_format, mp3
 ):
-    """Test a backend answering with tagged MP3, whatever was requested, fails with what it sent."""
+    """Test a backend answering with MP3, tagged or not and whatever was requested, fails with what it sent."""
     _, tts_client = mock_clients
     voice = mock_info.tts[0].voices[0]
     enhanced_handler._tts_extra_body = {"response_format": response_format}
-    _mock_speech_response(tts_client, [b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64" * 100])
+    _mock_speech_response(tts_client, [mp3])
 
     with caplog.at_level(logging.ERROR, logger="wyoming_openai.handler"):
         assert await _stream_whole_request(enhanced_handler, voice, "Hello") is None
@@ -7165,8 +7174,8 @@ async def test_container_warning_is_logged_when_the_response_then_fails(
     voice = mock_info.tts[0].voices[0]
 
     async def respond(text):
-        # MP3 frames without an ID3 tag, which cannot be told from raw PCM
-        yield b"\xff\xfb\x90\x64" * 512
+        # Raw PCM, although a WAV file was requested
+        yield b"\x00\x01" * 1024
         raise RuntimeError("read timed out")
 
     _mock_speech_response(tts_client, respond)
@@ -7175,6 +7184,36 @@ async def test_container_warning_is_logged_when_the_response_then_fails(
 
     assert "Error streaming TTS audio: read timed out" in caplog.text
     assert caplog.text.count("TTS response is not a WAV file; playing it as raw PCM") == 1
+
+
+@pytest.mark.asyncio
+async def test_container_warning_is_logged_as_soon_as_the_response_shows_it(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test the warning that explains static comes while the response is still playing, not after it."""
+    _, tts_client = mock_clients
+    voice = mock_info.tts[0].voices[0]
+    first_chunk_played = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def respond(text):
+        yield b"\x00\x01" * 1024
+        # Asked for the next bytes only once the first ones were played
+        first_chunk_played.set()
+        await finish.wait()
+        yield b"\x00\x01" * 1024
+
+    _mock_speech_response(tts_client, respond)
+    warning = "TTS response is not a WAV file; playing it as raw PCM"
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        synthesis = asyncio.create_task(_stream_whole_request(enhanced_handler, voice, "Hello"))
+        async with asyncio.timeout(1):
+            await first_chunk_played.wait()
+        assert caplog.text.count(warning) == 1
+        finish.set()
+        assert await synthesis is not None
+
+    assert caplog.text.count(warning) == 1
 
 
 @pytest.mark.asyncio

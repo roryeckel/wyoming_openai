@@ -175,13 +175,32 @@ FOREIGN_AUDIO = [
     (b"caff\x00\x01\x00\x00desc" + bytes(40), "CAF"),
     (b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01" + bytes(24), "WebM or Matroska"),
     (b"\x00\x00\x00\x1cftypM4A \x00\x00\x00\x00" + bytes(16), "MP4 or M4A"),
+    # As Microsoft Edge TTS sends it: MPEG-2 Layer III, 24 kHz, 48 kbit/s, without an ID3 tag
+    (bytes.fromhex("fff364c400000003") + bytes(32), "MP3"),
+    (b"\xff\xfb\x90\x64" * 8, "MP3"),
+    # As macOS afconvert writes it
+    (bytes.fromhex("fff9586001600000") + bytes(32), r"AAC \(ADTS\)"),
 ]
 
 
 @pytest.mark.parametrize(
     ("audio", "name"),
     FOREIGN_AUDIO,
-    ids=["mp3", "flac", "ogg", "rf64", "bw64", "rifx", "aiff", "caf", "webm", "mp4"],
+    ids=[
+        "mp3",
+        "flac",
+        "ogg",
+        "rf64",
+        "bw64",
+        "rifx",
+        "aiff",
+        "caf",
+        "webm",
+        "mp4",
+        "mpeg2-mp3-without-id3",
+        "mpeg1-mp3-without-id3",
+        "adts-aac",
+    ],
 )
 @pytest.mark.parametrize("audio_format", [WAV_FORMAT, SPEECH_PCM_FORMAT], ids=["wav-requested", "pcm-requested"])
 def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, audio_format):
@@ -194,15 +213,42 @@ def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, a
 
 @pytest.mark.parametrize(
     "pcm",
-    [b"\xff\xff\xfb\xff" * 8, b"\xff\xfb\x90\x64" * 8, b"ID3!" * 8, b"RIF\x00" * 8],
-    ids=["near-silence", "mp3-frame-sync-without-id3", "id3-without-a-version", "riff-prefix-only"],
+    [
+        b"\xff\xff\xfb\xff" * 8,
+        b"\xff\xfd\x90\x64" * 8,
+        b"\xff\xfb\xf0\x64" * 8,
+        b"\xff\xf1\x3c\x80" * 8,
+        b"ID3!" * 8,
+        b"RIF\x00" * 8,
+    ],
+    ids=[
+        "near-silence",
+        "mpeg-layer-ii-bits",
+        "mp3-header-with-a-reserved-bitrate",
+        "adts-header-with-a-reserved-sample-rate",
+        "id3-without-a-version",
+        "riff-prefix-only",
+    ],
 )
 def test_framer_plays_raw_pcm_that_only_resembles_another_kind_of_audio(pcm):
-    """Only whole signatures count: near-silent PCM starts with the same bits as an MP3 frame."""
+    """Only whole signatures and valid frame headers count: near-silent PCM starts with the bits of an MP3 frame."""
     framer = WavFramer(WAV_FORMAT)
 
     assert framer.feed(pcm) + framer.finish() == pcm
     assert framer.header_missing
+
+
+def test_framer_never_takes_pcm_starting_quieter_than_minus_30_dbfs_for_mp3_or_aac():
+    """Speech that starts from silence starts with a quiet sample, which no MP3 or ADTS frame header can be."""
+    for sample in range(-1024, 1025):
+        for following in (0x00, 0x64, 0x90, 0xFF):
+            pcm = struct.pack("<hB", sample, following) + bytes(5)
+            framer = WavFramer(SPEECH_PCM_FORMAT)
+            assert framer.feed(pcm) + framer.finish() == pcm
+
+    # The quietest first sample that can be taken for a frame header, -1025, as MPEG-1 Layer III at 128 kbit/s
+    with pytest.raises(WavFormatError, match="^TTS response is MP3 audio"):
+        WavFramer(SPEECH_PCM_FORMAT).feed(struct.pack("<hB", -1025, 0x90) + bytes(5))
 
 
 @pytest.mark.parametrize(
