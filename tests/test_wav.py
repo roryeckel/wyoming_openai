@@ -354,6 +354,13 @@ def test_unsupported_format_error_offers_no_workaround_when_raw_pcm_was_already_
     assert str(error.value).endswith("; the backend returned WAV although raw PCM was requested")
 
 
+def test_other_riff_error_says_what_was_returned_although_raw_pcm_was_requested():
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+
+    with pytest.raises(WavFormatError, match="not WAVE audio; the backend returned a RIFF file although raw PCM"):
+        framer.feed(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+
+
 def test_truncated_wav_error_says_raw_pcm_was_requested():
     framer = WavFramer(SPEECH_PCM_FORMAT)
 

@@ -145,7 +145,7 @@ class _WavHeaderReader:
     def __init__(self) -> None:
         self.held = b""  # Bytes not read yet; once the header is read, the start of the audio
         self.offset = 0  # Position in the file of the first held byte
-        self.riff_size: int | None = None  # Read from the RIFF header once it has arrived
+        self.riff_size: int | None = None  # Read from the RIFF header once it has arrived and named WAVE
         self._skip = 0  # Bytes of the current chunk still to drop
         self._fmt: tuple[int, int, int, int] | None = None
 
@@ -354,10 +354,11 @@ class WavFramer:
         return audio
 
     def _error_note(self, *, unsupported_format: bool = False) -> str:
-        """What to add to an error about a WAV response, given what was requested."""
+        """What to add to an error about a RIFF response, given what was requested."""
         if not self._expects_wav:
             # The backend ignores response_format, so asking for raw PCM is not a way around the error
-            return "; the backend returned WAV although raw PCM was requested"
+            wave = self._header is not None and self._header.riff_size is not None
+            return f"; the backend returned {'WAV' if wave else 'a RIFF file'} although raw PCM was requested"
         return _UNSUPPORTED_FORMAT_HINT if unsupported_format else ""
 
     def _release_pending(self) -> bytes:
