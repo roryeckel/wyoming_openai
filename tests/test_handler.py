@@ -7172,6 +7172,37 @@ async def test_realtime_client_too_slow_after_audio_stop_is_not_reported_as_a_mi
 
 
 @pytest.mark.asyncio
+async def test_realtime_timeout_of_another_limit_after_audio_stop_is_not_reported_as_a_missing_transcript(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """
+    A TimeoutError that is not the transcript deadline's, such as a transport timeout the receiver fails with while
+    audio-stop waits for the transcript, is reported as it is.
+    """
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients)
+    delta = _FakeRealtimeServerEvent("conversation.item.input_audio_transcription.delta", delta="Hi")
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(_FakeRealtimeConnection([delta])))
+    handler = enhanced_handler
+    written = []
+
+    async def write_event(event):
+        written.append(Error.from_event(event).text if event.type == "error" else event.type)
+        if event.type == "transcript-chunk":
+            raise TimeoutError("transport timed out")
+
+    handler.write_event = AsyncMock(side_effect=write_event)
+    audio_format = {"rate": 24000, "width": 2, "channels": 1}
+    await handler.handle_event(Event(type="audio-start", data=audio_format))
+    await handler.handle_event(Event(type="audio-chunk", data=audio_format, payload=b"\x00\x01" * 10))
+
+    assert await asyncio.wait_for(handler.handle_event(Event(type="audio-stop")), timeout=2) is False
+
+    assert written.count(STT_FAILED_ERROR) == 1
+    assert "Error during realtime transcription: transport timed out" in caplog.text
+    assert "No Realtime transcript received" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_realtime_session_without_audio_fails_and_frees_its_slot(
     enhanced_handler, mock_info, mock_clients, monkeypatch
 ):

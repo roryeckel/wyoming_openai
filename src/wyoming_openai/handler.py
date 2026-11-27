@@ -880,9 +880,10 @@ class OpenAIEventHandler(AsyncEventHandler):
             if transcript_future is None:
                 raise RealtimeTranscriptionError("Realtime transcription session was not initialized")
 
+            # The commit is a websocket send that can stall too, so it shares the time limit
+            deadline = asyncio.timeout(REALTIME_STT_TRANSCRIPT_TIMEOUT)
             try:
-                # The commit is a websocket send that can stall too, so it shares the time limit
-                async with asyncio.timeout(REALTIME_STT_TRANSCRIPT_TIMEOUT):
+                async with deadline:
                     await self._append_realtime_audio(audio_stream.realtime_converter.flush(), connection)
                     if transcript_future.done():
                         # stop() closed the session during the flush: await its failure instead of committing
@@ -892,6 +893,9 @@ class OpenAIEventHandler(AsyncEventHandler):
                         await connection.input_audio_buffer.commit()
                         transcript = await transcript_future
             except TimeoutError as err:
+                if not deadline.expired():
+                    # Another time limit's, such as a transport timeout the receiver failed with: reported as it is
+                    raise
                 # A server that stalls with the socket open would otherwise hold the Wyoming client forever
                 raise RealtimeTranscriptionError(
                     f"No Realtime transcript received within {REALTIME_STT_TRANSCRIPT_TIMEOUT:g} seconds "
