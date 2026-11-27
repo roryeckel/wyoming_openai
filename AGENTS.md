@@ -93,12 +93,15 @@ GPU, and CI does not run it.
 | Class | What counts | Before opening the PR |
 |---|---|---|
 | Request shape | What a backend receives changes: request fields or their values (`prompt`, `language`, `response_format`, voice, speed, instructions, the extra-body merge), model or voice resolution, which route or transport is used, Realtime session settings, the audio sent (format, rate, chunking), auth or headers, backend detection or a backend shim | The request-shape check below, then the suite on several providers |
-| Proxy behavior | What Home Assistant sees changes, but not the request: concurrency, queueing, timeouts, event order or content, error reporting, connection lifecycle and shutdown, handling of response audio, streaming versus buffering, startup | The suite on one provider; the local Speaches lane is enough |
+| Proxy behavior | What Home Assistant sees changes, but not the request: concurrency, queueing, timeouts, event order or content, error reporting, connection lifecycle and shutdown, handling of response audio, streaming versus buffering, startup | The suite on one provider, free or not, that serves the service and request mode the change touches (see Providers) |
 | Neither | Docs, tests, logging, CLI parsing without a behavior change, refactors the unit tests cover | No smoke run |
 
 When unsure, take the stricter class. Adding names to the STT prompt (#133) is
 a request-shape change; limiting concurrent requests (#135) is a proxy-behavior
-change. These classes are separate from the `ha-e2e` label above: a change can
+change. For a proxy-behavior change, the local lane is enough when the change is
+on STT not streamed or TTS sentence by sentence; `speaches-other-modes` runs
+streamed STT and TTS in one request per reply for free, and the OpenAI lane
+Realtime. These classes are separate from the `ha-e2e` label above: a change can
 need both.
 
 ### Request-shape check
@@ -134,11 +137,13 @@ For each of those, a request-shape change runs on:
   sentence), `openai-unstreamed` (STT not streamed, TTS one request per reply),
   or the OpenAI lane (Realtime)
 - every backend shim its code path reaches: `SPEACHES` (the local lane: STT not
-  streamed, TTS sentence by sentence), `KOKORO_FASTAPI` (`kokoro-fastapi`),
-  `LOCALAI` (`localai`)
+  streamed, TTS sentence by sentence; `speaches-other-modes`: STT streamed, TTS
+  one request per reply), `KOKORO_FASTAPI` (`kokoro-fastapi`), `LOCALAI`
+  (`localai`)
 - one third-party provider on the plain `OPENAI` backend that serves that
   service: `speaches-openai-backend` is free for both, and `groq` (both),
-  `mistral` (STT), `openai-edge-tts` or `chatterbox` (TTS) count too
+  `mistral` (STT) or `chatterbox` (TTS) count too. `openai-edge-tts` is known
+  broken upstream (#139)
 
 A provider counts only for the service and mode it runs, which its file in
 `tests/ha_e2e/smoke/providers/` states in its `Serves:` line. A TTS-only

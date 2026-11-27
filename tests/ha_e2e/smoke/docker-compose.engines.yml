@@ -54,8 +54,9 @@ services:
       retries: 30
       start_period: 60s
 
-  # One-shot: installs the models localai.env uses, and exits once LocalAI lists them all, as the installs it
-  # starts finish in the background. Run it with: docker compose ... --profile localai run --rm init-localai
+  # One-shot: installs the models localai.env uses, following each install job to its end, so a failed download
+  # fails it at once, then checks LocalAI lists them by their config names. Run it with:
+  #   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile localai run --rm init-localai
   init-localai:
     profiles: [localai]
     image: alpine:latest
@@ -63,8 +64,7 @@ services:
     restart: "no"
     environment:
       LOCALAI_URL: http://localai:8080
-      INSTALL: whisper-base voice-en-us-amy-low voice-en-us-ryan-medium
-      REQUIRED: whisper-base en-us-amy-low.onnx en-us-ryan-medium.onnx
+      MODELS: whisper-base voice-en-us-amy-low voice-en-us-ryan-medium
     depends_on:
       localai:
         condition: service_healthy
@@ -72,23 +72,27 @@ services:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache curl > /dev/null
-        for model in $$INSTALL; do
-          curl -sf "$$LOCALAI_URL/models/apply" -H "Content-Type: application/json" \
-            -d "{\"id\": \"localai@$$model\"}" > /dev/null || { echo "could not install $$model"; exit 1; }
-        done
-        missing="$$REQUIRED"
-        for attempt in $$(seq 180); do
-          listed=$$(curl -sf "$$LOCALAI_URL/v1/models")
-          missing=""
-          for model in $$REQUIRED; do
-            echo "$$listed" | grep -q "\"$$model\"" || missing="$$missing $$model"
+        apk add --no-cache curl jq > /dev/null
+        for model in $$MODELS; do
+          uuid=$$(curl -sf "$$LOCALAI_URL/models/apply" -H "Content-Type: application/json" \
+            -d "{\"id\": \"localai@$$model\"}" | jq -r '.uuid // empty')
+          [ -n "$$uuid" ] || { echo "LocalAI did not start installing $$model"; exit 1; }
+          processed=false
+          for attempt in $$(seq 180); do
+            job=$$(curl -sf "$$LOCALAI_URL/models/jobs/$$uuid")
+            processed=$$(echo "$$job" | jq -r '.processed')
+            [ "$$processed" = true ] && break
+            sleep 5
           done
-          [ -z "$$missing" ] && { echo "LocalAI lists every model"; exit 0; }
-          sleep 10
+          error=$$(echo "$$job" | jq -r '.error // empty')
+          [ "$$processed" = true ] && [ -z "$$error" ] || { echo "$$model: $${error:-not installed in 15 minutes}"; exit 1; }
+          echo "installed $$model"
         done
-        echo "LocalAI never listed:$$missing"
-        exit 1
+        listed=$$(curl -sf "$$LOCALAI_URL/v1/models" | jq -r '.data[].id')
+        for model in $$MODELS; do
+          echo "$$listed" | grep -qx "$$model" || { echo "LocalAI does not list $$model"; exit 1; }
+        done
+        echo "LocalAI lists every model"
 
   openai-edge-tts:
     profiles: [openai-edge-tts]

@@ -110,9 +110,12 @@ In bash, for example:
 ```bash
 ( set +x
   unset SMOKE_STT_KEY SMOKE_TTS_KEY
-  key() { sed -n "s/^$1 *= *//p" "$ENV_FILE" | tr -d "\"'"; }
-  SMOKE_STT_KEY="$(key STT_OPENAI_KEY)" SMOKE_TTS_KEY="$(key TTS_OPENAI_KEY)" SMOKE_PROVIDER=openai \
-    docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait )
+  ENV_FILE=/path/to/the/main/checkout/.env
+  # The last uncommented entry, without quotes or a trailing comment
+  key() { sed -n "s/^$1 *= *//p" "$ENV_FILE" | tail -n 1 | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//' | tr -d "\"'"; }
+  export SMOKE_STT_KEY="$(key STT_OPENAI_KEY)" SMOKE_TTS_KEY="$(key TTS_OPENAI_KEY)"
+  [ -n "$SMOKE_STT_KEY" ] && [ -n "$SMOKE_TTS_KEY" ] || { echo "a key is missing from .env" >&2; exit 1; }
+  SMOKE_PROVIDER=openai docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait )
 ```
 
 This reads uncommented entries only. A commented-out key is used only with
