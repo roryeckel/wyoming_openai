@@ -39,7 +39,7 @@ _WAVE_FORMAT_NAMES = {
 }
 # Where a response that is audio of a kind the proxy does not play has which bytes, named so it fails saying what it
 # is instead of playing as noise. Raw PCM has one of these only by a chance too small to matter. MP3 without an ID3
-# tag and ADTS AAC have no signature and are recognized by their first frame header instead
+# tag and ADTS AAC have no signature and are recognized by their first two frame headers instead
 _FOREIGN_AUDIO_SIGNATURES = (
     (0, b"RF64", "RF64 (64-bit WAV)"),
     (0, b"BW64", "BW64 (64-bit WAV)"),
@@ -100,36 +100,60 @@ class WavHeader(NamedTuple):
     sample_format: int  # WAVE_FORMAT_PCM or WAVE_FORMAT_IEEE_FLOAT, after unwrapping EXTENSIBLE
 
 
-def _frame_header_audio(start: bytes) -> str | None:
+_FRAME_HEADER_BYTES = 6  # Enough of an MP3 or ADTS AAC frame header to tell how long its frame is
+# Layer III bitrates in kbit/s by bitrate index, and sample rates in Hz by MPEG version (3: MPEG-1, 2: MPEG-2,
+# 0: MPEG-2.5) and sample rate index
+_MPEG1_LAYER3_KBPS = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
+_MPEG2_LAYER3_KBPS = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)
+_MPEG_SAMPLE_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+
+
+class _FrameHeader(NamedTuple):
+    name: str
+    length: int  # Bytes from this header to the next frame's
+    stream: tuple[int, int]  # Fields every frame of the same stream repeats
+
+
+def _frame_header(start: bytes) -> _FrameHeader | None:
     """
-    Name the audio a response is when it starts with the header of an MP3 or ADTS AAC frame.
+    Read the MP3 or ADTS AAC frame header a response starts with, if it starts with one.
 
     Both start with a run of set bits, as near-silent 16-bit PCM does, so the fields after it are checked too.
-    16-bit PCM then matches only when its first sample is one of ten values from -1025 to -7425, -30 dBFS or
-    louder, which speech that starts from silence does not have.
+    16-bit PCM can still look like one when its first sample is one of ten values from -1025 to -7425, which is
+    why the audio is only taken for MP3 or AAC once a second header follows where this one says the next frame
+    starts.
     """
-    if len(start) < 3 or start[0] != 0xFF:
+    if len(start) < _FRAME_HEADER_BYTES or start[0] != 0xFF:
         return None
     second, third = start[1], start[2]
+    version, layer = (second >> 3) & 3, (second >> 1) & 3
+    bitrate_index, rate_index = third >> 4, (third >> 2) & 3
     # MPEG 1, 2 or 2.5 Layer III: an 11-bit sync, a version that is not reserved, layer bits 01, and a bitrate and
     # sample rate that are neither free-format nor reserved
-    if second & 0xE0 == 0xE0 and (second >> 3) & 3 != 1 and (second >> 1) & 3 == 1:
-        if (third >> 4) not in (0, 15) and (third >> 2) & 3 != 3:
-            return "MP3"
-    # ADTS AAC: a 12-bit sync, layer bits 00, and a sampling frequency index that is defined
+    if second & 0xE0 == 0xE0 and version != 1 and layer == 1 and bitrate_index not in (0, 15) and rate_index != 3:
+        mpeg1 = version == 3
+        bitrate = (_MPEG1_LAYER3_KBPS if mpeg1 else _MPEG2_LAYER3_KBPS)[bitrate_index] * 1000
+        padding = (third >> 1) & 1
+        length = (144 if mpeg1 else 72) * bitrate // _MPEG_SAMPLE_RATES[version][rate_index] + padding
+        return _FrameHeader("MP3", length, (second & 0xFE, third & 0x0C))
+    # ADTS AAC: a 12-bit sync, layer bits 00, a sampling frequency index that is defined, and a frame length, which
+    # counts the 7-byte header, in the 13 bits after the copyright bits
     if second & 0xF6 == 0xF0 and (third >> 2) & 0xF < 13:
-        return "AAC (ADTS)"
+        length = ((start[3] & 0x03) << 11) | (start[4] << 3) | (start[5] >> 5)
+        if length >= 7:
+            return _FrameHeader("AAC (ADTS)", length, (second & 0xF6, third & 0xFC))
     return None
 
 
+def _foreign_audio(name: str) -> ForeignAudioError:
+    return ForeignAudioError(f"TTS response is {name} audio, which the proxy does not play (only RIFF WAV and raw PCM)")
+
+
 def _reject_foreign_audio(start: bytes) -> None:
-    """Raise for a response whose first bytes show it is a kind of audio the proxy does not play."""
-    names = [name for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES if start.startswith(signature, offset)]
-    name = names[0] if names else _frame_header_audio(start)
-    if name:
-        raise ForeignAudioError(
-            f"TTS response is {name} audio, which the proxy does not play (only RIFF WAV and raw PCM)"
-        )
+    """Raise for a response whose first bytes are the signature of a kind of audio the proxy does not play."""
+    for offset, signature, name in _FOREIGN_AUDIO_SIGNATURES:
+        if start.startswith(signature, offset):
+            raise _foreign_audio(name)
 
 
 def _describe_format(tag: int) -> str:
@@ -349,6 +373,15 @@ class WavFramer:
                 if len(self._pending) < _SIGNATURE_BYTES:
                     return b""
                 _reject_foreign_audio(self._pending)
+                if frame := _frame_header(self._pending):
+                    # Held until the next frame's header could have arrived, at most an ADTS frame of 8 KiB: raw PCM
+                    # can start like one header, but a second where the first one says the next frame starts
+                    # shows the response is MP3 or AAC
+                    if len(self._pending) < frame.length + _FRAME_HEADER_BYTES:
+                        return b""
+                    following = _frame_header(self._pending[frame.length :])
+                    if following and following.name == frame.name and following.stream == frame.stream:
+                        raise _foreign_audio(frame.name)
                 # Raw PCM, which is played as it arrives rather than after a wait for a header that will not come.
                 # Callers report `header_missing`, once for all the responses of a synthesis
                 return self._release_pending()

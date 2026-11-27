@@ -22,6 +22,14 @@ from wyoming_openai.wav import (
 PCM = b"\x00\x01" * 240
 
 
+def _adts_frame(length: int) -> bytes:
+    """An ADTS AAC frame of the given length, header included: AAC LC, 24 kHz, mono, as macOS afconvert writes it."""
+    header = bytes(
+        (0xFF, 0xF9, 0x58, 0x40 | (length >> 11), (length >> 3) & 0xFF, ((length & 7) << 5) | 0x1F, 0xFC)
+    )
+    return header + bytes(length - len(header))
+
+
 def _wav(pcm: bytes = PCM, rate: int = 16000, channels: int = 1) -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav_file:
@@ -178,11 +186,11 @@ FOREIGN_AUDIO = [
     (b"caff\x00\x01\x00\x00desc" + bytes(40), "CAF"),
     (b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01" + bytes(24), "WebM or Matroska"),
     (b"\x00\x00\x00\x1cftypM4A \x00\x00\x00\x00" + bytes(16), "MP4 or M4A"),
-    # As Microsoft Edge TTS sends it: MPEG-2 Layer III, 24 kHz, 48 kbit/s, without an ID3 tag
-    (bytes.fromhex("fff364c400000003") + bytes(32), "MP3"),
-    (b"\xff\xfb\x90\x64" * 8, "MP3"),
-    # As macOS afconvert writes it
-    (bytes.fromhex("fff9586001600000") + bytes(32), r"AAC \(ADTS\)"),
+    # As Microsoft Edge TTS sends it: MPEG-2 Layer III, 24 kHz, 48 kbit/s, 144-byte frames, without an ID3 tag
+    ((bytes.fromhex("fff364c4") + bytes(140)) * 2, "MP3"),
+    # MPEG-1 Layer III, 44.1 kHz, 128 kbit/s: 417-byte frames
+    ((b"\xff\xfb\x90\x64" + bytes(413)) * 2, "MP3"),
+    (_adts_frame(200) + _adts_frame(180), r"AAC \(ADTS\)"),
     # A tag says nothing about the audio after it, here AAC
     (b"ID3\x04\x00\x00\x00\x00\x00\x00" + bytes.fromhex("fff9586001600000"), "MP3 or other ID3-tagged"),
 ]
@@ -231,6 +239,9 @@ def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, a
         b"\xff\xf1\x3c\x80" * 8,
         b"ID3!" * 8,
         b"RIF\x00" * 8,
+        # One frame header and no second where its frame would end
+        b"\xff\xfb\x90\x64" + b"\x00\x01" * 300,
+        _adts_frame(200) + b"\x00\x01" * 100,
     ],
     ids=[
         "near-silence",
@@ -239,6 +250,8 @@ def test_framer_names_audio_of_another_kind_instead_of_playing_it(audio, name, a
         "adts-header-with-a-reserved-sample-rate",
         "id3-without-a-version",
         "riff-prefix-only",
+        "one-mp3-header",
+        "one-adts-header",
     ],
 )
 def test_framer_plays_raw_pcm_that_only_resembles_another_kind_of_audio(pcm):
@@ -257,9 +270,38 @@ def test_framer_never_takes_pcm_starting_quieter_than_minus_30_dbfs_for_mp3_or_a
             framer = WavFramer(SPEECH_PCM_FORMAT)
             assert framer.feed(pcm) + framer.finish() == pcm
 
-    # The quietest first sample that can be taken for a frame header, -1025, as MPEG-1 Layer III at 128 kbit/s
-    with pytest.raises(WavFormatError, match="^TTS response is MP3 audio"):
-        WavFramer(SPEECH_PCM_FORMAT).feed(struct.pack("<hB", -1025, 0x90) + bytes(5))
+
+
+# Every first sample of 16-bit PCM that reads as the start of an MP3 or ADTS frame header
+SAMPLES_LIKE_A_FRAME_HEADER = [-7425, -7169, -3841, -3585, -3329, -3073, -1793, -1537, -1281, -1025]
+
+
+@pytest.mark.parametrize("first_sample", SAMPLES_LIKE_A_FRAME_HEADER)
+def test_framer_plays_pcm_whose_first_sample_reads_as_a_frame_header(first_sample):
+    """Speech need not start from silence: a loud first sample plays unless a second frame header follows it."""
+    # Ordinary PCM after it, falling away as in the example a reviewer gave, with -1025 first
+    pcm = struct.pack("<h", first_sample) + struct.pack("<7h", -1136, -1200, -1250, -1200, -1100, -1000, -900) * 600
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+
+    assert b"".join(framer.feed(pcm[i : i + 7]) for i in range(0, len(pcm), 7)) + framer.finish() == pcm
+
+
+def test_framer_holds_a_response_that_starts_like_a_frame_only_until_the_next_frame_would_start():
+    framer = WavFramer(WAV_FORMAT)
+    header = bytes.fromhex("fff364c4")  # A 144-byte MP3 frame
+
+    assert framer.feed(header + b"\x00\x01" * 72) == b""
+    # The 6 bytes where its frame ends, which would be the next frame's header, and are not
+    assert framer.feed(b"\x00\x01" * 3) == header + b"\x00\x01" * 75
+    assert framer.header_missing
+
+
+def test_framer_plays_a_response_too_short_to_show_a_second_frame_header():
+    framer = WavFramer(SPEECH_PCM_FORMAT)
+    pcm = bytes.fromhex("fff364c4") + bytes(20)
+
+    assert framer.feed(pcm) == b""
+    assert framer.finish() == pcm
 
 
 @pytest.mark.parametrize(
