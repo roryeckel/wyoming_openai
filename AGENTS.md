@@ -58,6 +58,17 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --build
 ```
 
+## Pull Requests
+
+Every PR runs lint, tests, integration, Docker and CodeQL checks. The **Home
+Assistant E2E** suite (`.github/workflows/ha-e2e.yml`) is skipped unless the PR
+carries the `ha-e2e` label, so on an unlabeled PR a skipped `ha-e2e` check is
+not a pass. Before merging a PR that changes runtime behavior (anything under
+`src/`, the Docker or compose files), add the label with
+`gh pr edit <PR#> --add-label ha-e2e` and wait for that run to pass; a
+docs-only or test-only PR doesn't need it. It can also be run manually with
+`gh workflow run ha-e2e.yml --ref <branch>`.
+
 ## Releases
 
 Releases off `main` go through the **Bump Version** GitHub Action
