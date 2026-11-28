@@ -60,11 +60,11 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 
 ## Pull Requests
 
-Every PR runs lint, tests, integration, Docker and CodeQL checks. The **Home
-Assistant E2E** suite (`.github/workflows/ha-e2e.yml`) only runs on a PR with
-the `ha-e2e` label; without it the check shows as skipped, which is not a pass.
+Every PR runs lint, tests, integration, Docker and CodeQL checks. The **scripted
+Home Assistant** suite (`.github/workflows/ha-scripted.yml`) only runs on a PR with
+the `ha-scripted` label; without it the check shows as skipped, which is not a pass.
 
-Add the label (`gh pr edit <PR#> --add-label ha-e2e`) and wait for a passing
+Add the label (`gh pr edit <PR#> --add-label ha-scripted`) and wait for a passing
 run before merging when a change could alter what Home Assistant sees over the
 Wyoming connection, or when it sees it:
 
@@ -80,14 +80,47 @@ The label is usually not needed for docs, tests, logging, CLI parsing or
 validation that doesn't change behavior, refactors the unit tests cover,
 or request fields sent only to a backend. When unsure, label it: the run
 costs a few minutes. It can also be started by hand with
-`gh workflow run ha-e2e.yml --ref <branch>`.
+`gh workflow run ha-scripted.yml --ref <branch>`.
+
+## Live Testing
+
+The live Home Assistant suite (`pytest -m ha_live`) runs Home Assistant's
+voice pipeline through the proxy against real STT and TTS providers. It runs
+on the CPU, faster on an NVIDIA GPU, and CI does not run it. Before opening a
+PR, run it when a change alters:
+
+- what a backend receives (a request-shape change): request fields or their
+  values, model or voice resolution, the route or transport, Realtime session
+  settings, the audio sent, auth or headers, backend detection or a backend
+  shim. It runs on several providers. Official OpenAI is the strictest
+  requirement: a change that breaks it does not ship. A break on another
+  provider is fixed in the same change, or raised with the developer if the
+  fix is hard.
+- what Home Assistant sees, but not the request (a proxy-behavior change):
+  concurrency, queueing, timeouts, event order or content, error reporting,
+  connection lifecycle and shutdown, response audio, streaming versus
+  buffering, startup. It runs on one provider that serves the request mode the
+  change touches.
+
+Docs, tests, logging, CLI parsing without a behavior change, and refactors the
+unit tests cover need no run. When unsure, take the stricter class. This is
+separate from the `ha-scripted` label above: a change can need both.
+
+The `ha-live` skill (`.agents/skills/ha-live/SKILL.md`) has the rest: the
+request-shape check, which providers count, the plan, the commands and the
+report. Two of its rules hold before it is loaded:
+
+- Show the developer the live-test plan, and wait for them to accept it, before
+  running anything.
+- Only an uncommented key in this repository's `.env` counts as permission to
+  use it. Never print a key.
 
 ## Releases
 
 Releases off `main` go through the **Bump Version** GitHub Action
 (`.github/workflows/bump-version.yml`); don't hand-edit the version strings or
 create the tag. Dispatch it with `gh workflow run bump-version.yml -f
-bump_type=<patch|minor|major>`: it runs the Home Assistant E2E gate, opens a
+bump_type=<patch|minor|major>`: it runs the scripted Home Assistant gate, opens a
 `release-bump` PR, and, once merged, the gated **Draft Release** workflow
 creates the draft release. Publishing that draft fires PyPI and Docker
 `latest`. See `.agents/skills/bump-version/SKILL.md` for the full flow.
@@ -144,11 +177,20 @@ The server accepts both command-line arguments and environment variables. Key co
 
 ## Testing Strategy
 
-Tests are organized by module:
+Unit tests run in the default run, one module per area. The main ones:
 - `test_handler.py`: Event handler logic
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
 - `test_wav.py`: WAV header parsing and framing
 - `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
-- `test_integration.py`: End-to-end scenarios
+- `test_handler_workflows.py`: Whole STT and TTS workflows through the handler, with the backend mocked
+- `test_e2e_helpers.py`, `ha_e2e/test_ha_api.py`, `ha_e2e/test_helpers.py`: the Docker suites' helpers, tested
+  without Docker
+
+Each Docker suite has one marker, and nothing else selects it:
+- `test_e2e.py`, `test_e2e_negative.py` (`-m integration`): the Wyoming suite, a real proxy against a real Speaches
+- `ha_e2e/test_ha_scripted.py` (`-m ha_scripted`): scripted Home Assistant suite, the CI gate (see Pull Requests)
+- `ha_e2e/test_ha_live.py` (`-m ha_live`): live Home Assistant suite, on real providers, never in CI (see Live Testing)
+
+`tests/README.md` says how to run each suite and what it needs.

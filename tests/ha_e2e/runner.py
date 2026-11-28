@@ -51,6 +51,15 @@ class AssistRunResult:
     tts_progress: TtsProgress | None
     run_started_at: float
     conversation_id: str
+    # time.monotonic() at which each of `events` arrived, in the same order
+    received_at: list[float] = field(default_factory=list)
+
+    def received(self, event_type: str) -> float | None:
+        """When the first event of a type arrived, as time.monotonic()."""
+        for event, at in zip(self.events, self.received_at, strict=False):
+            if event.get("type") == event_type:
+                return at
+        return None
 
     @property
     def error_events(self) -> list[dict[str, Any]]:
@@ -131,17 +140,21 @@ async def run_assist(
     allow_tts_error: bool = False,
     stop_after_tts_bytes: int | None = None,
     on_tts_bytes: Callable[[TtsProgress], Awaitable[None]] | None = None,
+    stop_fetch_on_error: bool = False,
 ) -> AssistRunResult:
     """Run one Assist pipeline turn and collect every event.
 
     The TTS URL is available in the run-start event, before the pipeline's tts
     stage finishes.  Fetching it immediately makes the measured time to first
     audio real, and lets the failure lane stop the proxy while audio is still
-    streaming.
+    streaming.  With ``stop_fetch_on_error``, a run that reported an error does
+    not wait for its TTS audio: Home Assistant keeps the URL open for audio
+    that will not come, until ``tts_timeout``.
     """
 
     run_started_at = time.monotonic()
     events: list[dict[str, Any]] = []
+    received_at: list[float] = []
     run_start: dict[str, Any] | None = None
     progress: TtsProgress | None = None
     fetch_task: asyncio.Task[None] | None = None
@@ -203,6 +216,7 @@ async def run_assist(
 
                     event = message.get("event") or {}
                     events.append(event)
+                    received_at.append(time.monotonic())
                     event_type = event.get("type")
                     data = event.get("data") or {}
 
@@ -240,7 +254,14 @@ async def run_assist(
                 # HA emits run-end before the TTS URL has finished streaming.
                 # Keep the stop watcher alive while the audio download completes,
                 # then wait for any callback it started.
-                if fetch_task is not None and progress is not None:
+                if stop_fetch_on_error and any(event.get("type") == "error" for event in events):
+                    for task in (watcher_task, fetch_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        *(task for task in (watcher_task, fetch_task) if task is not None), return_exceptions=True
+                    )
+                elif fetch_task is not None and progress is not None:
                     fetch_timed_out = False
                     try:
                         await asyncio.wait_for(fetch_task, timeout=tts_timeout)
@@ -283,6 +304,106 @@ async def run_assist(
         tts_progress=progress,
         run_started_at=run_started_at,
         conversation_id=resolved_conversation_id,
+        received_at=received_at,
+    )
+
+
+async def run_assist_text(
+    settings: HaE2ESettings,
+    access_token: str,
+    pipeline_id: str,
+    text: str,
+    *,
+    start_stage: str = "tts",
+    conversation_id: str | None = None,
+    event_timeout: float = 180.0,
+    tts_timeout: float = 300.0,
+) -> AssistRunResult:
+    """Run a pipeline from a text stage, ``intent`` or ``tts``, to TTS, and fetch the audio as it streams."""
+
+    run_started_at = time.monotonic()
+    events: list[dict[str, Any]] = []
+    received_at: list[float] = []
+    run_start: dict[str, Any] | None = None
+    progress: TtsProgress | None = None
+    fetch_task: asyncio.Task[None] | None = None
+
+    async with async_connect(settings.ws_url, max_size=None, open_timeout=10, proxy=None) as websocket:
+        greeting = json.loads(await websocket.recv())
+        if greeting.get("type") != "auth_required":
+            raise HaApiError(f"unexpected websocket greeting: {greeting}")
+        await websocket.send(json.dumps({"type": "auth", "access_token": access_token}))
+        auth = json.loads(await websocket.recv())
+        if auth.get("type") != "auth_ok":
+            raise HaApiError(f"websocket authentication failed: {auth}")
+
+        request: dict[str, Any] = {
+            "id": 1,
+            "type": "assist_pipeline/run",
+            "start_stage": start_stage,
+            "end_stage": "tts",
+            "input": {"text": text},
+            "pipeline": pipeline_id,
+        }
+        if conversation_id is not None:
+            request["conversation_id"] = conversation_id
+        await websocket.send(json.dumps(request))
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(tts_timeout, connect=10.0)) as http:
+            try:
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(websocket.recv(), timeout=event_timeout)
+                    except TimeoutError as exc:
+                        raise TimeoutError(
+                            f"timed out after {event_timeout}s waiting for a pipeline event; collected "
+                            f"{[event.get('type') for event in events]}"
+                        ) from exc
+                    if isinstance(frame, bytes):
+                        continue
+                    message = json.loads(frame)
+                    if message.get("id") != 1:
+                        continue
+                    if message.get("type") == "result":
+                        if not message.get("success", True):
+                            raise HaApiError(f"assist_pipeline/run was rejected: {message}")
+                        continue
+                    if message.get("type") != "event":
+                        continue
+                    event = message.get("event") or {}
+                    events.append(event)
+                    received_at.append(time.monotonic())
+                    if event.get("type") == "run-start":
+                        data = event.get("data") or {}
+                        run_start = data
+                        tts_url = (data.get("tts_output") or {}).get("url")
+                        if tts_url:
+                            progress = TtsProgress()
+                            fetch_task = asyncio.create_task(
+                                _fetch_tts(http, _absolute_url(settings.base_url, str(tts_url)), progress),
+                                name="ha-e2e-tts-fetch",
+                            )
+                    elif event.get("type") == "run-end":
+                        break
+                if fetch_task is not None:
+                    if any(event.get("type") == "error" for event in events):
+                        # The run failed: its TTS audio will not come, so the fetch is not waited for
+                        fetch_task.cancel()
+                        await asyncio.gather(fetch_task, return_exceptions=True)
+                    else:
+                        await asyncio.wait_for(fetch_task, timeout=tts_timeout)
+            finally:
+                if fetch_task is not None and not fetch_task.done():
+                    fetch_task.cancel()
+                    await asyncio.gather(fetch_task, return_exceptions=True)
+
+    return AssistRunResult(
+        events=events,
+        run_start=run_start,
+        tts_progress=progress,
+        run_started_at=run_started_at,
+        conversation_id=str((run_start or {}).get("conversation_id", conversation_id or "")),
+        received_at=received_at,
     )
 
 
