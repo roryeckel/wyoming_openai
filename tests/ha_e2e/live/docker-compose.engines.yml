@@ -1,33 +1,18 @@
-# Local engines for the provider lane, one profile each, with the same images and settings as the repository's own
-# compose files for them. They run in a project of their own (ha_live_engines), with ha_live_* container names, on
-# the live stack's network and without host ports, so nothing they do touches a proxy or an engine the developer
-# runs. Start the live stack first, then the engine a provider file names:
-#
-#   docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
-#
-# Remove every engine the live run started, by project name:
-#
-#   docker compose -p ha_live_engines down
+# Local engines for the provider lane, one profile each, with the settings of the repository's own compose files for
+# them, on the CPU; docker-compose.engines.gpu.yml moves them to an NVIDIA GPU. They run in a project of their own
+# (ha_live_engines), with ha_live_* container names, on the live stack's network and without host ports, so nothing
+# they do touches a proxy or an engine the developer runs. A provider file's Engine: line says how to start its
+# engine; tests/README.md, "Home Assistant Live Tests", how to run the lane.
 name: ha_live_engines
-
-x-gpu: &gpu
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            device_ids: ["${HA_LIVE_GPU:-0}"]
-            capabilities: [gpu]
 
 services:
   kokoro:
-    <<: *gpu
     profiles: [kokoro-fastapi]
-    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
     container_name: ha_live_kokoro
     restart: "no"
     environment:
-      USE_GPU: "true"
+      USE_GPU: "false"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8880/v1/test"]
       interval: 10s
@@ -36,9 +21,8 @@ services:
       start_period: 40s
 
   localai:
-    <<: *gpu
     profiles: [localai]
-    image: localai/localai:latest-gpu-nvidia-cuda12
+    image: localai/localai:latest
     container_name: ha_live_localai
     restart: "no"
     environment:
@@ -133,8 +117,7 @@ services:
       start_period: 20s
 
   chatterbox-tts:
-    # On the GPU, which the repository's own compose file leaves it off: on the CPU long replies time out
-    <<: *gpu
+    # On the CPU its long replies time out: run it with docker-compose.engines.gpu.yml
     profiles: [chatterbox]
     image: travisvn/chatterbox-tts-api:latest
     container_name: ha_live_chatterbox

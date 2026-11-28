@@ -1,14 +1,8 @@
-# OpenAI Realtime proxies for the live stack: Realtime STT and Realtime TTS, at the default limits and at 1.
-# Start the live stack first; these join its network. The key is read from OPENAI_API_KEY, and starting them without
-# it fails. Their ports are published on 127.0.0.1 only, since every request to them is billed to that key:
-#
-#   docker compose -f tests/ha_e2e/live/docker-compose.openai.yml up -d
-#   HA_LIVE_OPENAI=1 pytest -m ha_live -v
-#
-# Kept in a project of its own, so no command on the live stack recreates these without the key. Remove them, and
-# the key with them, by project name, which needs no key:
-#
-#   docker compose -p ha_live_openai down
+# The OpenAI lane: Realtime STT and Realtime TTS proxies for the live stack, at the default limits and at 1, on its
+# network. How to run it: tests/README.md, "Home Assistant Live Tests". The key is read from OPENAI_API_KEY, and
+# starting them without it fails. Their ports are published on 127.0.0.1 only, since every request to them is billed
+# to that key. Kept in a project of its own (ha_live_openai), so no command on the live stack recreates these without
+# the key, and `docker compose -p ha_live_openai down` removes them, and the key with them, without one.
 name: ha_live_openai
 
 x-openai-proxy: &openai-proxy

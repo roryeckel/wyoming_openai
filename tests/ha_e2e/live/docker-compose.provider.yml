@@ -1,16 +1,9 @@
-# The provider lane: one proxy, at the default limits, for one provider defined in providers/<name>.env. Start the
-# live stack first; this joins its network. A provider that runs locally has its engine in docker-compose.engines.yml,
-# to start first: its file says how. For a provider that needs a key, set HA_LIVE_STT_KEY and HA_LIVE_TTS_KEY, for the
-# side or sides it serves:
-#
-#   HA_LIVE_PROVIDER=<name> docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d --wait
-#   HA_LIVE_PROVIDER=<name> pytest -m ha_live -v -k provider
-#
-# Whatever a provider file leaves unset comes from providers/defaults/speaches.env, the fallback for the side a
-# preset doesn't serve: the stack's own Speaches. Every request to a paid provider is billed to its key, so the port
-# is published on 127.0.0.1 only. Remove the proxy, and any key with it, by project name, which needs no variables:
-#
-#   docker compose -p ha_live_provider down
+# The provider lane: one proxy for the live stack, at the default limits, on its network, for the provider
+# HA_LIVE_PROVIDER names in providers/<name>.env. How to run it: tests/README.md, "Home Assistant Live Tests". A key
+# comes from HA_LIVE_STT_KEY and HA_LIVE_TTS_KEY, for the side or sides the provider serves. Whatever a provider file
+# leaves unset comes from providers/defaults/speaches.env, the fallback for the side a preset doesn't serve: the
+# stack's own Speaches. Every request to a paid provider is billed to its key, so the port is published on 127.0.0.1
+# only. `docker compose -p ha_live_provider down` removes the proxy, and any key with it, without any variable.
 name: ha_live_provider
 
 services:

@@ -1071,7 +1071,7 @@ async def test_proxy_restart_under_traffic(live: Live) -> None:
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize("proxy", _proxies(DEFAULT, UNLIMITED, LIMITED))
 async def test_eight_satellites_at_once(live: Live, proxy: Proxy) -> None:
-    """Eight turns at once on the GPU: all go through, and no Home Assistant connection meets the write limit."""
+    """Eight turns at once: all go through, and no Home Assistant connection meets the write limit."""
 
     waits_before = _log_count(proxy, STT_WAIT_LOG)
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)

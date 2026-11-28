@@ -1,16 +1,10 @@
-# Stack for the live Home Assistant tests (pytest -m ha_live), on a GPU.
-#
-#   docker build -t wyoming_openai:live .
-#   docker compose -f tests/ha_e2e/live/docker-compose.yml up -d
-#   pytest -m ha_live -v
+# Stack for the live Home Assistant tests (pytest -m ha_live), on the CPU; docker-compose.gpu.yml moves its Speaches
+# to an NVIDIA GPU. How to run it: tests/README.md, "Home Assistant Live Tests".
 #
 # Four proxies share one Speaches, each with other limits, so a turn can be sent to the one a scenario needs:
-# the defaults (3), 1, none (0), and 1 again logging at debug level. Home Assistant runs the demo integration, so Assist has devices to control.
-# The stack has its own project, ports and container names, so it runs next to the HA E2E stack, and publishes its
-# ports on 127.0.0.1 only. It reuses the HA E2E stack's model cache volume (create it with `docker volume create
-# wyoming_openai_huggingface-hub` if that stack never ran). Tear it down with:
-#
-#   docker compose -f tests/ha_e2e/live/docker-compose.yml down -v
+# the defaults (3), 1, none (0), and 1 again logging at debug level. Home Assistant runs the demo integration, so
+# Assist has devices to control. The stack has its own project, ports and container names, so it runs next to the
+# scripted suite's stack, and publishes its ports on 127.0.0.1 only. It reuses that stack's model cache volume.
 name: ha_live
 
 x-proxy: &proxy
@@ -42,7 +36,7 @@ x-local-env: &local-env
 services:
   speaches:
     container_name: ha_live_speaches
-    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu
     restart: "no"
     ports:
       - "127.0.0.1:8010:8000"
@@ -50,7 +44,7 @@ services:
       enable_ui: "False"
       log_level: info
       WHISPER__MODEL: Systran/faster-distil-whisper-large-v3
-      WHISPER__compute_type: int8_float32
+      WHISPER__compute_type: int8
       preload_models: '["Systran/faster-distil-whisper-large-v3", "speaches-ai/Kokoro-82M-v1.0-ONNX"]'
       SPEACHES_BASE_URL: http://speaches:8000
     healthcheck:
@@ -61,13 +55,6 @@ services:
       start_period: 40s
     volumes:
       - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${HA_LIVE_GPU:-0}"]
-              capabilities: [gpu]
 
   proxy:
     <<: *proxy
