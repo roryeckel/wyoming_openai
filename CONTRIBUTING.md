@@ -133,8 +133,8 @@ PR.
   conclusions. A separate agent session or subagent with a fresh context counts, as does another model or a person.
   So does an adversarial review, one set on finding ways the change fails. A review the authoring agent runs in its
   own context doesn't count.
-- **A full review** covers the full diff from `main`, tests and docs included, not only the latest commit. Every PR
-  gets at least one.
+- **A full review** covers the full diff from `main`, tests and docs included, not only the latest commit. Every
+  reviewed PR gets at least one, so every PR made with an AI coding agent does.
 - **Each finding** ends up as one of these, and later reviews are told about the accepted ones, so they raise them
   again only with something new:
   - fixed
@@ -155,8 +155,8 @@ The PR's Code review section records the latest review:
 - its result: clean, or which findings were fixed, accepted, dismissed or left open
 - what changed after it, if anything
 
-When the latest review covered only recent changes, the section also records the last full review: its commit and
-result, and any of its findings that are still open or were dismissed.
+When the latest review covered only recent changes, the section also records the last full review's commit and
+result, and every finding still open or dismissed since it, whichever review raised it.
 
 ## AI Coding Agents
 
