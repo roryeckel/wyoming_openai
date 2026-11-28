@@ -21,15 +21,15 @@ jobs:
   # The release preparation is gated on the same suite that must pass before a
   # draft release is created.  It runs against main, which is what the version
   # bump PR is based on.
-  ha-e2e:
-    uses: ./.github/workflows/ha-e2e.yml
+  ha-scripted:
+    uses: ./.github/workflows/ha-scripted.yml
     with:
       ref: main
       force: true
-      ha_version: ${{ vars.HA_E2E_VERSION || '2026.10.1' }}
+      ha_version: ${{ vars.HA_SCRIPTED_VERSION || '2026.10.1' }}
 
   bump:
-    needs: ha-e2e
+    needs: ha-scripted
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -1,0 +1,14 @@
+# Moves the live stack's Speaches to an NVIDIA GPU. Layer it on docker-compose.yml, in every command that brings the
+# stack up, or a later `up` recreates Speaches on the CPU. HA_LIVE_GPU picks the GPU (default 0).
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
+    environment:
+      WHISPER__compute_type: int8_float32
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${HA_LIVE_GPU:-0}"]
+              capabilities: [gpu]

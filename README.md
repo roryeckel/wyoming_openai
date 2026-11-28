@@ -175,6 +175,7 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--stt-prompt`                          | `STT_PROMPT`                               | None                                          | Optional prompt for STT requests (Text to guide the model's style).   |
 | `--stt-extra-body`                      | `STT_EXTRA_BODY`                           | None                                          | JSON object merged into the `/v1/audio/transcriptions` request body via `extra_body` for backend-specific fields. `response_format` must remain `json`, and `stream` may override the model-derived default when set to `true` or `false`. Not applied to `STT_REALTIME_MODELS`. |
 | `--stt-realtime-extra-body`             | `STT_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the transcription settings (`session.audio.input.transcription`) of `STT_REALTIME_MODELS` sessions, for example `{"keywords": ["Wyoming"]}`. Unlike `TTS_REALTIME_EXTRA_BODY` it is not merged into the session itself, so session settings such as `noise_reduction` cannot be set. Sent for every Realtime model, so only set fields all of them accept. A `null` value drops a field the proxy would otherwise send, for example `{"prompt": null}`. `model` cannot be set; use `STT_REALTIME_MODELS`. |
+| `--stt-concurrent-requests`             | `STT_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of STT requests in flight at once across all Wyoming connections, for a backend that can only transcribe so much in parallel (such as one GPU). Further requests wait for a free slot. Must be a whole number of at least 0; `0` means no limit. See [Concurrency Limits](#concurrency-limits). |
 | `--tts-openai-key`                      | `TTS_OPENAI_KEY`                           | None                                          | Optional API key for OpenAI-compatible text-to-speech services.      |
 | `--tts-openai-url`                      | `TTS_OPENAI_URL`                           | https://api.openai.com/v1                     | The base URL for the OpenAI-compatible text-to-speech API            |
 | `--tts-models`                          | `TTS_MODELS`                               | None (this, `TTS_STREAMING_MODELS` or `TTS_REALTIME_MODELS` is required for TTS) | Space-separated list of models to use for the TTS service. Example: `gpt-4o-mini-tts` |
@@ -184,12 +185,12 @@ In addition to using command-line arguments, you can configure the Wyoming OpenA
 | `--tts-speed`                           | `TTS_SPEED`                                | None (autodetected)                           | Speed of the TTS output (ranges from 0.25 to 4.0; capped at 1.5 for `TTS_REALTIME_MODELS`). |
 | `--tts-instructions`                    | `TTS_INSTRUCTIONS`                         | None                                          | Optional instructions for TTS requests (Control the voice).    |
 | `--tts-extra-body`                      | `TTS_EXTRA_BODY`                           | None                                          | JSON object merged into the TTS request body via `extra_body` for backend-specific fields. Audio settings such as `response_format`, `speed`, and `instructions` may override top-level values, but `stream` and `stream_format` are rejected. |
-| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `gpt-4o-mini-tts`) with up to three concurrent synthesis requests by default (see `TTS_CONCURRENT_REQUESTS`). |
+| `--tts-streaming-models`                | `TTS_STREAMING_MODELS`                     | None                                          | Space-separated list of TTS models to enable incremental streaming via [yasbd](https://github.com/speedyk-005/yasbd-lib) sentence chunking that powers the TTS streaming pipeline (e.g. `gpt-4o-mini-tts`) with up to three concurrent synthesis requests across all connections by default (see `TTS_CONCURRENT_REQUESTS`). |
 | `--tts-realtime-models`                 | `TTS_REALTIME_MODELS`                      | None                                          | Space-separated list of TTS models that synthesize over OpenAI's `/v1/realtime` API instead of `/v1/audio/speech` (e.g. `gpt-realtime-2.1-mini`). These are added to the TTS models and can also be listed in `TTS_STREAMING_MODELS`. Experimental; see [OpenAI Model Deprecations](#openai-model-deprecations). |
 | `--tts-realtime-extra-body`             | `TTS_REALTIME_EXTRA_BODY`                  | None                                          | JSON object merged into the Realtime session of `TTS_REALTIME_MODELS`, for example `{"reasoning": {"effort": "low"}}`. `TTS_EXTRA_BODY` is not applied to Realtime models. `audio.output.format` must remain 24 kHz `audio/pcm`, and `audio.output.voice`, a top-level `voice` or `speed`, `model` and `instructions` cannot be set (use `TTS_INSTRUCTIONS` for the delivery style). |
 | `--tts-streaming-min-words`             | `TTS_STREAMING_MIN_WORDS`                  | None                                          | Minimum words per text chunk for incremental TTS streaming (optional). |
 | `--tts-streaming-max-chars`             | `TTS_STREAMING_MAX_CHARS`                  | None                                          | Maximum characters per text chunk for incremental TTS streaming (optional). |
-| `--tts-concurrent-requests`             | `TTS_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of simultaneous TTS requests per Wyoming connection while streaming TTS synthesizes several sentences at once. Lower it for a backend that cannot serve parallel requests, raise it for one that can. Must be a whole number of at least 1. For `TTS_REALTIME_MODELS` the limit counts requests in flight: the websocket of a finished request may still be closing when the next one opens. |
+| `--tts-concurrent-requests`             | `TTS_CONCURRENT_REQUESTS`                  | 3                                             | Maximum number of TTS requests in flight at once across all Wyoming connections; a streaming synthesis sends one request per text chunk, usually a sentence. Lower it for a backend that cannot serve parallel requests, raise it for one that can. Must be a whole number of at least 0; `0` means no limit. See [Concurrency Limits](#concurrency-limits). |
 
 `STT_STREAMING_MODELS` and `STT_REALTIME_MODELS` select different STT transports. `STT_STREAMING_MODELS` still uses `/v1/audio/transcriptions` with response streaming after Wyoming `AudioStop`. `STT_REALTIME_MODELS` opens a `/v1/realtime` transcription session, sends 24 kHz mono PCM16 audio chunks as Wyoming audio arrives, commits on Wyoming `AudioStop`, and emits `TranscriptChunk` snapshots plus a final `Transcript`. Audio at another sample rate is resampled to 24 kHz continuously across chunks, so chunk boundaries do not change its timing; rates below 8 kHz are rejected. `audio-start` rate must be a whole number from 1 to 384000 Hz, channels a whole number from 1 to 65535, and width 1-4 bytes; anything else is rejected with an error event. Partial PCM frames at Wyoming chunk boundaries are buffered until the next chunk; an incomplete final frame is discarded when the session closes.
 
@@ -206,6 +207,25 @@ TTS requests use `response_format="wav"` by default, and the proxy reads the sam
 The proxy does not transcode TTS audio, other than converting WAV files with 32- or 64-bit IEEE float samples to 16-bit PCM, and not every backend returns the format it is asked for. Some ignore `response_format` and always send their own format, which may be compressed audio such as MP3. The proxy tells what a response is from its first bytes, whichever format was requested. A WAV response the proxy cannot play fails the synthesis, and the proxy logs an error naming the problem; the Wyoming client is only told that synthesis failed. That covers a compressed WAV codec (A-law, mu-law, ADPCM, MP3 in WAV), integer samples wider than 32 bits, an RF64, BW64 or big-endian RIFX file, and a header that is malformed or ends before the audio. MP3 (tagged or not) and other ID3-tagged audio, ADTS AAC, FLAC, Ogg (Opus or Vorbis), WebM, MP4 (M4A), AIFF and CAF fail the same way. A `wav` response that is none of these is played as raw 24 kHz PCM, with the warning `TTS response is not a WAV file; playing it as raw PCM`, logged once per synthesis; with `pcm` that is what was asked for, so there is no warning. Anything else the proxy does not recognize, such as a text error body sent with a success status, is played this way too and sounds like static. A backend that ignores `response_format` and returns anything other than WAV or PCM is not supported for TTS.
 
 `TTS_VOICE_LABELS` must be a valid JSON object whose values are non-empty strings. Wyoming clients such as Home Assistant show a voice's description in their voice picker, and this proxy uses the voice name as the description by default (for example `af_heart`). A label replaces the description (for example `Heart`) of the matching voice, whether the voice comes from `TTS_VOICES` or from the backend's voice list. The voice name that clients send back, and the name sent to the backend, do not change. A label is matched against the voice name first and then against the backend's voice name: when several TTS models offer the same voice, the voices are named like `af_heart (tts-1)`, so `{"af_heart": "Heart"}` labels all of them and keeps the model suffix so they stay distinguishable (`Heart (tts-1)`, `Heart (tts-1-hd)`), while `{"af_heart (tts-1)": "Heart (fast)"}` labels only that one, exactly as written. Surrounding whitespace in voice names and labels is ignored. A label that matches no voice is logged as a warning and ignored.
+
+### Concurrency Limits
+
+`STT_CONCURRENT_REQUESTS` and `TTS_CONCURRENT_REQUESTS` limit how many requests the proxy has in flight at its backends at once. Each limit is shared by all Wyoming connections, so it protects a backend that can only do so much in parallel, such as one GPU. Both default to 3, and `0` means no limit. A request over the limit waits for a free slot, in the order the requests arrived, with no time limit. A limit set explicitly while its service is not configured is reported as unused at startup.
+
+How long a request holds its slot:
+
+- **`/v1/audio/transcriptions`:** from the end of the audio until the response, streamed or not, has been read. The final transcript events are written after the slot is free.
+- **`STT_REALTIME_MODELS`:** from `audio-start` until the session ends. Audio that arrives while a session waits for a slot waits in the connection.
+- **TTS:** a streaming synthesis sends one request per text chunk: a sentence, or several sentences when `TTS_STREAMING_MIN_WORDS` or `TTS_STREAMING_MAX_CHARS` group them. Each holds a slot while its response is read, and so does a request that is not split. A synthesis requests every chunk of the text it has so far at once, so connections speaking at the same time share the slots, and the second one can wait behind the first one's chunks. With `0`, every chunk received so far is requested at once.
+
+For Realtime models, STT and TTS, the limit counts requests rather than websockets: the websocket of a finished request may still be closing when the next one opens.
+
+A stuck client cannot keep a slot from the other connections:
+
+- **A client that stops reading:** a client that does not take an event of a request holding a slot within 10 seconds fails that request. The slot is freed at once for a `/v1/audio/transcriptions` request or a synthesis. A Realtime session frees it within another 10 seconds while the audio is still arriving, with its next audio chunk or by the idle limit; once its `audio-stop` has arrived, within the 30 seconds it has to deliver its transcript.
+- **A Realtime session without audio:** a session that gets no audio for 10 seconds fails. Only chunks that contain audio count, so empty chunks do not keep a session open.
+
+The log names the cause, for example `Client did not take its transcript-chunk event within 10 seconds` or `No audio for 10 seconds; ending the Realtime transcription session`. A request still waiting or in flight when the server shuts down is cancelled. A client that has not been sent its answer yet is sent an `error` event in its place, with a short time limit, so a client that stopped reading cannot hold up the shutdown.
 
 ### OpenAI Model Deprecations
 
@@ -486,11 +506,11 @@ When you make changes to your configuration such as updating models, voices, or 
 
 #### Failed Speech Synthesis in Home Assistant
 
-A synthesis that fails, or is cut short because the server shuts down, sends a Wyoming `error` event before the connection closes. A failed `synthesize` request also ends without `audio-stop`, so the audio it got as far as sending is not taken for a complete result and cached. Home Assistant reports the `error` event from version 2026.8.2. Older versions ignore it: they still see a failed `synthesize` request as a lost connection, but cannot tell a failed `synthesize-start/chunk/stop` synthesis (used for models in `TTS_STREAMING_MODELS`) from one that ended early.
+A synthesis that fails, or is cut short because the server shuts down, sends a Wyoming `error` event before the connection closes. A client that does not take the `audio-start` or a chunk of audio of a synthesis within 10 seconds fails it too, so it cannot keep a TTS slot from other connections (see [Concurrency Limits](#concurrency-limits)). A failed `synthesize` request also ends without `audio-stop`, so the audio it got as far as sending is not taken for a complete result and cached. Home Assistant reports the `error` event from version 2026.8.2. Older versions ignore it: they still see a failed `synthesize` request as a lost connection, but cannot tell a failed `synthesize-start/chunk/stop` synthesis (used for models in `TTS_STREAMING_MODELS`) from one that ended early.
 
 #### Failed Speech Recognition in Home Assistant
 
-A transcription that fails sends a Wyoming `error` event and closes the connection. This covers a `transcribe` that names an unknown model or a language the model does not list, a failed `/v1/audio/transcriptions` request or response stream, a Realtime session that fails or delivers no final transcript within 30 seconds of the end of the audio, and a Realtime session that cannot be opened, or that the server rejects or closes while the audio is still arriving (for example over a field in `STT_REALTIME_EXTRA_BODY` the model does not accept). Those Realtime failures are reported as soon as they are known rather than when the audio ends; the rest of the audio is dropped, and the connection is closed when it ends. The cause is only written to this server's log. Every Home Assistant version takes the closed connection as a failed transcription, so the Assist pipeline fails with `stt-stream-failed` rather than reporting that nothing was said. From 2026.8.2 Home Assistant also reads the `error` event, which appears in its log, and from 2026.10 a Realtime session that fails while the audio is arriving ends the request without waiting for the speaker to finish.
+A transcription that fails sends a Wyoming `error` event and closes the connection. This covers a `transcribe` that names an unknown model or a language the model does not list, a failed `/v1/audio/transcriptions` request or response stream, a Realtime session that fails or delivers no final transcript within 30 seconds of the end of the audio, and a Realtime session that cannot be opened, that gets no audio for 10 seconds, or that the server rejects or closes while the audio is still arriving (for example over a field in `STT_REALTIME_EXTRA_BODY` the model does not accept). Those Realtime failures are reported as soon as they are known rather than when the audio ends; the rest of the audio is dropped, and the connection is closed when it ends. A client that does not take the `transcript-start` or a `transcript-chunk` of a streamed or Realtime transcription within 10 seconds fails it too, so it cannot keep an STT slot from other connections (see [Concurrency Limits](#concurrency-limits)). The cause is only written to this server's log. Every Home Assistant version takes the closed connection as a failed transcription, so the Assist pipeline fails with `stt-stream-failed` rather than reporting that nothing was said. From 2026.8.2 Home Assistant also reads the `error` event, which appears in its log, and from 2026.10 a Realtime session that fails while the audio is arriving ends the request without waiting for the speaker to finish.
 
 ### Sequence Diagrams
 
@@ -630,116 +650,4 @@ Pyright configuration is defined in `pyproject.toml` under `[tool.pyright]`.
 
 ### Testing (Pytest) [![Test](https://github.com/roryeckel/wyoming_openai/actions/workflows/test.yml/badge.svg)](https://github.com/roryeckel/wyoming_openai/actions/workflows/test.yml)
 
-This project uses [pytest](https://pytest.org/) for unit testing. Tests are located in the [`tests/`](tests/) directory and cover core modules such as compatibility, constants, handlers, initialization, and utilities.
-
-#### Running Tests
-
-1. Install development dependencies:
-   ```bash
-   pip install -e ".[dev]"
-   ```
-
-2. In the [`tests/`](tests/) folder, run all tests with:
-   ```bash
-   pytest
-   ```
-
-3. Check the test coverage with:
-   ```bash
-   pytest --cov=wyoming_openai
-   ```
-
-All new code should include appropriate tests.
-A GitHub Action automatically runs pytest on all pull requests and branch pushes to ensure tests pass.
-
-#### End-to-End Integration Tests
-
-The `tests/test_e2e.py` suite drives a real `wyoming_openai` server over TCP and a real Speaches backend in Docker, with no Home Assistant or microphone needed. TTS output is verified by feeding it back through STT and fuzzy-matching the transcript against the original phrase (with tolerance for minor mishearing).
-
-These tests are gated behind the `integration` marker and skipped by default. To run locally, just:
-
-```bash
-pytest -m "integration and not ha_e2e" -v
-```
-
-The Home Assistant suite has its own `ha_e2e` marker and is described below.
-
-The fixtures handle the backend automatically: a Speaches instance already healthy on `localhost:8000` is reused; otherwise the Docker Compose stack (`docker-compose.speaches-cpu.yml` layered with `docker-compose.e2e.yml`, which swaps in a smaller Whisper model for testing) is started and torn down; if Docker is unavailable, the suite skips. Useful environment variables:
-
-- `WYOMING_OPENAI_KEEP_SPEACHES=1` - leave the Speaches container running between invocations for faster iteration (model load is the slow part).
-- `WYOMING_E2E_URI=tcp://host:port` - target an already-running proxy instead of spawning a subprocess (the autodetection test skips in this mode, since it must control the server's environment).
-- `WYOMING_E2E_ARTIFACT_DIR=<dir>` - save synthesized WAVs and server logs for debugging (CI uses this to upload artifacts on failure).
-
-To test the actual Docker image end-to-end (what the containerized CI smoke job does):
-
-```bash
-docker build -t wyoming_openai:e2e .
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d
-WYOMING_E2E_URI=tcp://127.0.0.1:10300 pytest -m "integration and smoke" -v
-```
-
-Or in PowerShell:
-
-```powershell
-docker build -t wyoming_openai:e2e .
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d
-$env:WYOMING_E2E_URI = "tcp://127.0.0.1:10300"; pytest -m "integration and smoke" -v
-```
-
-Windows note: this works under Docker Desktop; run pytest from a native Windows Python (not WSL) so subprocess spawning and localhost port publishing line up.
-
-Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are intentionally not covered - they use the OpenAI websocket API, which Speaches does not implement.
-
-The [Integration](.github/workflows/integration.yml) GitHub Actions workflow runs this suite on pushes and PRs against `main`: one job with the subprocess proxy, plus a smoke job against the freshly built Docker image.
-
-#### Home Assistant End-to-End Tests
-
-`tests/ha_e2e/` drives a real, headless Home Assistant against the proxy. Instead of a hand-written Wyoming client, it onboards Home Assistant through the REST API, adds the Wyoming config entry through the config-flow API, creates an Assist pipeline over the websocket API, and runs each turn through `assist_pipeline/run` from the STT stage to the TTS stage. A test-only custom conversation agent streams scripted replies through Home Assistant's ChatLog delta API, so streaming TTS is exercised deterministically without an LLM.
-
-The suite covers a multi-sentence reply with numbers, a ~2000-character reply with pauses between deltas, a one-word reply, an invalid STT model, and a proxy `docker stop` during a long streaming reply. TTS output is fetched from Home Assistant's `tts_output` URL and transcribed directly with Speaches, independently of the proxy.
-
-Run it locally:
-
-```bash
-docker build -t wyoming_openai:e2e .
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
-pytest -m ha_e2e -v --timeout=600
-```
-
-Or in PowerShell:
-
-```powershell
-docker build -t wyoming_openai:e2e .
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
-pytest -m ha_e2e -v --timeout=600
-```
-
-The harness generates a test-only Home Assistant user and password on a fresh instance and stores them, along with the config-entry IDs it creates, in `tests/ha_e2e/.state/` (gitignored). Re-runs reuse the stored refresh token and reload those entries instead of adding duplicates. If Home Assistant is already onboarded but that state is missing, reset the stack:
-
-```bash
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml down -v
-```
-
-Use `HA_VERSION` to pin the Home Assistant image (default `2026.10.1`); `down -v` is required when switching versions or resetting onboarding:
-
-```powershell
-$env:HA_VERSION = "2026.9.0"
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
-```
-
-The pipeline's TTS URL returns mp3 by default, so the harness needs `ffmpeg` on the host to decode it before transcription. It is present on GitHub's Ubuntu runners; install it locally if `ffmpeg -version` fails.
-
-Each run writes input WAVs, TTS output WAVs, event JSON, and `report.md` under `tests/ha_e2e/artifacts/run-<timestamp>/`. Override the location with `HA_E2E_ARTIFACT_DIR`. Other useful variables are `HA_E2E_BASE_URL`, `HA_E2E_SPEACHES_URL`, `HA_E2E_STT_MODEL`, `HA_E2E_PROXY_CONTAINER`, and `HA_E2E_HA_CONTAINER`.
-
-The fixture WAVs are committed under `tests/ha_e2e/fixtures/audio/`. They are generated once with Speaches Kokoro, not by the proxy under test, and are 16 kHz mono with trailing silence for Home Assistant's VAD. Regenerate them with Speaches running:
-
-```bash
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml up -d speaches
-python tests/ha_e2e/generate_fixtures.py
-```
-
-The failure lanes require the Docker CLI: the invalid-STT proxy runs next to the good one, and the streaming-reply lane stops the proxy container to exercise the SIGTERM path, then restarts it for later runs.
-
-The [Home Assistant E2E](.github/workflows/ha-e2e.yml) workflow runs on `workflow_dispatch` and on pull requests labeled `ha-e2e` (not on every push). It is also called by the release workflows: the version bump cannot open a release PR until it passes, and `draft-release.yml` will not create a draft release until it passes against the exact release commit. Publishing the draft therefore cannot ship a release that skipped the Home Assistant check. Set the repository variable `HA_E2E_VERSION` to override the Home Assistant image tag used by release runs.
-
-Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covered by the Speaches lane. The compose overlay and workflow contain a clearly marked, unwired hook for a later OpenAI HTTP/Realtime lane that runs only by `workflow_dispatch` with an API key secret.
+Unit tests run with `pytest`. [tests/README.md](tests/README.md) covers every suite: the unit tests, the Wyoming integration suite, the scripted and live Home Assistant suites, what each needs, and how to run it.

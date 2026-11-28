@@ -1,0 +1,134 @@
+# Stack for the live Home Assistant tests (pytest -m ha_live), on the CPU; docker-compose.gpu.yml moves its Speaches
+# to an NVIDIA GPU. How to run it: tests/README.md, "Home Assistant Live Tests".
+#
+# Four proxies share one Speaches, each with other limits, so a turn can be sent to the one a scenario needs:
+# the defaults (3), 1, none (0), and 1 again logging at debug level. Home Assistant runs the demo integration, so
+# Assist has devices to control. The stack has its own project, ports and container names, so it runs next to the
+# scripted suite's stack, and publishes its ports on 127.0.0.1 only. It reuses that stack's model cache volume.
+name: ha_live
+
+x-proxy: &proxy
+  image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:live}
+  restart: "no"
+  depends_on:
+    speaches:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 5s
+
+x-local-env: &local-env
+  WYOMING_URI: tcp://0.0.0.0:10300
+  WYOMING_LOG_LEVEL: INFO
+  WYOMING_LANGUAGES: en
+  STT_OPENAI_URL: http://speaches:8000/v1
+  STT_MODELS: Systran/faster-distil-whisper-large-v3
+  STT_BACKEND: SPEACHES
+  TTS_OPENAI_URL: http://speaches:8000/v1
+  TTS_MODELS: speaches-ai/Kokoro-82M-v1.0-ONNX
+  # Streamed sentence by sentence, as Home Assistant feeds an LLM's reply
+  TTS_STREAMING_MODELS: speaches-ai/Kokoro-82M-v1.0-ONNX
+  TTS_BACKEND: SPEACHES
+
+services:
+  speaches:
+    container_name: ha_live_speaches
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu
+    restart: "no"
+    ports:
+      - "127.0.0.1:8010:8000"
+    environment:
+      enable_ui: "False"
+      log_level: info
+      WHISPER__MODEL: Systran/faster-distil-whisper-large-v3
+      WHISPER__compute_type: int8
+      preload_models: '["Systran/faster-distil-whisper-large-v3", "speaches-ai/Kokoro-82M-v1.0-ONNX"]'
+      SPEACHES_BASE_URL: http://speaches:8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    volumes:
+      - huggingface-hub:/home/ubuntu/.cache/huggingface/hub
+
+  proxy:
+    <<: *proxy
+    container_name: ha_live_proxy
+    ports:
+      - "127.0.0.1:10400:10300"
+    environment:
+      <<: *local-env
+
+  proxy_limited:
+    <<: *proxy
+    container_name: ha_live_proxy_limited
+    ports:
+      - "127.0.0.1:10401:10300"
+    environment:
+      <<: *local-env
+      STT_CONCURRENT_REQUESTS: "1"
+      TTS_CONCURRENT_REQUESTS: "1"
+
+  proxy_unlimited:
+    <<: *proxy
+    container_name: ha_live_proxy_unlimited
+    ports:
+      - "127.0.0.1:10402:10300"
+    environment:
+      <<: *local-env
+      STT_CONCURRENT_REQUESTS: "0"
+      TTS_CONCURRENT_REQUESTS: "0"
+
+  # At limit 1 and logging at debug level, which shows when a request is admitted, for the stuck-client case only
+  proxy_limited_debug:
+    <<: *proxy
+    container_name: ha_live_proxy_limited_debug
+    ports:
+      - "127.0.0.1:10405:10300"
+    environment:
+      <<: *local-env
+      WYOMING_LOG_LEVEL: DEBUG
+      STT_CONCURRENT_REQUESTS: "1"
+      TTS_CONCURRENT_REQUESTS: "1"
+
+  homeassistant:
+    container_name: ha_live_homeassistant
+    image: ghcr.io/home-assistant/home-assistant:${HA_LIVE_VERSION:-2026.11.3}
+    restart: "no"
+    ports:
+      - "127.0.0.1:8124:8123"
+    environment:
+      TZ: UTC
+    volumes:
+      - ha-config:/config
+      - ./configuration.yaml:/config/configuration.yaml:ro
+      - ../custom_components/ha_e2e_scripted:/config/custom_components/ha_e2e_scripted:ro
+    depends_on:
+      proxy:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          # Not /api/onboarding, which an instance that started onboarded already does not serve
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8123/manifest.json', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+networks:
+  default:
+    name: ha_live_net
+
+volumes:
+  huggingface-hub:
+    external: true
+    name: wyoming_openai_huggingface-hub
+  ha-config:
