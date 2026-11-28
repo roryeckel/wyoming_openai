@@ -35,7 +35,7 @@ reads cleanly out of context.
 
 ## Code review
 
-<!-- Required for a PR made with an AI coding agent, welcome on any other; CONTRIBUTING.md, "Have the change reviewed independently", has the policy. Record the latest independent review: what ran it and at what effort, the commit it reviewed, whether it covered the full diff from main or only what changed since the last full review, its result (clean, or which findings were fixed, accepted above, dismissed or left open), and what changed after it, if anything. If it covered only recent changes, also record the last full review's commit and result, and every finding still open or dismissed since it, whichever review raised it. Aim for a clean latest review with nothing changed after it; when that isn't so, say why. -->
+<!-- Required for a PR made with an AI coding agent, welcome on any other; CONTRIBUTING.md, "Have the change reviewed independently", has the policy. Record the latest independent review: what ran it and at what effort, the commit it reviewed, whether it covered the full diff from main or only what changed since the last full review, its result (clean, or which findings were fixed, accepted above, dismissed or left open), and what changed after it, if anything. Also keep every finding dismissed or still open from any review of this PR, each with why, and, if the latest review covered only recent changes, the last full review's commit and result. Aim for a clean latest review with nothing changed after it; when that isn't so, say why. -->
 
 
 

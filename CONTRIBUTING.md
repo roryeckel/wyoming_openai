@@ -155,8 +155,8 @@ The PR's Code review section records the latest review:
 - its result: clean, or which findings were fixed, accepted, dismissed or left open
 - what changed after it, if anything
 
-When the latest review covered only recent changes, the section also records the last full review's commit and
-result, and every finding still open or dismissed since it, whichever review raised it.
+It also keeps every finding dismissed or still open from any review of the PR, each with why. When the latest review
+covered only recent changes, it also gives the last full review's commit and result.
 
 ## AI Coding Agents
 
