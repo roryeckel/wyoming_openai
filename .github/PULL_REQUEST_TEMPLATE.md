@@ -26,6 +26,12 @@ reads cleanly out of context.
 
 
 
+## Accepted trade-offs
+
+<!-- Behavior this change deliberately leaves as it is, and limits it accepts, each with its reason, so reviewers and later changes don't take them for bugs: for example a case it still handles as before, or a check it leaves out on purpose. Write "None" if there are none. -->
+
+
+
 ## Testing
 
 <!-- What you ran to verify this: the commands or suites, and for a live run the lanes and providers, with what passed and failed. Say what you did not test, and why. -->
