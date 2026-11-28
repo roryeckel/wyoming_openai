@@ -160,7 +160,9 @@ model cache volume. `HA_LIVE_VERSION` pins its Home Assistant image (default `20
 `tests/ha_e2e/live/docker-compose.gpu.yml` on the stack, and `tests/ha_e2e/live/docker-compose.engines.gpu.yml` on the
 engines, in every command that creates or starts them: `up`, and `run` without `--no-deps`. A command without it
 moves them back to the CPU. `HA_LIVE_GPU` picks the GPU (default `0`). Run Chatterbox with the GPU overlay: on the
-CPU its long replies time out.
+CPU its long replies time out. On an i9-13900K, the local lane took about 7 minutes on the CPU, and 3 with Speaches on
+an RTX 3090; a provider lane took about 2 minutes on the CPU. A turn waits up to 120 seconds for each pipeline event,
+and the slowest on that CPU took 39, so a much slower CPU can hit that limit when eight satellites speak at once.
 
 **The local lane** runs every scenario on the stack's own Speaches:
 
