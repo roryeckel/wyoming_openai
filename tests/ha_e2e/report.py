@@ -50,11 +50,11 @@ class RunReport:
         self.ha_version = ha_version
         self.started_at = datetime.now(UTC)
         stamp = self.started_at.strftime("%Y%m%d-%H%M%S")
-        self.run_dir = settings.artifact_dir / f"run-{stamp}"
+        self.run_dir = settings.artifact_dir / f"scripted-{stamp}"
         suffix = 1
         while self.run_dir.exists():
             suffix += 1
-            self.run_dir = settings.artifact_dir / f"run-{stamp}-{suffix}"
+            self.run_dir = settings.artifact_dir / f"scripted-{stamp}-{suffix}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.run_dir / "report.md"
         self.turns: list[TurnRecord] = []
@@ -70,7 +70,7 @@ class RunReport:
 
     def write(self) -> None:
         lines = [
-            "# Home Assistant E2E report",
+            "# Scripted Home Assistant report",
             "",
             f"- Started: {self.started_at.isoformat()}",
             f"- Home Assistant: {self.ha_version}",

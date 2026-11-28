@@ -30,11 +30,11 @@ def create_test_wav_data(frame_count: int = 2000, sample_rate: int = 24000) -> b
     return wav_buffer.read()
 
 
-class TestIntegration:
-    """Integration tests that test component interactions."""
+class TestHandlerWorkflows:
+    """Whole STT and TTS workflows through the handler, with the OpenAI client mocked."""
 
     @pytest.mark.asyncio
-    async def test_end_to_end_transcription_workflow(self):
+    async def test_transcription_workflow(self):
         """Test complete transcription workflow from audio to text."""
         # Create real-like info structure
         asr_models = ["whisper-1"]
@@ -111,7 +111,7 @@ class TestIntegration:
         assert len(transcript_events) > 0
 
     @pytest.mark.asyncio
-    async def test_end_to_end_synthesis_workflow(self):
+    async def test_synthesis_workflow(self):
         """Test complete synthesis workflow from text to audio."""
         # Create real-like info structure
         tts_models = ["tts-1"]
@@ -191,7 +191,7 @@ class TestIntegration:
         assert "audio-chunk" in event_types
 
     @pytest.mark.asyncio
-    async def test_backend_autodetection_integration(self):
+    async def test_backend_autodetection(self):
         """Test backend autodetection with different base URLs."""
         test_cases = [
             ("https://api.openai.com/v1", OpenAIBackend.OPENAI),
@@ -290,7 +290,7 @@ class TestIntegration:
         # Verify TTS was called for synthesis
         tts_client.audio.speech.with_streaming_response.create.assert_called_once()
 
-    def test_info_structure_integration(self):
+    def test_info_structure(self):
         """Test that the info structure is properly constructed with all components."""
         # Create comprehensive configuration
         asr_models = ["whisper-1", "whisper-large"]
@@ -340,7 +340,7 @@ class TestIntegration:
         }
 
     @pytest.mark.asyncio
-    async def test_error_handling_integration(self):
+    async def test_error_handling(self):
         """Test error handling across components."""
         # Create minimal setup
         info = create_info([], [])  # No models/voices

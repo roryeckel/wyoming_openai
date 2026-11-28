@@ -1,0 +1,151 @@
+# Local engines for the provider lane, one profile each, with the settings of the repository's own compose files for
+# them, on the CPU; docker-compose.engines.gpu.yml moves them to an NVIDIA GPU. They run in a project of their own
+# (ha_live_engines), with ha_live_* container names, on the live stack's network and without host ports, so nothing
+# they do touches a proxy or an engine the developer runs. A provider file's Engine: line says how to start its
+# engine; tests/README.md, "Home Assistant Live Tests", how to run the lane.
+name: ha_live_engines
+
+services:
+  kokoro:
+    profiles: [kokoro-fastapi]
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: ha_live_kokoro
+    restart: "no"
+    environment:
+      USE_GPU: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8880/v1/test"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+
+  localai:
+    profiles: [localai]
+    image: localai/localai:latest
+    container_name: ha_live_localai
+    restart: "no"
+    environment:
+      MODELS_PATH: /models
+      GO_TAGS: tts
+    volumes:
+      - localai-models:/models
+      - localai-config:/configuration
+      # The backends init-localai installs, kept between runs
+      - localai-backends:/backends
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # One-shot: installs what localai.env needs, following each install job to its end, so a failed download fails it
+  # at once, then checks LocalAI lists the models by their config names:
+  # - the whisper and piper backends, which current LocalAI images do not ship;
+  # - the models, from LocalAI's gallery;
+  # - the voices' configs pointed at cpu-piper: on the NVIDIA image, LocalAI maps the piper backend the gallery
+  #   names to an empty path ("received empty target"), and LocalAI reads the edited configs only after a restart.
+  # providers/localai.env has the commands: run it once LocalAI is up, then restart LocalAI.
+  init-localai:
+    profiles: [localai]
+    image: alpine:latest
+    container_name: ha_live_localai_init
+    restart: "no"
+    environment:
+      LOCALAI_URL: http://localai:8080
+      BACKENDS: whisper piper
+      MODELS: whisper-base voice-en-us-amy-low voice-en-us-ryan-medium
+    volumes:
+      - localai-models:/models
+    depends_on:
+      localai:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache curl jq > /dev/null
+        # install <kind> <name>: start the install and follow its job to the end
+        install() {
+          id=$$(curl -sf "$$LOCALAI_URL/$$1/apply" -H "Content-Type: application/json" \
+            -d "{\"id\": \"$$2\"}" | jq -r '.id // .uuid // empty')
+          [ -n "$$id" ] || { echo "LocalAI did not start installing $$2"; exit 1; }
+          processed=false
+          for attempt in $$(seq 180); do
+            job=$$(curl -sf "$$LOCALAI_URL/$$1/jobs/$$id")
+            processed=$$(echo "$$job" | jq -r '.processed')
+            [ "$$processed" = true ] && break
+            sleep 5
+          done
+          error=$$(echo "$$job" | jq -r '.error // empty')
+          [ "$$processed" = true ] && [ -z "$$error" ] || { echo "$$2: $${error:-not installed in 15 minutes}"; exit 1; }
+          echo "installed $$2"
+        }
+        for backend in $$BACKENDS; do install backends "$$backend"; done
+        for model in $$MODELS; do install models "localai@$$model"; done
+        sed -i 's/^backend: piper$$/backend: cpu-piper/' /models/voice-en-us-*.yaml
+        for model in $$MODELS; do
+          case "$$model" in voice-*) ;; *) continue ;; esac
+          grep -qx 'backend: cpu-piper' "/models/$$model.yaml" || { echo "$$model: backend not set to cpu-piper"; exit 1; }
+        done
+        listed=$$(curl -sf "$$LOCALAI_URL/v1/models" | jq -r '.data[].id')
+        for model in $$MODELS; do
+          echo "$$listed" | grep -qx "$$model" || { echo "LocalAI does not list $$model"; exit 1; }
+        done
+        echo "LocalAI lists every model; restart it to load the voices' configs"
+
+  openai-edge-tts:
+    profiles: [openai-edge-tts]
+    image: travisvn/openai-edge-tts:latest
+    container_name: ha_live_openai_edge_tts
+    restart: "no"
+    environment:
+      PORT: "5050"
+      DEFAULT_SPEED: "1.0"
+      DEFAULT_LANGUAGE: en-US
+      REQUIRE_API_KEY: "False"
+      REMOVE_FILTER: "False"
+      EXPAND_API: "False"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5050/v1/models', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  chatterbox-tts:
+    # On the CPU its long replies time out: run it with docker-compose.engines.gpu.yml
+    profiles: [chatterbox]
+    image: travisvn/chatterbox-tts-api:latest
+    container_name: ha_live_chatterbox
+    restart: "no"
+    environment:
+      PORT: "4123"
+      HOST: 0.0.0.0
+      EXAGGERATION: "0.5"
+      CFG_WEIGHT: "0.5"
+      TEMPERATURE: "0.8"
+      MAX_CHUNK_LENGTH: "280"
+      MAX_TOTAL_LENGTH: "3000"
+      DEVICE: auto
+      MODEL_CACHE_DIR: /cache
+    volumes:
+      - chatterbox-models:/cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4123/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+
+networks:
+  default:
+    name: ha_live_net
+    external: true
+
+volumes:
+  localai-models:
+  localai-config:
+  localai-backends:
+  chatterbox-models:

@@ -3,7 +3,7 @@
 #
 #   docker build -t wyoming_openai:e2e .
 #   docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml \
-#     -f docker-compose.ha-e2e.yml up -d
+#     -f docker-compose.ha-scripted.yml up -d
 #
 # Pin Home Assistant with HA_VERSION (defaults to the 2026.10 line):
 #
@@ -67,7 +67,7 @@ services:
 
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-2026.10.1}
-    container_name: homeassistant_ha_e2e
+    container_name: homeassistant_ha_scripted
     restart: unless-stopped
     ports:
       - "8123:8123"

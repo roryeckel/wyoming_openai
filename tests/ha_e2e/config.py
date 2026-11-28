@@ -26,17 +26,17 @@ DEFAULT_BAD_STT_HOST = "wyoming_openai_bad_stt"
 DEFAULT_WYOMING_PORT = 10300
 DEFAULT_PROXY_CONTAINER = "wyoming_openai_e2e"
 DEFAULT_BAD_PROXY_CONTAINER = "wyoming_openai_bad_stt_e2e"
-DEFAULT_HA_CONTAINER = "homeassistant_ha_e2e"
+DEFAULT_HA_CONTAINER = "homeassistant_ha_scripted"
 
 COMPOSE_FILES = (
     REPO_ROOT / "docker-compose.speaches-cpu.yml",
     REPO_ROOT / "docker-compose.e2e.yml",
-    REPO_ROOT / "docker-compose.ha-e2e.yml",
+    REPO_ROOT / "docker-compose.ha-scripted.yml",
 )
 
 RESET_COMMAND = (
     "docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml "
-    "-f docker-compose.ha-e2e.yml down -v"
+    "-f docker-compose.ha-scripted.yml down -v"
 )
 
 
