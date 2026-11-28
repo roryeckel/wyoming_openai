@@ -12,10 +12,17 @@ services:
       STT_OPENAI_URL: http://speaches:8000/v1
       STT_MODELS: "Systran/faster-distil-whisper-large-v3"
       STT_BACKEND: "SPEACHES"
+      # Home Assistant names for the STT prompt: set STT_HASS_TOKEN in .env, then this. A prompt does not help
+      # Distil-Whisper, so switch to a standard Whisper model, such as Systran/faster-whisper-large-v3, here and in
+      # the speaches service
+      # STT_HASS_URL: "http://homeassistant.local:8123"
       TTS_OPENAI_URL: http://speaches:8000/v1
       TTS_MODELS: "speaches-ai/Kokoro-82M-v1.0-ONNX"
       TTS_BACKEND: "SPEACHES"
       # TTS_VOICES: "af af_bella af_sarah am_adam am_michael bf_emma bf_isabella bm_george bm_lewis af_nicole af_sky"
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       speaches:
         condition: service_healthy

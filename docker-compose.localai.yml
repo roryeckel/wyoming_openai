@@ -12,9 +12,14 @@ services:
       STT_OPENAI_URL: http://localai:8080/v1
       STT_MODELS: "whisper-base"
       STT_BACKEND: "LOCALAI"
+      # Home Assistant names for the STT prompt: set STT_HASS_TOKEN in .env, then this
+      # STT_HASS_URL: "http://homeassistant.local:8123"
       TTS_OPENAI_URL: http://localai:8080/v1
       TTS_MODELS: "en-us-kathleen-low.onnx en-us-amy-low.onnx en-us-danny-low.onnx en-us-lessac-low.onnx en-us-lessac-medium.onnx en-us-libritts-high.onnx en-us-ryan-high.onnx en-us-ryan-low.onnx en-us-ryan-medium.onnx"
       TTS_BACKEND: "LOCALAI"
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       localai:
         condition: service_healthy

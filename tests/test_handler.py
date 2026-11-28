@@ -53,6 +53,7 @@ from wyoming_openai.utilities import (
     decode_pcm_samples,
     downmix_pcm_samples,
     encode_pcm16_samples,
+    estimate_prompt_tokens,
 )
 from wyoming_openai.wav import WAVE_FORMAT_PCM, TtsAudioFormat, WavFramer, WavHeader, parse_wav_header
 
@@ -199,8 +200,8 @@ def _selected_realtime_stream(handler):
 async def _selected_realtime_session(handler):
     """The Realtime session settings, with their prompt, that the handler's current selection would open."""
     audio_stream = _selected_realtime_stream(handler)
-    prompt = handler._get_stt_prompt(audio_stream)
-    return handler._get_realtime_transcription_session(audio_stream, prompt)
+    prompt, keywords = handler._get_stt_bias(audio_stream)
+    return handler._get_realtime_transcription_session(audio_stream, prompt, keywords)
 
 
 def _realtime_stream(rate=24000, width=2, channels=1):
@@ -9802,6 +9803,8 @@ class _StubHassNames:
 
 
 HASS_NAMES = (("Kitchen",), ("Ecobee", "Thermostat"))
+# The same names, as keywords
+KEYWORDS = ["Kitchen", "Ecobee", "Thermostat"]
 
 
 @pytest.mark.asyncio
@@ -9837,6 +9840,7 @@ async def test_transcribe_names_and_terms_come_before_home_assistant_names(enhan
     """Test transcript_names, then transcript_terms, are added ahead of the Home Assistant names, without repeats."""
     stt_client, _ = mock_clients
     mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._stt_transcript_names = True
     enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
     stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
 
@@ -9853,7 +9857,10 @@ async def test_transcribe_names_are_used_without_home_assistant(enhanced_handler
     """Test the names a client sends are added to the prompt without a Home Assistant token, within the budget."""
     stt_client, _ = mock_clients
     mock_info.asr[0].models[0].name = "whisper-1"
-    enhanced_handler._stt_prompt_max_chars = len("Test prompt. Ecobee.")
+    enhanced_handler._stt_transcript_names = True
+    # Room for "Test prompt." and Ecobee with its separator, but not for Rory after it
+    budget = estimate_prompt_tokens("Test prompt.") + estimate_prompt_tokens("Ecobee") + 2
+    enhanced_handler._stt_prompt_max_tokens = budget
     stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
 
     transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee", "Rory"]}
@@ -9865,6 +9872,134 @@ async def test_transcribe_names_are_used_without_home_assistant(enhanced_handler
     assert await enhanced_handler.handle_event(Event(type="transcribe", data={"name": "whisper-1"}))
     await _stream_audio(enhanced_handler)
     assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_names_are_ignored_unless_turned_on(enhanced_handler, mock_info, mock_clients, caplog):
+    """Test the names a client sends only reach the prompt with --stt-transcript-names."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
+
+    transcribe = {"name": "whisper-1", "transcript_names": ["Ecobee"], "transcript_terms": ["HVAC"]}
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.handler"):
+        assert await enhanced_handler.handle_event(Event(type="transcribe", data=transcribe))
+    await _stream_audio(enhanced_handler)
+
+    assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt"
+    assert "--stt-transcript-names is off" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_transcribe_during_the_recording_replaces_the_names(enhanced_handler, mock_info, mock_clients):
+    """Test a transcribe that arrives during a /v1/audio/transcriptions recording sends its own names with it."""
+    stt_client, _ = mock_clients
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._stt_transcript_names = True
+    stt_client.audio.transcriptions.create = AsyncMock(side_effect=Exception("Request capture - expected"))
+
+    assert await enhanced_handler.handle_event(
+        Event(type="transcribe", data={"name": "whisper-1", "transcript_names": ["Ecobee"]})
+    )
+    await _stream_audio(enhanced_handler, transcribe={"name": "whisper-1", "transcript_names": ["Rory"]})
+
+    assert stt_client.audio.transcriptions.create.call_args.kwargs["prompt"] == "Test prompt. Rory."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_body", "expected_keywords", "expected_prompt"),
+    [
+        (None, KEYWORDS, "Test prompt"),
+        # Keywords in the extra body replace the names, and a prompt there does not stop them going as keywords
+        ({"keywords": ["Wyoming"]}, omit, "Test prompt"),
+        ({"prompt": "Own prompt"}, KEYWORDS, "Test prompt"),
+    ],
+)
+async def test_http_transcription_sends_the_names_as_keywords_to_gpt_transcribe(
+    enhanced_handler, mock_info, mock_clients, extra_body, expected_keywords, expected_prompt
+):
+    """Test gpt-transcribe on OpenAI gets the names as keywords, and STT_PROMPT alone as its prompt."""
+    stt_client, _ = mock_clients
+    stt_client.backend = OpenAIBackend.OPENAI
+    mock_info.asr[0].models[0].name = "gpt-transcribe"
+    enhanced_handler._stt_extra_body = extra_body
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "gpt-transcribe")
+
+    assert call_args["keywords"] == expected_keywords
+    assert call_args["prompt"] == expected_prompt
+
+
+@pytest.mark.asyncio
+async def test_http_transcription_keeps_the_names_in_the_prompt_for_models_without_keywords(
+    enhanced_handler, mock_info, mock_clients
+):
+    """Test whisper-1 on OpenAI, which takes no keywords, still gets the names in its prompt."""
+    stt_client, _ = mock_clients
+    stt_client.backend = OpenAIBackend.OPENAI
+    mock_info.asr[0].models[0].name = "whisper-1"
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, "whisper-1")
+
+    assert call_args["keywords"] is omit
+    assert call_args["prompt"] == "Test prompt. Kitchen, Ecobee, Thermostat."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "backend"),
+    [
+        # Mistral's API takes no prompt, and vLLM's Voxtral ignores one, whatever name it is served under
+        ("voxtral-mini-latest", OpenAIBackend.OPENAI),
+        ("mistralai/Voxtral-Mini-3B-2507", OpenAIBackend.SPEACHES),
+        # OpenAI's diarizing model takes no prompt
+        ("gpt-4o-transcribe-diarize", OpenAIBackend.OPENAI),
+    ],
+)
+async def test_http_transcription_adds_no_names_for_models_that_take_no_prompt(
+    enhanced_handler, mock_info, mock_clients, model_name, backend
+):
+    """Test a model that takes no prompt gets STT_PROMPT as configured, without the names."""
+    stt_client, _ = mock_clients
+    stt_client.backend = backend
+    mock_info.asr[0].models[0].name = model_name
+    enhanced_handler._hass_names = _StubHassNames(HASS_NAMES)
+
+    call_args = await _transcribe_over_http(enhanced_handler, stt_client, model_name)
+
+    assert call_args["prompt"] == "Test prompt"
+    assert call_args["keywords"] is omit
+
+
+@pytest.mark.asyncio
+async def test_a_transcribe_with_other_names_during_a_realtime_recording_is_reported(
+    enhanced_handler, mock_info, mock_clients, caplog
+):
+    """Test names a Realtime session can no longer take are reported, and kept for the next audio stream."""
+    stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name="gpt-live-transcribe")
+    stt_client.backend = OpenAIBackend.OPENAI
+    enhanced_handler._stt_transcript_names = True
+    connection = _FakeRealtimeConnection([])
+    stt_client.realtime.connect = Mock(return_value=_FakeRealtimeConnectionManager(connection))
+
+    def transcribe(*names):
+        return Event(type="transcribe", data={"name": "gpt-live-transcribe", "transcript_names": list(names)})
+
+    assert await enhanced_handler.handle_event(transcribe("Ecobee"))
+    await enhanced_handler.handle_event(Event(type="audio-start", data={"rate": 24000, "width": 2, "channels": 1}))
+    with caplog.at_level(logging.WARNING, logger="wyoming_openai.handler"):
+        # The names the session already has are no news
+        assert await enhanced_handler.handle_event(transcribe("Ecobee"))
+        assert "Transcribe with other names" not in caplog.text
+        assert await enhanced_handler.handle_event(transcribe("Rory"))
+
+    assert caplog.text.count("Transcribe with other names arrived during a Realtime recording") == 1
+    assert enhanced_handler._current_bias_names == (("Rory",),)
+    await enhanced_handler._drop_audio_stream()
+    await enhanced_handler._drain_background_tasks()
 
 
 @pytest.mark.asyncio
@@ -9886,21 +10021,26 @@ async def test_home_assistant_names_are_not_added_when_the_extra_body_sets_the_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_name", "extra_body", "expected_prompt"),
+    ("model_name", "backend", "extra_body", "expected_prompt", "expected_keywords"),
     [
-        ("gpt-live-transcribe", None, "Test prompt. Kitchen, Ecobee, Thermostat."),
-        # OpenAI's Realtime sessions for this model take no prompt
-        ("gpt-realtime-whisper", None, None),
-        # A null in the extra body still drops the prompt
-        ("gpt-live-transcribe", {"prompt": None}, None),
+        # OpenAI keeps the prompt for context and keywords for the terms to expect
+        ("gpt-live-transcribe", OpenAIBackend.OPENAI, None, "Test prompt", KEYWORDS),
+        # Another backend may not know keywords, so the names stay in the prompt
+        ("gpt-live-transcribe", OpenAIBackend.SPEACHES, None, "Test prompt. Kitchen, Ecobee, Thermostat.", None),
+        # OpenAI's Realtime sessions for this model take no prompt, nor keywords
+        ("gpt-realtime-whisper", OpenAIBackend.OPENAI, None, None, None),
+        # A null in the extra body still drops the prompt, and the names still go as keywords
+        ("gpt-live-transcribe", OpenAIBackend.OPENAI, {"prompt": None}, None, KEYWORDS),
+        # Keywords in the extra body replace the names
+        ("gpt-live-transcribe", OpenAIBackend.OPENAI, {"keywords": ["Wyoming"]}, "Test prompt", ["Wyoming"]),
     ],
 )
 async def test_realtime_session_adds_home_assistant_names(
-    enhanced_handler, mock_info, mock_clients, model_name, extra_body, expected_prompt
+    enhanced_handler, mock_info, mock_clients, model_name, backend, extra_body, expected_prompt, expected_keywords
 ):
-    """Test a Realtime session gets the names in its prompt, unless the prompt would not reach the model."""
+    """Test a Realtime session gets the names as keywords or in its prompt, unless they would not reach the model."""
     stt_client = _use_realtime_stt_model(enhanced_handler, mock_info, mock_clients, name=model_name)
-    stt_client.backend = OpenAIBackend.OPENAI
+    stt_client.backend = backend
     enhanced_handler._stt_realtime_extra_body = extra_body
     names = _StubHassNames(HASS_NAMES)
     enhanced_handler._hass_names = names
@@ -9912,6 +10052,7 @@ async def test_realtime_session_adds_home_assistant_names(
 
     transcription = connection.session.update.call_args.kwargs["session"]["audio"]["input"]["transcription"]
     assert transcription.get("prompt") == expected_prompt
+    assert transcription.get("keywords") == expected_keywords
     await enhanced_handler._drop_audio_stream()
     await enhanced_handler._drain_background_tasks()
 
@@ -9919,6 +10060,7 @@ async def test_realtime_session_adds_home_assistant_names(
 @pytest.mark.asyncio
 async def test_select_program_without_the_model_drops_the_transcribe_names(multi_program_handler):
     """Test the names of a transcribe go with its model and language when a program without that model is chosen."""
+    multi_program_handler._stt_transcript_names = True
     transcribe = {"name": "gpt-4o-transcribe", "transcript_names": ["Ecobee"]}
     assert await multi_program_handler.handle_event(Event(type="transcribe", data=transcribe))
     assert multi_program_handler._current_bias_names == (("Ecobee",),)

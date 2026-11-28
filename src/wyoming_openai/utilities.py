@@ -1,4 +1,5 @@
 import argparse
+import functools
 import html.entities
 import json
 import logging
@@ -350,9 +351,14 @@ class SsmlTextTransformer:
 # A name followed by its aliases, kept together so a prompt that runs out of room drops whole entities or areas
 NameGroup = tuple[str, ...]
 
-# A prefix that already ends a sentence or a list is not given another period
-_PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?")
+# A prefix that already ends a sentence or a list, in ASCII or full-width punctuation, is not given another period
+_PROMPT_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?", "。", "．", "：", "，", "、", "；", "！", "？")
 _WHITESPACE = re.compile(r"\s+")
+# The pieces a prompt is counted in, each with the whitespace before it: a word of ASCII letters, a number, or any
+# other character on its own
+_PROMPT_TOKEN_PIECES = re.compile(r"(?P<space>\s*)(?:(?P<run>[A-Za-z]+|[0-9]+)|(?P<other>\S))")
+# OpenAI rejects a whole transcription request, or session update, with a keyword that holds one of these
+_KEYWORD_REJECTED_CHARACTERS = re.compile(r"[<>\r\n]")
 
 
 def clean_name(name: object) -> str | None:
@@ -362,35 +368,113 @@ def clean_name(name: object) -> str | None:
     return _WHITESPACE.sub(" ", name).strip() or None
 
 
-def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_chars: int) -> str | None:
+def estimate_prompt_tokens(text: str) -> int:
     """
-    The STT prompt: the prefix (STT_PROMPT) first, then as many whole name groups as fit in max_chars, in the form
-    "<prefix>. Name1, Name2.". Names already added, compared case-insensitively, are skipped. The prefix is never
-    shortened, and when no names fit, or there are none, the prompt is the prefix exactly as given.
+    A high estimate of how many tokens Whisper's tokenizer makes of a prompt, so a prompt within a budget stays within
+    Whisper's limit. The tokenizer is byte-level and never makes more tokens than a text has bytes, so any character
+    other than an ASCII letter or digit counts as many tokens as it has UTF-8 bytes, with the whitespace before it: one
+    for ASCII punctuation, two for a Cyrillic letter, three for most Chinese characters, four for an emoji. For text
+    outside ASCII the count is an upper bound. A word of ASCII letters, or a number, counts a token per 2 characters,
+    the estimate wyoming-faster-whisper uses without a tokenizer: about twice what Whisper makes of an English word,
+    and still more than it makes of most brand names and model numbers. A single space before it joins it, as in
+    Whisper's tokenizer, and more whitespace counts its bytes.
     """
+    tokens = 0
+    for piece in _PROMPT_TOKEN_PIECES.finditer(text):
+        space = len(piece.group("space").encode("utf-8"))
+        if (run := piece.group("run")) is not None:
+            tokens += max(0, space - 1) + -(-len(run) // 2)
+        else:
+            tokens += space + len(piece.group("other").encode("utf-8"))
+    return tokens
+
+
+# The fewest estimated tokens a name can take in the prompt: one for the name, and two for the separator after it
+_MIN_NAME_TOKENS = 3
+
+
+def _prompt_head(prefix: str | None) -> str:
+    """The prefix as it starts the prompt: stripped, and ended with a "." unless it already ends a sentence."""
     head = (prefix or "").strip()
     if head and not head.endswith(_PROMPT_PREFIX_ENDINGS):
         head += "."
+    return head
 
-    seen: set[str] = set()
-    chosen: list[str] = []
-    for group in groups:
-        unique = []
-        for name in group:
-            cleaned = clean_name(name)
-            if cleaned is not None and cleaned.casefold() not in seen:
-                seen.add(cleaned.casefold())
-                unique.append(cleaned)
-        if not unique:
-            continue
-        if len(_join_prompt(head, [*chosen, *unique])) > max_chars:
-            # Greedy and in order, so the most useful names are kept and the prompt is the same for the same names
-            break
-        chosen.extend(unique)
 
+def prompt_has_room_for_names(prefix: str | None, max_tokens: int) -> bool:
+    """Whether the prefix leaves room in max_tokens estimated tokens for at least one name; always, when it is 0."""
+    return not max_tokens or estimate_prompt_tokens(_prompt_head(prefix)) + _MIN_NAME_TOKENS <= max_tokens
+
+
+@functools.lru_cache(maxsize=8192)
+def _name_cost(name: str) -> tuple[str, int] | None:
+    """
+    A name cleaned for the prompt and its estimated tokens with the separator after it, or None when it is blank. The
+    same names come with every transcription, so each is cleaned and estimated once.
+    """
+    cleaned = clean_name(name)
+    if cleaned is None:
+        return None
+    return cleaned, estimate_prompt_tokens(cleaned) + 2
+
+
+def build_prompt(prefix: str | None, groups: Iterable[NameGroup], max_tokens: int) -> str | None:
+    """
+    The STT prompt: the prefix (STT_PROMPT) first, then the name groups that fit in max_tokens estimated tokens (see
+    estimate_prompt_tokens), or every group when max_tokens is 0, in the form "<prefix>. Name1, Name2.". A group goes
+    in whole or not at all; one that does not fit is left out, and a later, shorter one can still take the room left.
+    Names already added, compared case-insensitively, are skipped. The prefix is never shortened, and when no names
+    fit, or there are none, the prompt is the prefix exactly as given.
+    """
+    head = _prompt_head(prefix)
+    chosen = select_names(groups, max_tokens, used_tokens=estimate_prompt_tokens(head))
     if not chosen:
         return prefix
     return _join_prompt(head, chosen)
+
+
+def build_keywords(groups: Iterable[NameGroup], max_tokens: int) -> list[str]:
+    """
+    The `keywords` of an OpenAI transcription: the names of the groups that fit in max_tokens estimated tokens, or of
+    every group when max_tokens is 0, picked as build_prompt picks them, without the characters OpenAI rejects the
+    whole request for: angle brackets and line breaks.
+    """
+    safe_groups = (
+        tuple(_KEYWORD_REJECTED_CHARACTERS.sub(" ", name) for name in group if isinstance(name, str))
+        for group in groups
+    )
+    return select_names(safe_groups, max_tokens)
+
+
+def select_names(groups: Iterable[NameGroup], max_tokens: int, used_tokens: int = 0) -> list[str]:
+    """
+    The names of the groups that fit in max_tokens estimated tokens, of which used_tokens are already taken, in order;
+    a max_tokens of 0 sets no limit. A group goes in whole or not at all; one that does not fit is left out, and a
+    later, shorter one can still take the room left. Names already chosen, compared case-insensitively, are skipped.
+    """
+    # The estimate of a joined prompt is at most the sum of its parts: each name adds its own tokens, and two for the
+    # ", " after it, which also covers the "." that ends the list and the space between the prefix and the names
+    tokens = used_tokens
+    seen: set[str] = set()
+    chosen: list[str] = []
+    for group in groups:
+        if max_tokens and max_tokens - tokens < _MIN_NAME_TOKENS:
+            break  # No name fits in what is left
+        unique: dict[str, tuple[str, int]] = {}
+        for name in group:
+            if isinstance(name, str) and (named := _name_cost(name)) is not None:
+                if (key := named[0].casefold()) not in seen:
+                    unique.setdefault(key, named)
+        if not unique:
+            continue
+        cost = sum(name_tokens for _, name_tokens in unique.values())
+        if max_tokens and tokens + cost > max_tokens:
+            # In order, so the most useful names are kept and the names are the same for the same groups
+            continue
+        tokens += cost
+        seen.update(unique)
+        chosen.extend(name for name, _ in unique.values())
+    return chosen
 
 
 def _join_prompt(head: str, names: list[str]) -> str:
@@ -521,6 +605,25 @@ def parse_finite_float(value: str) -> float:
         raise argparse.ArgumentTypeError(f"expected a finite number, got {number}")
 
     return number
+
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def parse_bool(value: str) -> bool:
+    """
+    Parse an argparse value that must be true or false: true, yes, on or 1, or false, no, off or 0, in any case.
+
+    Raises:
+        argparse.ArgumentTypeError: When the value is none of these.
+    """
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got '{value}'")
 
 
 def parse_positive_int(value: str) -> int:

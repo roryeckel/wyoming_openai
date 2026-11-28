@@ -1,5 +1,7 @@
 import argparse
+import itertools
 import math
+import re
 from enum import Enum
 from io import BytesIO
 
@@ -12,19 +14,23 @@ from wyoming_openai.utilities import (
     RealtimePcmResampler,
     SsmlTextTransformer,
     advertised_language,
+    build_keywords,
     build_prompt,
     clamp_realtime_tts_speed,
     create_enum_parser,
     create_json_object_parser,
     decode_pcm_samples,
     downmix_pcm_samples,
+    estimate_prompt_tokens,
     get_extra_body_boolean_field,
     get_realtime_tts_audio_output,
     get_realtime_tts_speed,
     language_tags_match,
+    parse_bool,
     parse_finite_float,
     parse_non_negative_int,
     parse_voice_labels,
+    prompt_has_room_for_names,
     strip_ssml,
     validate_audio_format,
     validate_realtime_stt_extra_body,
@@ -639,23 +645,128 @@ def test_realtime_converter_rejects_an_unsupported_pcm_format(width, channels):
 
 def test_build_prompt_puts_stt_prompt_first():
     groups = [("Kitchen",), ("Ecobee", "Thermostat")]
-    assert build_prompt("Smart home commands", groups, 500) == "Smart home commands. Kitchen, Ecobee, Thermostat."
-    assert build_prompt("Commands:", groups, 500) == "Commands: Kitchen, Ecobee, Thermostat."
-    assert build_prompt(None, groups, 500) == "Kitchen, Ecobee, Thermostat."
+    assert build_prompt("Smart home commands", groups, 200) == "Smart home commands. Kitchen, Ecobee, Thermostat."
+    assert build_prompt("Commands:", groups, 200) == "Commands: Kitchen, Ecobee, Thermostat."
+    assert build_prompt(None, groups, 200) == "Kitchen, Ecobee, Thermostat."
+
+
+@pytest.mark.parametrize("prefix", ["家庭命令。", "家庭命令！", "Befehle;"])
+def test_build_prompt_keeps_a_prefix_that_already_ends_a_sentence(prefix):
+    assert build_prompt(prefix, [("厨房",)], 200) == f"{prefix} 厨房."
 
 
 def test_build_prompt_skips_names_added_before():
-    groups = [("Kitchen",), ("kitchen", "Kitchen  Light"), ("KITCHEN",), (" ",)]
-    assert build_prompt(None, groups, 500) == "Kitchen, Kitchen Light."
+    groups = [("Kitchen",), ("kitchen", "Kitchen  Light"), ("KITCHEN",), (" ",), ("Lamp", "lamp")]
+    assert build_prompt(None, groups, 200) == "Kitchen, Kitchen Light, Lamp."
 
 
-def test_build_prompt_drops_whole_groups_that_do_not_fit():
-    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("Lamp",)]
-    # The group after Kitchen does not fit whole, and the shorter one after it is not tried
-    assert build_prompt(None, groups, len("Kitchen, Ecobee.")) == "Kitchen."
+def test_build_prompt_leaves_out_a_group_that_does_not_fit_and_goes_on():
+    # With 2 for the separator after each name: Kitchen costs 6, Ecobee and Thermostat 12 together, and Lamp 4
+    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("Lamp",), ("Ecobee",)]
+    # The group after Kitchen does not fit whole, but the shorter ones after it do, even a name of the group left out
+    assert build_prompt(None, groups, 15) == "Kitchen, Lamp, Ecobee."
+    assert build_prompt(None, groups, 18) == "Kitchen, Ecobee, Thermostat."
+
+
+def test_build_prompt_and_keywords_take_every_name_with_no_limit():
+    """Test a budget of 0, for models with a longer context than Whisper's, sets no limit."""
+    groups = [(f"Light {number}",) for number in range(1000)] + [("Light 1",)]
+    names = [f"Light {number}" for number in range(1000)]
+    assert build_prompt("Commands.", groups, 0) == f"Commands. {', '.join(names)}."
+    assert build_keywords(groups, 0) == names
+
+
+@pytest.mark.parametrize(
+    ("prefix", "max_tokens", "has_room"),
+    [
+        # The smallest name takes 3: one token, and two for the separator after it
+        (None, 3, True),
+        (None, 2, False),
+        # "Smart home commands." takes 10
+        ("Smart home commands.", 13, True),
+        ("Smart home commands.", 12, False),
+        # The "." a prefix is ended with counts too
+        ("Smart home commands", 12, False),
+        ("A long prompt", 0, True),
+    ],
+)
+def test_prompt_has_room_for_names(prefix, max_tokens, has_room):
+    assert prompt_has_room_for_names(prefix, max_tokens) is has_room
+    # It agrees with the prompt that is built
+    assert (build_prompt(prefix, [("A",)], max_tokens) != prefix) is has_room
 
 
 @pytest.mark.parametrize("prefix", ["A long prompt that does not leave room for any name ", None])
 def test_build_prompt_keeps_stt_prompt_as_given_when_no_names_fit(prefix):
     assert build_prompt(prefix, [("Kitchen",)], 5) == prefix
-    assert build_prompt(prefix, [], 500) == prefix
+    assert build_prompt(prefix, [], 200) == prefix
+
+
+@pytest.mark.parametrize(
+    ("text", "tokens"),
+    [
+        # A token per 2 ASCII letters or digits, and one per ASCII punctuation mark
+        ("Kitchen, Ecobee.", 9),
+        ("RT-AX82U-0F90", 9),
+        ("Smart home commands.", 10),
+        # Every other character counts its UTF-8 bytes, with the whitespace before it
+        ("Küche", 5),
+        ("Кухня", 10),
+        ("厨房, 客厅.", 15),
+        ("Mustang RC (❄|☀)", 15),
+        ("😀", 4),
+        # More than one space before a word counts the spaces beyond the first
+        ("a  b", 3),
+        ("", 0),
+    ],
+)
+def test_estimate_prompt_tokens(text, tokens):
+    assert estimate_prompt_tokens(text) == tokens
+
+
+@pytest.mark.parametrize(
+    "text", ["厨房, 客厅.", "Кухня, Гостиная.", "Küche, Wohnzimmer.", "😀 ❄", "家庭命令。 厨房, 客厅."]
+)
+def test_estimate_prompt_tokens_is_at_least_the_bytes_outside_ascii(text):
+    """Test text outside ASCII counts at least its UTF-8 bytes, the most tokens Whisper's byte-level tokenizer makes."""
+    ascii_runs = sum(len(run) for run in re.findall(r"[A-Za-z0-9]+", text))
+    assert estimate_prompt_tokens(text) >= len(text.encode("utf-8")) - ascii_runs
+
+
+def test_build_prompt_counts_the_budget_in_tokens_for_any_script():
+    """Test a prompt in a script of several bytes a character stays within the budget in bytes, so in tokens."""
+    rooms = "厨房客厅卧室书浴阳台车库走廊花园"
+    groups = [(first + second,) for first, second in itertools.permutations(rooms, 2)]
+    prompt = build_prompt("家庭命令。", groups, 200)
+    assert prompt is not None and prompt != "家庭命令。"
+    # Whisper's tokenizer never makes more tokens than a text has bytes, so this holds whatever the tokenizer does
+    assert len(prompt.encode("utf-8")) <= 200
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        *[(value, True) for value in ("true", "Yes", " on ", "1")],
+        *[(value, False) for value in ("false", "NO", "off", "0")],
+    ],
+)
+def test_parse_bool(value, expected):
+    assert parse_bool(value) is expected
+
+
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_parse_bool_rejects_other_values(value):
+    with pytest.raises(argparse.ArgumentTypeError, match="expected true or false"):
+        parse_bool(value)
+
+
+def test_build_keywords_picks_names_as_the_prompt_does():
+    groups = [("Kitchen",), ("Ecobee", "Thermostat"), ("kitchen",), ("Lamp",)]
+    assert build_keywords(groups, 200) == ["Kitchen", "Ecobee", "Thermostat", "Lamp"]
+    # Without STT_PROMPT, which keywords leave in the prompt, the whole budget is the names'
+    assert build_keywords(groups, 10) == ["Kitchen", "Lamp"]
+
+
+def test_build_keywords_leaves_out_the_characters_openai_rejects():
+    groups = [("<Kitchen>",), ("Line\nBreak", "A<B"), ("<>",), ("Ok\r\n",)]
+    assert build_keywords(groups, 200) == ["Kitchen", "Line Break", "A B", "Ok"]

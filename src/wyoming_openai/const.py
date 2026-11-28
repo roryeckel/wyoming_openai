@@ -25,6 +25,17 @@ ATTRIBUTION_URL = "https://github.com/roryeckel/wyoming_openai"
 OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES = ("gpt-transcribe", "gpt-live-transcribe")
 # OpenAI STT models whose Realtime sessions do not support a `prompt`
 OPENAI_PROMPTLESS_REALTIME_STT_MODEL_PREFIXES = ("gpt-realtime-whisper",)
+# OpenAI STT models that take `keywords`, literal terms to expect, alongside `prompt`, which OpenAI keeps for context;
+# the names that bias STT go there instead of into the prompt. The same family as the plural `languages` models
+OPENAI_KEYWORD_STT_MODEL_PREFIXES = OPENAI_PLURAL_LANGUAGE_STT_MODEL_PREFIXES
+# OpenAI STT models that take no prompt, so the names are not added to one; STT_PROMPT is still sent as configured
+OPENAI_PROMPTLESS_STT_MODEL_PREFIXES = ("gpt-4o-transcribe-diarize",)
+# STT models that take no prompt on any backend, matched anywhere in the model name, case-insensitively, so the names
+# are not added to one: Voxtral, whose Mistral API biases with `context_bias` instead and whose vLLM model ignores it
+PROMPTLESS_STT_MODEL_NAME_PARTS = ("voxtral",)
+# Distil-Whisper models, matched the same way, which a prompt does not help: wyoming-faster-whisper measured
+# distil-large-v3 ignoring one, and distil-small.en truncating or looping the transcript from about 52 prompt tokens
+DISTIL_WHISPER_MODEL_NAME_PART = "distil"
 
 # Realtime models are conversational, so TTS over Realtime has to tell the model to read rather than reply
 REALTIME_TTS_INSTRUCTIONS = (
@@ -59,14 +70,22 @@ OPENAI_SPEECH_ONLY_TTS_VOICES = tuple(
 )
 
 # Biasing STT toward names: those a client sends with transcribe, and those Home Assistant exposes to Assist.
-# Whisper keeps at most 224 prompt tokens and drops the start of a longer prompt, which holds STT_PROMPT; 500
-# characters stay below that in English and most other languages written in the Latin alphabet
-DEFAULT_STT_PROMPT_MAX_CHARS = 500
+# Whisper keeps at most 223 prompt tokens and drops the start of a longer prompt, which holds STT_PROMPT and the most
+# useful names. The budget is in estimated tokens (see utilities.estimate_prompt_tokens), which overcount: outside ASCII
+# they are an upper bound, so a prompt within the budget stays within Whisper's limit in any script.
+# wyoming-faster-whisper uses the same 200-token default
+DEFAULT_STT_PROMPT_MAX_TOKENS = 200
 HASS_REQUEST_TIMEOUT = 10.0  # Seconds to connect to Home Assistant, or to read the names from it
+HASS_CLOSE_TIMEOUT = 2.0  # Seconds to wait for Home Assistant to close the websocket, so it cannot hold up shutdown
 HASS_RETRY_SECONDS = 30.0  # Seconds before connecting to Home Assistant again after the connection failed
 HASS_CHANGE_DEBOUNCE_SECONDS = 1.0  # Seconds without another registry change before the names are read again
-# The registry events that can change the names, with the fields whose update can, or None when any change can. An
-# entity's exposure to Assist is kept in its options; a device's name is part of its entities' displayed names
+HASS_CHANGE_MAX_WAIT_SECONDS = 10.0  # Longest a burst of registry changes can put off reading the names again
+# Seconds after which the names are read again without a registry change, for what no registry event reports: the
+# state that makes an entity unavailable, a name set by an integration or customize, or an entity outside the registry
+HASS_REFRESH_SECONDS = 300.0
+# The events that can change the names, with the fields of a registry update that can, or None when any such event
+# can. An entity's exposure to Assist is kept in its options; a device's name is part of its entities' displayed names.
+# homeassistant_started ends Home Assistant's startup: names read while it started can lack the entities still loading
 HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
     "entity_registry_updated": frozenset(
         {
@@ -84,8 +103,10 @@ HASS_NAME_EVENTS: dict[str, frozenset[str] | None] = {
     "device_registry_updated": frozenset({"area_id", "name", "name_by_user"}),
     "area_registry_updated": None,
     "floor_registry_updated": None,
+    "homeassistant_started": None,
 }
-# Entities in these domains are named first, since they are the ones spoken commands control
+# Entities in these domains are named first, since they are the ones spoken commands control; the domains take turns,
+# so a home with many lights still gets its locks, switches and scenes into a short prompt
 HASS_PRIORITY_DOMAINS = frozenset(
     {"light", "switch", "fan", "media_player", "climate", "scene", "todo", "cover", "lock"}
 )

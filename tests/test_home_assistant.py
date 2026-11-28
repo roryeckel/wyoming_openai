@@ -1,11 +1,15 @@
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from websockets.asyncio.server import serve
 
+import wyoming_openai.home_assistant as home_assistant_module
+from wyoming_openai.const import HASS_CLOSE_TIMEOUT
 from wyoming_openai.home_assistant import HomeAssistantNames, _changes_names, hass_websocket_url, parse_hass_names
 
 TOKEN = "secret-token"
@@ -77,7 +81,8 @@ EXPECTED_NAMES = (
 class FakeHomeAssistant:
     """
     A websocket server that answers like Home Assistant, with a result or an error per command type, and sends a
-    registry change event to every connection on change().
+    registry change event to every connection on change(). after_reply, when set, is awaited with each command after
+    its reply is sent.
     """
 
     def __init__(self):
@@ -87,6 +92,8 @@ class FakeHomeAssistant:
         self.stall = False
         self.commands = []
         self.connections = []
+        self.logins = 0
+        self.after_reply: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self.url = ""
 
     def reads(self):
@@ -108,6 +115,7 @@ class FakeHomeAssistant:
     async def handler(self, websocket):
         await websocket.send(json.dumps({"type": "auth_required", "ha_version": "2026.11.0"}))
         auth = json.loads(await websocket.recv())
+        self.logins += 1
         if auth.get("access_token") != self.token:
             await websocket.send(json.dumps({"type": "auth_invalid", "message": "Invalid access token or password"}))
             return
@@ -131,6 +139,8 @@ class FakeHomeAssistant:
                 else:
                     reply.update(success=True, result=self.results[message["type"]])
                 await websocket.send(json.dumps(reply))
+                if self.after_reply is not None:
+                    await self.after_reply(message)
         finally:
             self.connections.remove((websocket, subscriptions))
 
@@ -153,7 +163,14 @@ async def watch(fake_hass):
     started = []
 
     def start(token=TOKEN, **kwargs):
-        kwargs = {"retry_seconds": 0.01, "debounce_seconds": 0.01, **kwargs}
+        # Only the tests about them read again without a change, or cut a burst of changes short
+        kwargs = {
+            "retry_seconds": 0.01,
+            "debounce_seconds": 0.01,
+            "max_wait_seconds": 60,
+            "refresh_seconds": 60,
+            **kwargs,
+        }
         names = HomeAssistantNames(token, fake_hass.url, **kwargs)
         names.start()
         started.append(names)
@@ -178,6 +195,10 @@ async def until(condition, timeout=5.0):
         ("https://ha.example.com/", "wss://ha.example.com/api/websocket"),
         # A reverse proxy may serve Home Assistant under a path
         ("https://example.com/ha", "wss://example.com/ha/api/websocket"),
+        # The REST API URL, as wyoming-faster-whisper's --hass-api takes, or the websocket API URL itself
+        ("http://homeassistant.local:8123/api", "ws://homeassistant.local:8123/api/websocket"),
+        ("https://example.com/ha/api/", "wss://example.com/ha/api/websocket"),
+        ("http://ha:8123/api/websocket", "ws://ha:8123/api/websocket"),
     ],
 )
 def test_hass_websocket_url(url, expected):
@@ -194,6 +215,41 @@ def test_hass_websocket_url_rejects_other_urls(url):
 
 def test_parse_hass_names_ranks_exposed_names():
     assert parse_hass_names(EXPOSED_IDS, STATES, ENTRIES, DEVICES, AREAS, FLOORS) == EXPECTED_NAMES
+
+
+def test_parse_hass_names_takes_turns_by_domain_and_puts_unavailable_entities_last():
+    exposed_ids = sorted(
+        ["light.a", "light.b", "light.c", "lock.front", "scene.movie", "sensor.power", "switch.kettle", "switch.gone"]
+    )
+    states = [
+        {"entity_id": entity_id, "state": "on", "attributes": {"friendly_name": name}}
+        for entity_id, name in [
+            ("light.a", "Lamp A"),
+            ("light.b", "Lamp B"),
+            ("light.c", "Lamp C"),
+            ("lock.front", "Front Door"),
+            ("scene.movie", "Movie Time"),
+            ("sensor.power", "Power"),
+            ("switch.kettle", "Kettle"),
+        ]
+    ]
+    states.append({"entity_id": "switch.gone", "state": "unavailable", "attributes": {"friendly_name": "Old Plug"}})
+
+    names = parse_hass_names(exposed_ids, states, {}, [], [], [])
+
+    assert names == (
+        # One of each domain, then the second of each, and so on
+        ("Lamp A",),
+        ("Front Door",),
+        ("Movie Time",),
+        ("Kettle",),
+        ("Lamp B",),
+        ("Lamp C",),
+        # Other entities
+        ("Power",),
+        # Unavailable entities last, whatever their domain, so a prompt that runs out of room drops them first
+        ("Old Plug",),
+    )
 
 
 def test_parse_hass_names_rejects_an_unexpected_reply():
@@ -215,6 +271,7 @@ async def test_reads_names_when_connected(fake_hass, watch, caplog):
         "device_registry_updated",
         "area_registry_updated",
         "floor_registry_updated",
+        "homeassistant_started",
     ]
     read = [command for command in fake_hass.commands if command["type"] != "subscribe_events"]
     assert [command["type"] for command in read] == list(RESULTS)
@@ -246,6 +303,33 @@ async def test_reads_names_again_when_a_registry_changes(fake_hass, watch):
     assert fake_hass.reads() == 2
 
 
+@pytest.mark.asyncio
+async def test_reads_names_again_when_home_assistant_finishes_starting(fake_hass, watch):
+    """Test a read made while Home Assistant was starting is made again once it has, as no registry event reports
+    the entities that come up meanwhile."""
+    names = watch()
+    await until(lambda: names.names == EXPECTED_NAMES)
+
+    fake_hass.results["config/area_registry/list"] = [{"area_id": "garage", "name": "Garage", "aliases": []}]
+    await fake_hass.change("homeassistant_started")
+
+    await until(lambda: ("Garage",) in names.names)
+    assert fake_hass.reads() == 2
+
+
+@pytest.mark.asyncio
+async def test_reads_names_from_a_home_assistant_without_floors(fake_hass, watch):
+    """Test Home Assistant before 2024.4, which has no floor registry, gets every name but the floors'."""
+    fake_hass.errors["config/floor_registry/list"] = {"code": "unknown_command", "message": "Unknown command."}
+
+    names = watch()
+    await until(lambda: names.names != ())
+
+    floors = {("Ground Floor",), ("Upstairs",), ("Basement",)}
+    assert names.names == tuple(group for group in EXPECTED_NAMES if group not in floors)
+    assert fake_hass.logins == 1
+
+
 def _update(event_type, *fields):
     return {"event_type": event_type, "data": {"action": "update", "changes": dict.fromkeys(fields)}}
 
@@ -266,6 +350,8 @@ def _update(event_type, *fields):
         ({"event_type": "device_registry_updated", "data": {"action": "remove", "device_id": "dev1"}}, True),
         (_update("area_registry_updated", "icon"), True),
         (_update("floor_registry_updated", "level"), True),
+        # The end of Home Assistant's startup, when the entities still loading at the read have come up
+        ({"event_type": "homeassistant_started", "data": {}}, True),
         # An event of an unexpected shape is taken to change them
         ({"event_type": "entity_registry_updated", "data": {"action": "update"}}, True),
         ({"event_type": "entity_registry_updated"}, True),
@@ -302,6 +388,95 @@ async def test_reads_once_for_a_burst_of_changes(fake_hass, watch):
 
 
 @pytest.mark.asyncio
+async def test_a_steady_stream_of_changes_cannot_put_off_the_read(fake_hass, watch):
+    names = watch(debounce_seconds=0.2, max_wait_seconds=0.3)
+    await until(lambda: names.names == EXPECTED_NAMES)
+
+    # A change every 0.05 seconds never leaves the 0.2 seconds of quiet the debounce waits for
+    for _ in range(30):
+        await fake_hass.change("entity_registry_updated")
+        await asyncio.sleep(0.05)
+
+    assert fake_hass.reads() >= 3
+
+
+@pytest.mark.asyncio
+async def test_reads_again_without_a_change_every_refresh_seconds(fake_hass, watch):
+    names = watch(refresh_seconds=0.05)
+    await until(lambda: names.names == EXPECTED_NAMES)
+
+    # Such as an entity that became unavailable, which no registry event reports
+    fake_hass.results["get_states"] = [
+        {**state, "state": "unavailable"} if state["entity_id"] == "climate.ecobee" else state for state in STATES
+    ]
+
+    await until(lambda: names.names[-1] == ("Ecobee", "Thermostat"))
+    assert fake_hass.reads() >= 2
+
+
+@pytest.mark.asyncio
+async def test_reads_again_after_a_change_during_a_read(fake_hass, watch):
+    hallway = {"friendly_name": "Hallway Thermostat"}
+    renamed = [{**s, "attributes": hallway} if s["entity_id"] == "climate.ecobee" else s for s in STATES]
+
+    async def change_during_the_first_read(message):
+        # The states were already sent with the old name, so only another read can pick up the rename
+        if message["type"] == "get_states" and fake_hass.reads() == 1:
+            fake_hass.results["get_states"] = renamed
+            await fake_hass.change("entity_registry_updated", _update("", "name")["data"])
+
+    fake_hass.after_reply = change_during_the_first_read
+    names = watch()
+
+    await until(lambda: ("Hallway Thermostat", "Thermostat") in names.names)
+    assert fake_hass.reads() == 2
+
+
+@pytest.mark.asyncio
+async def test_ignores_a_proxy_set_in_the_environment(fake_hass, watch, monkeypatch):
+    # A proxy that is not there: reaching Home Assistant through it would fail
+    for variable in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.setenv(variable, "http://127.0.0.1:9")
+    for variable in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(variable, raising=False)
+
+    names = watch()
+
+    await until(lambda: names.names == EXPECTED_NAMES)
+
+
+@pytest.mark.asyncio
+async def test_bounds_the_wait_for_home_assistant_to_close(fake_hass, watch, monkeypatch):
+    calls = []
+    real_connect = home_assistant_module.connect
+
+    def recording_connect(*args, **kwargs):
+        calls.append(kwargs)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(home_assistant_module, "connect", recording_connect)
+
+    names = watch()
+    await until(lambda: names.names == EXPECTED_NAMES)
+
+    assert calls[0]["close_timeout"] == HASS_CLOSE_TIMEOUT
+    assert calls[0]["proxy"] is None
+
+
+@pytest.mark.asyncio
+async def test_logs_the_first_read_of_every_connection(fake_hass, watch, caplog):
+    for command_type in ("homeassistant/expose_entity/list", "config/area_registry/list", "config/floor_registry/list"):
+        fake_hass.results[command_type] = {"exposed_entities": {}} if "expose" in command_type else []
+
+    with caplog.at_level(logging.INFO, logger="wyoming_openai.home_assistant"):
+        watch()
+        # Nothing exposed is still a working connection, and worth seeing
+        await until(lambda: "Read 0 names from Home Assistant" in caplog.text)
+        await fake_hass.disconnect()
+        await until(lambda: caplog.text.count("Read 0 names from Home Assistant") == 2)
+
+
+@pytest.mark.asyncio
 async def test_reconnects_and_keeps_the_names_while_disconnected(fake_hass, watch, caplog):
     names = watch(retry_seconds=0.2)
     await until(lambda: names.names == EXPECTED_NAMES)
@@ -310,36 +485,53 @@ async def test_reconnects_and_keeps_the_names_while_disconnected(fake_hass, watc
         await fake_hass.disconnect()
         await until(lambda: "No connection to Home Assistant" in caplog.text)
         assert names.names == EXPECTED_NAMES
-        await until(lambda: "works again" in caplog.text)
+        await until(lambda: caplog.text.count("Read 12 names from Home Assistant") == 1 and fake_hass.reads() == 2)
 
     assert "using the names read before, and connecting again in 0.2 seconds" in caplog.text
     assert fake_hass.reads() == 2
 
 
 @pytest.mark.asyncio
-async def test_reports_a_rejected_token_once_and_keeps_trying(fake_hass, watch, caplog):
+async def test_stops_after_a_rejected_token(fake_hass, watch, caplog):
     with caplog.at_level(logging.DEBUG, logger="wyoming_openai.home_assistant"):
         names = watch(token="wrong")
-        await until(lambda: caplog.text.count("No connection to Home Assistant") >= 3)
-        fake_hass.token = "wrong"
-        await until(lambda: names.names == EXPECTED_NAMES)
+        await until(lambda: "rejected the access token" in caplog.text)
+        # Each attempt counts as a failed login, which Home Assistant can answer by banning the address
+        await asyncio.sleep(0.1)
 
-    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "Home Assistant rejected the access token: Invalid access token or password" in warnings[0]
-    assert "using no Home Assistant names" in warnings[0]
+    assert fake_hass.logins == 1
+    assert names.names == ()
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(errors) == 1
+    assert "Home Assistant rejected the access token: Invalid access token or password" in errors[0]
+    assert "Not connecting to Home Assistant at" in errors[0]
+    assert "using no Home Assistant names" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_stops_after_a_token_that_is_not_an_administrators(fake_hass, watch, caplog):
+    fake_hass.errors["homeassistant/expose_entity/list"] = {"code": "unauthorized", "message": "Unauthorized"}
+
+    with caplog.at_level(logging.DEBUG, logger="wyoming_openai.home_assistant"):
+        names = watch()
+        await until(lambda: "must belong to a Home Assistant administrator" in caplog.text)
+        # Home Assistant logs an error for each command it refuses
+        await asyncio.sleep(0.1)
+
+    assert fake_hass.logins == 1
+    assert names.names == ()
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(errors) == 1
+    assert "Not connecting to Home Assistant at" in errors[0]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("command_type", "error", "message"),
     [
-        (
-            "homeassistant/expose_entity/list",
-            {"code": "unauthorized", "message": "Unauthorized"},
-            "must belong to a Home Assistant administrator",
-        ),
         ("get_states", {"code": "unknown_error", "message": "Boom"}, "get_states failed: Boom"),
+        # A command only an optional read may be missing
+        ("get_states", {"code": "unknown_command", "message": "Unknown command."}, "Unknown command."),
     ],
 )
 async def test_reports_a_failed_command(fake_hass, watch, caplog, command_type, error, message):
