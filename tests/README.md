@@ -6,7 +6,7 @@ installed, as [CONTRIBUTING.md](../CONTRIBUTING.md#development-setup) sets up.
 | Suite | Select it with | Needs | In CI | Its checks |
 |---|---|---|---|---|
 | [Unit](#unit-tests) | `pytest`, the default run | Nothing | Every push, and PRs to `main` | Deterministic |
-| [Wyoming integration](#wyoming-integration-tests) | `-m "integration and not ha_scripted"` | Docker | Pushes to and PRs against `main` | A real proxy and Speaches; TTS checked by transcribing it back |
+| [Wyoming integration](#wyoming-integration-tests) | `-m integration` | Docker | Pushes to and PRs against `main` | A real proxy and Speaches; TTS checked by transcribing it back |
 | [Scripted Home Assistant](#scripted-home-assistant-tests) | `-m ha_scripted` | Docker, `ffmpeg` | PRs labeled `ha-scripted`, and every release | Deterministic: a scripted conversation agent |
 | [Live Home Assistant](#live-home-assistant-tests) | `-m ha_live` | Docker, `ffmpeg`; an NVIDIA GPU makes it faster | Never | Fuzzy, on real models: a failure needs reading |
 
@@ -30,7 +30,7 @@ transcript against the original phrase, with tolerance for minor mishearing. The
 and are skipped by default:
 
 ```bash
-pytest -m "integration and not ha_scripted" -v
+pytest -m integration -v
 ```
 
 The fixtures handle the backend automatically: a Speaches instance already healthy on `localhost:8000` is reused;

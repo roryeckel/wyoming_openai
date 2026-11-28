@@ -177,15 +177,18 @@ The server accepts both command-line arguments and environment variables. Key co
 
 ## Testing Strategy
 
-Tests are organized by module:
+Unit tests, in the default run, are organized by module:
 - `test_handler.py`: Event handler logic
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
 - `test_wav.py`: WAV header parsing and framing
 - `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
-- `test_integration.py`: End-to-end scenarios
-- `ha_e2e/test_ha_scripted.py`: scripted Home Assistant suite, the CI gate (see Pull Requests)
-- `ha_e2e/test_ha_live.py`: live Home Assistant suite, on real providers, never in CI (see Live Testing)
+- `test_handler_workflows.py`: Whole STT and TTS workflows through the handler, with the backend mocked
+
+Each Docker suite has one marker, and nothing else selects it:
+- `test_e2e.py`, `test_e2e_negative.py` (`-m integration`): the Wyoming suite, a real proxy against a real Speaches
+- `ha_e2e/test_ha_scripted.py` (`-m ha_scripted`): scripted Home Assistant suite, the CI gate (see Pull Requests)
+- `ha_e2e/test_ha_live.py` (`-m ha_live`): live Home Assistant suite, on real providers, never in CI (see Live Testing)
 
 `tests/README.md` says how to run each suite and what it needs.
