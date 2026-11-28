@@ -177,7 +177,7 @@ The server accepts both command-line arguments and environment variables. Key co
 
 ## Testing Strategy
 
-Unit tests, in the default run, are organized by module:
+Unit tests run in the default run, one module per area. The main ones:
 - `test_handler.py`: Event handler logic
 - `test_compatibility.py`: Backend compatibility
 - `test_utilities.py`: Helper functions
@@ -185,6 +185,8 @@ Unit tests, in the default run, are organized by module:
 - `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_handler_workflows.py`: Whole STT and TTS workflows through the handler, with the backend mocked
+- `test_e2e_helpers.py`, `ha_e2e/test_ha_api.py`, `ha_e2e/test_helpers.py`: the Docker suites' helpers, tested
+  without Docker
 
 Each Docker suite has one marker, and nothing else selects it:
 - `test_e2e.py`, `test_e2e_negative.py` (`-m integration`): the Wyoming suite, a real proxy against a real Speaches
