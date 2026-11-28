@@ -18,7 +18,7 @@ reads cleanly out of context.
 - [ ] Tests were added or updated if supported behavior changed.
 - [ ] Docs were updated if user-facing behavior changed.
 - [ ] This does not add a provider-specific custom API without prior maintainer approval.
-- [ ] If an AI coding agent made this change, it loaded AGENTS.md and followed its testing rules, smoke testing included.
+- [ ] If an AI coding agent made this change, it loaded AGENTS.md and followed its testing rules, the live Home Assistant suite as appropriate.
 
 ## Details
 
@@ -28,5 +28,5 @@ reads cleanly out of context.
 
 ## Testing
 
-<!-- How you verified this. Commands run, manual steps, screenshots, etc. -->
+<!-- What you ran to verify this: the commands or suites, and for a live run the lanes and providers, with what passed and failed. Say what you did not test, and why. -->
 

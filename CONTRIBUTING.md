@@ -149,6 +149,8 @@ pytest tests/test_handler.py
 ruff check . --fix
 ```
 
+The other suites, what each needs, and when CI runs it: [tests/README.md](tests/README.md).
+
 ## Naming and URL Conventions
 
 Different surfaces use different name forms, each matching the form its platform renders as canonical.

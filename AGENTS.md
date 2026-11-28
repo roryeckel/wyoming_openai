@@ -85,9 +85,9 @@ costs a few minutes. It can also be started by hand with
 ## Live Testing
 
 The live Home Assistant suite (`pytest -m ha_live`) runs Home Assistant's
-voice pipeline through the proxy against real STT and TTS providers. It needs
-an NVIDIA GPU, and CI does not run it. Before opening a PR, run it when a change
-alters:
+voice pipeline through the proxy against real STT and TTS providers. It runs
+on the CPU, faster on an NVIDIA GPU, and CI does not run it. Before opening a
+PR, run it when a change alters:
 
 - what a backend receives (a request-shape change): request fields or their
   values, model or voice resolution, the route or transport, Realtime session
@@ -187,3 +187,5 @@ Tests are organized by module:
 - `test_integration.py`: End-to-end scenarios
 - `ha_e2e/test_ha_scripted.py`: scripted Home Assistant suite, the CI gate (see Pull Requests)
 - `ha_e2e/test_ha_live.py`: live Home Assistant suite, on real providers, never in CI (see Live Testing)
+
+`tests/README.md` says how to run each suite and what it needs.

@@ -93,9 +93,10 @@ same work.
 
 ## 4. Find out what can run
 
-- **GPU and Docker:** `nvidia-smi` and `docker info`. Without an NVIDIA GPU the
-  suite can't run here: say so in the plan, and offer the developer the
-  commands to run it themselves.
+- **Docker, and a GPU:** `docker info`, and `nvidia-smi`. With an NVIDIA GPU,
+  use the GPU overlays tests/README.md names. Without one, the run is on the
+  CPU: slower, and Chatterbox can't run. Say which in the plan. Without
+  Docker, offer the developer the commands to run it themselves.
 - **Keys:** paid providers are not a hard requirement. Run one when its key is
   available; otherwise say in the plan and in the PR which providers did not
   run, and rely on the request-shape check for them. A key counts as
@@ -139,32 +140,10 @@ For example:
 
 ## 6. Run it
 
-Build the image from the branch, and bring up the stack:
-
-```bash
-docker build -t wyoming_openai:live .
-docker volume create wyoming_openai_huggingface-hub   # only if it does not exist yet
-docker compose -f tests/ha_e2e/live/docker-compose.yml up -d --wait
-pytest -m ha_live -v                                  # the local lane
-```
-
-For each provider in the plan, start its engine if it runs locally (its file's
-`Engine:` line, from `tests/ha_e2e/live/docker-compose.engines.yml`), then its
-proxy, run the lane, and take the proxy down before the next one:
-
-```bash
-HA_LIVE_PROVIDER=<name> docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d --wait
-HA_LIVE_PROVIDER=<name> pytest -m ha_live -v -k provider
-docker compose -p ha_live_provider down
-```
-
-For Realtime, the OpenAI lane:
-
-```bash
-docker compose -f tests/ha_e2e/live/docker-compose.openai.yml up -d --wait
-HA_LIVE_OPENAI=1 pytest -m ha_live -v -k openai
-docker compose -p ha_live_openai down
-```
+Build the image from the branch, and run each lane in the plan with the
+commands in tests/README.md, "Home Assistant Live Tests". For each provider,
+start its engine if it runs locally (its file's `Engine:` line), then its
+proxy, run the lane, and take the proxy down before the next one.
 
 A key goes into `HA_LIVE_STT_KEY` and `HA_LIVE_TTS_KEY` (provider lane) or
 `OPENAI_API_KEY` (OpenAI lane) through the environment of the one command that
@@ -200,32 +179,27 @@ environment.
 
 ## 7. Read the results
 
-Each run writes `tests/ha_e2e/artifacts/live-<timestamp>/`: `summary.md`,
-`summary.json`, and every reply's audio. A failure is either the proxy's or the
-model's:
+Each run writes `tests/ha_e2e/artifacts/live-<timestamp>/`, which stays on the
+machine: the folder is gitignored, and neither its audio nor its summaries go
+in a commit. A failure is either the proxy's or the model's:
 
 - **The model's:** a misheard command, a sentence returned as silence, a reply
   it made up instead of reading the text, a provider's rate limit. The reply
   check names silences and missing sentences.
-- **The proxy's:** anything else, and any doubt. Build `main` as
-  `wyoming_openai:live-main` (in a worktree), and run the same case with
-  `WYOMING_OPENAI_IMAGE=wyoming_openai:live-main` after recreating the
-  proxies. A failure on the branch but not on `main` is the change's.
+- **The proxy's:** anything else, and any doubt. Run the same case on `main`,
+  as tests/README.md, "Reading the results", says. A failure on the branch but
+  not on `main` is the change's.
 
 A failure caused by the change is fixed before the PR opens, and the run
 repeated. One that is the model's or the provider's is reported, not hidden.
 
 ## 8. Tear down
 
-Take down what the run started: `docker compose -p ha_live_provider down` and
-`docker compose -p ha_live_openai down` (both need no key, and remove the
-containers that hold one), `docker compose -p ha_live_engines down` for the
-local engines, and the stack with
-`docker compose -f tests/ha_e2e/live/docker-compose.yml down -v` unless the
-developer wants it kept. Each of these touches only what the live run
-started. Pulled images stay unless the developer asks to remove them, and so do
-the engines' model and backend volumes, so the next run skips those downloads;
-`docker compose -p ha_live_engines down -v` removes them.
+Take down what the run started, with the commands in tests/README.md,
+"Tearing down": the OpenAI and provider proxies always, since they hold a key,
+and the engines and the stack unless the developer wants them kept. Each of
+these touches only what the live run started. Pulled images and the engines'
+volumes stay unless the developer asks to remove them.
 
 ## 9. Report
 
