@@ -1,0 +1,24 @@
+# Moves the provider lane's local engines to an NVIDIA GPU. Layer it on docker-compose.engines.yml in every command
+# that brings an engine up. HA_LIVE_GPU picks the GPU (default 0).
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["${HA_LIVE_GPU:-0}"]
+            capabilities: [gpu]
+
+services:
+  kokoro:
+    <<: *gpu
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    environment:
+      USE_GPU: "true"
+
+  localai:
+    <<: *gpu
+    image: localai/localai:latest-gpu-nvidia-cuda12
+
+  chatterbox-tts:
+    <<: *gpu

@@ -20,6 +20,7 @@ from .compatibility import (
     tts_voice_to_string,
     uses_openai_realtime_voices,
 )
+from .concurrency import ConcurrencyLimit
 from .const import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
@@ -29,7 +30,7 @@ from .const import (
     REALTIME_TTS_MIN_SPEED,
     __version__,
 )
-from .handler import TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
+from .handler import STT_CONCURRENT_REQUESTS, TTS_CONCURRENT_REQUESTS, OpenAIEventHandler
 from .home_assistant import HomeAssistantNames
 from .utilities import (
     clamp_realtime_tts_speed,
@@ -213,6 +214,17 @@ async def main():
         help="Space-separated list of STT model names that use Realtime transcription (e.g. gpt-live-transcribe)",
     )
     parser.add_argument(
+        "--stt-concurrent-requests",
+        type=parse_non_negative_int,
+        # None when not given, so a limit set for a service that is not configured can be reported
+        default=env_default("STT_CONCURRENT_REQUESTS"),
+        help=(
+            "Maximum number of STT requests in flight at once across all connections; further requests wait for a "
+            "free slot. A Realtime session holds its slot from audio-start until it ends "
+            f"(default: {STT_CONCURRENT_REQUESTS}; 0 means no limit)"
+        ),
+    )
+    parser.add_argument(
         "--stt-realtime-extra-body",
         type=stt_realtime_extra_body_parser,
         default=env_default("STT_REALTIME_EXTRA_BODY"),
@@ -339,11 +351,13 @@ async def main():
     )
     parser.add_argument(
         "--tts-concurrent-requests",
-        type=parse_positive_int,
-        default=os.getenv("TTS_CONCURRENT_REQUESTS") or TTS_CONCURRENT_REQUESTS,
+        type=parse_non_negative_int,
+        # None when not given, as for --stt-concurrent-requests
+        default=env_default("TTS_CONCURRENT_REQUESTS"),
         help=(
-            "Maximum number of simultaneous TTS requests per connection when synthesizing sentences "
-            f"(default: {TTS_CONCURRENT_REQUESTS})"
+            "Maximum number of TTS requests in flight at once across all connections, the sentences of a "
+            "synthesis included; further requests wait for a free slot "
+            f"(default: {TTS_CONCURRENT_REQUESTS}; 0 means no limit)"
         ),
     )
 
@@ -404,7 +418,18 @@ async def main():
     if args.stt_hass_token and not stt_requested:
         _logger.warning("A Home Assistant token is set but unused: no STT models are configured")
 
+    def warn_unused_concurrency_limits(stt_configured: bool, tts_configured: bool) -> None:
+        """
+        Report a concurrency limit given explicitly, whatever its value, for a service that is not configured; a
+        limit left at its default is not reported. Called on every way out of startup, the early exits included.
+        """
+        if args.stt_concurrent_requests is not None and not stt_configured:
+            _logger.warning("STT concurrent requests is set but unused: STT is not configured")
+        if args.tts_concurrent_requests is not None and not tts_configured:
+            _logger.warning("TTS concurrent requests is set but unused: TTS is not configured")
+
     if not stt_requested and not tts_requested:
+        warn_unused_concurrency_limits(stt_configured=False, tts_configured=False)
         _logger.error("No STT or TTS models specified. Exiting.")
         return
 
@@ -507,7 +532,12 @@ async def main():
         tts_programs = create_tts_programs(tts_voices, tts_streaming_models=args.tts_streaming_models)
 
         if not asr_programs and not tts_programs:
-            _logger.error("No STT or TTS models specified. Exiting.")
+            warn_unused_concurrency_limits(stt_configured=False, tts_configured=False)
+            # Models were given (the case without any exits above), but none of them can be offered
+            _logger.error(
+                "None of the specified STT or TTS models can be offered: no ASR models or TTS voices are "
+                "available (check TTS_VOICES or the backend's voice list). Exiting."
+            )
             return
 
         try:
@@ -582,6 +612,25 @@ async def main():
             hass_names.start()
             exit_stack.push_async_callback(hass_names.aclose)
 
+        # Both limits take a whole number of at least 0, where 0 means no limit, and fall back to their own default
+        # when not given
+        warn_unused_concurrency_limits(stt_configured=bool(asr_programs), tts_configured=bool(tts_programs))
+        stt_concurrent_requests = (
+            STT_CONCURRENT_REQUESTS if args.stt_concurrent_requests is None else args.stt_concurrent_requests
+        )
+        tts_concurrent_requests = (
+            TTS_CONCURRENT_REQUESTS if args.tts_concurrent_requests is None else args.tts_concurrent_requests
+        )
+
+        # One limit for the whole server, so it is shared by the handler of every connection
+        stt_limit = ConcurrencyLimit(stt_concurrent_requests, name="STT request")
+        if stt_concurrent_requests and asr_programs:
+            _logger.info("Limiting STT to %d concurrent requests", stt_concurrent_requests)
+        # Unnamed, so a sentence waiting for its turn, as most of a long synthesis does, is not logged
+        tts_limit = ConcurrencyLimit(tts_concurrent_requests)
+        if tts_concurrent_requests and tts_programs:
+            _logger.info("Limiting TTS to %d concurrent requests", tts_concurrent_requests)
+
         # Create Wyoming server
         server = AsyncServer.from_uri(args.uri)
 
@@ -607,7 +656,8 @@ async def main():
                 tts_realtime_extra_body=args.tts_realtime_extra_body,
                 tts_streaming_min_words=args.tts_streaming_min_words,
                 tts_streaming_max_chars=args.tts_streaming_max_chars,
-                tts_concurrent_requests=args.tts_concurrent_requests,
+                stt_limit=stt_limit,
+                tts_limit=tts_limit,
             )
         )
 
