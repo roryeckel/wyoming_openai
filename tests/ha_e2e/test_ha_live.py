@@ -1,14 +1,9 @@
-"""Smoke tests of the shared STT and TTS limits with a real Home Assistant controlling devices.
+"""Live tests: a real Home Assistant controlling devices through the proxy, on real STT and TTS providers.
 
-Opt in with the smoke stack up (tests/ha_e2e/smoke/docker-compose.yml):
+The models are real, so the checks are fuzzy and a failure needs reading: tests/README.md, "Home Assistant Live
+Tests", says how to run each lane and how to read the results.
 
-    pytest -m ha_smoke -v
-
-The OpenAI Realtime lane adds its cases with tests/ha_e2e/smoke/docker-compose.openai.yml up and HA_SMOKE_OPENAI=1,
-and the provider lane with tests/ha_e2e/smoke/docker-compose.provider.yml up for a provider in
-tests/ha_e2e/smoke/providers and HA_SMOKE_PROVIDER set to its name.
-
-Only an explicit `-m ha_smoke` selects the suite: it carries no `integration` marker, so neither the default run nor
+Only an explicit `-m ha_live` selects the suite: it carries no `integration` marker, so neither the default run nor
 `-m integration` or `-m ha_e2e`, which CI runs without this stack, picks it up.
 
 Home Assistant's built-in conversation agent controls the demo integration's devices from speech that Kokoro
@@ -75,16 +70,16 @@ from ha_e2e.scenarios import LONG_REPLY
 
 LOGGER = logging.getLogger(__name__)
 
-pytestmark = [pytest.mark.ha_smoke]
+pytestmark = [pytest.mark.ha_live]
 
-SMOKE_ENV = {
+LIVE_ENV = {
     "HA_E2E_BASE_URL": "http://127.0.0.1:8124",
     "HA_E2E_SPEACHES_URL": "http://127.0.0.1:8010/v1",
     "HA_E2E_STT_MODEL": "Systran/faster-distil-whisper-large-v3",
-    "HA_E2E_STATE_DIR": str(PACKAGE_DIR / ".state" / "smoke"),
+    "HA_E2E_STATE_DIR": str(PACKAGE_DIR / ".state" / "live"),
     "HA_E2E_ARTIFACT_DIR": str(PACKAGE_DIR / "artifacts"),
     "HA_E2E_WYOMING_PORT": "10300",
-    "HA_E2E_HA_CONTAINER": "ha_smoke_homeassistant",
+    "HA_E2E_HA_CONTAINER": "ha_live_homeassistant",
 }
 FIXTURE_TTS_MODEL = "speaches-ai/Kokoro-82M-v1.0-ONNX"
 VOICES = ("af_heart", "am_michael", "bf_emma", "am_adam", "af_bella", "bm_george", "af_sarah", "bm_lewis")
@@ -104,35 +99,35 @@ TRANSCRIPTION_POST_LOG = "POST http://speaches:8000/v1/audio/transcriptions"
 
 @dataclass(frozen=True)
 class Proxy:
-    """One proxy of the smoke stack; its container name is also its host name on the stack's network."""
+    """One proxy of the live stack; its container name is also its host name on the stack's network."""
 
     name: str
     container: str
     host_port: int
     stt_limit: int
     tts_limit: int
-    lane: str = "local"  # "local", "openai" (HA_SMOKE_OPENAI=1) or "provider" (HA_SMOKE_PROVIDER=<name>)
+    lane: str = "local"  # "local", "openai" (HA_LIVE_OPENAI=1) or "provider" (HA_LIVE_PROVIDER=<name>)
 
 
-DEFAULT = Proxy("default", "ha_smoke_proxy", 10400, 3, 3)
-LIMITED = Proxy("limited", "ha_smoke_proxy_limited", 10401, 1, 1)
-UNLIMITED = Proxy("unlimited", "ha_smoke_proxy_unlimited", 10402, 0, 0)
+DEFAULT = Proxy("default", "ha_live_proxy", 10400, 3, 3)
+LIMITED = Proxy("limited", "ha_live_proxy_limited", 10401, 1, 1)
+UNLIMITED = Proxy("unlimited", "ha_live_proxy_unlimited", 10402, 0, 0)
 # At limit 1 and logging at debug level, which shows when a sentence's request is admitted. Kept apart from LIMITED,
 # whose many requests would fill its log with request bodies at that level
-LIMITED_DEBUG = Proxy("limited-debug", "ha_smoke_proxy_limited_debug", 10405, 1, 1)
-OPENAI = Proxy("openai", "ha_smoke_proxy_openai", 10403, 3, 3, lane="openai")
-OPENAI_LIMITED = Proxy("openai-limited", "ha_smoke_proxy_openai_limited", 10404, 1, 1, lane="openai")
-OPENAI_ENABLED = os.environ.get("HA_SMOKE_OPENAI", "").strip() == "1"
-# The provider lane's one proxy, at the default limits, running the provider tests/ha_e2e/smoke/providers/<name>.env
-PROVIDER_NAME = os.environ.get("HA_SMOKE_PROVIDER", "").strip()
-PROVIDER = Proxy(f"provider-{PROVIDER_NAME or 'none'}", "ha_smoke_proxy_provider", 10406, 3, 3, lane="provider")
-PROVIDER_LABEL = "smoke.provider"
+LIMITED_DEBUG = Proxy("limited-debug", "ha_live_proxy_limited_debug", 10405, 1, 1)
+OPENAI = Proxy("openai", "ha_live_proxy_openai", 10403, 3, 3, lane="openai")
+OPENAI_LIMITED = Proxy("openai-limited", "ha_live_proxy_openai_limited", 10404, 1, 1, lane="openai")
+OPENAI_ENABLED = os.environ.get("HA_LIVE_OPENAI", "").strip() == "1"
+# The provider lane's one proxy, at the default limits, running the provider tests/ha_e2e/live/providers/<name>.env
+PROVIDER_NAME = os.environ.get("HA_LIVE_PROVIDER", "").strip()
+PROVIDER = Proxy(f"provider-{PROVIDER_NAME or 'none'}", "ha_live_proxy_provider", 10406, 3, 3, lane="provider")
+PROVIDER_LABEL = "ha_live.provider"
 
 
 def _proxies(*proxies: Proxy) -> list[Any]:
     skips = {
-        "openai": (not OPENAI_ENABLED, "set HA_SMOKE_OPENAI=1 with docker-compose.openai.yml up"),
-        "provider": (not PROVIDER_NAME, "set HA_SMOKE_PROVIDER=<name> with docker-compose.provider.yml up"),
+        "openai": (not OPENAI_ENABLED, "set HA_LIVE_OPENAI=1 with docker-compose.openai.yml up"),
+        "provider": (not PROVIDER_NAME, "set HA_LIVE_PROVIDER=<name> with docker-compose.provider.yml up"),
     }
     params = []
     for proxy in proxies:
@@ -251,8 +246,8 @@ class TurnOutcome:
 
 
 @dataclass
-class Smoke:
-    """The configured smoke stack."""
+class Live:
+    """The configured live stack."""
 
     settings: HaE2ESettings
     session: HaSession
@@ -283,9 +278,9 @@ class Smoke:
 
 
 @pytest.fixture(scope="session")
-def smoke() -> Iterator[Smoke]:
+def live() -> Iterator[Live]:
     with pytest.MonkeyPatch.context() as patch:
-        for name, value in SMOKE_ENV.items():
+        for name, value in LIVE_ENV.items():
             patch.setenv(name, os.environ.get(name) or value)
         settings = load_settings()
     session = ensure_session(settings)
@@ -315,10 +310,10 @@ def smoke() -> Iterator[Smoke]:
                 "tts_voice": voice,
             }
             devices[proxy.name] = _ensure_pipeline(
-                ws, f"Smoke {proxy.name}", {"conversation_engine": BUILT_IN_AGENT, **engines}
+                ws, f"Live {proxy.name}", {"conversation_engine": BUILT_IN_AGENT, **engines}
             )
             scripted[proxy.name] = _ensure_pipeline(
-                ws, f"Smoke {proxy.name} scripted", {"conversation_engine": scripted_agent, **engines}
+                ws, f"Live {proxy.name} scripted", {"conversation_engine": scripted_agent, **engines}
             )
             if first is None:
                 first = PipelineInfo(devices[proxy.name], entities["stt"], entities["tts"], voice)
@@ -335,9 +330,9 @@ def smoke() -> Iterator[Smoke]:
 
     assert first is not None
     stack = HaStack(settings, session, rest, first, first, BUILT_IN_AGENT, "", ha_version)
-    run_dir = settings.artifact_dir / f"smoke-{datetime.now(UTC):%Y%m%d-%H%M%S}"
+    run_dir = settings.artifact_dir / f"live-{datetime.now(UTC):%Y%m%d-%H%M%S}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    configured = Smoke(settings, session, rest, stack, devices, scripted, run_dir)
+    configured = Live(settings, session, rest, stack, devices, scripted, run_dir)
     LOGGER.info("Home Assistant %s ready with pipelines %s", ha_version, devices)
     yield configured
     _write_summary(configured, ha_version)
@@ -345,7 +340,7 @@ def smoke() -> Iterator[Smoke]:
 
 
 def _check_provider_proxy() -> None:
-    """Fail unless the provider lane's proxy runs, for the provider HA_SMOKE_PROVIDER names."""
+    """Fail unless the provider lane's proxy runs, for the provider HA_LIVE_PROVIDER names."""
 
     try:
         result = subprocess.run(
@@ -369,8 +364,8 @@ def _check_provider_proxy() -> None:
     if running != PROVIDER_NAME:
         found = "is not running" if running is None else f"runs {running!r}"
         pytest.fail(
-            f"HA_SMOKE_PROVIDER is {PROVIDER_NAME!r}, but {PROVIDER.container} {found}. Start it with "
-            f"SMOKE_PROVIDER={PROVIDER_NAME} docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d",
+            f"HA_LIVE_PROVIDER is {PROVIDER_NAME!r}, but {PROVIDER.container} {found}. Start it with "
+            f"HA_LIVE_PROVIDER={PROVIDER_NAME} docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d",
             pytrace=False,
         )
 
@@ -388,22 +383,22 @@ def _wait_for_demo_entities(rest: HaRestClient) -> None:
                 f"{[s for s in states if s.startswith(('light.', 'cover.'))]}")
 
 
-def _write_summary(smoke: Smoke, ha_version: str) -> None:
-    payload = {"ha_version": ha_version, "turns": [asdict(outcome) for outcome in smoke.outcomes]}
-    (smoke.run_dir / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+def _write_summary(live: Live, ha_version: str) -> None:
+    payload = {"ha_version": ha_version, "turns": [asdict(outcome) for outcome in live.outcomes]}
+    (live.run_dir / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     lines = [
-        f"# Smoke run, Home Assistant {ha_version}",
+        f"# Live run, Home Assistant {ha_version}",
         "",
         "| test | proxy | phrase | ok | total s | STT s | first audio s | notes |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    for outcome in smoke.outcomes:
+    for outcome in live.outcomes:
         lines.append(
             f"| {outcome.test} | {outcome.proxy} | {outcome.phrase[:48]} | {'yes' if outcome.passed else 'NO'} | "
             f"{_fmt(outcome.total_seconds)} | {_fmt(outcome.stt_seconds)} | {_fmt(outcome.first_audio_seconds)} | "
             f"{json.dumps(outcome.notes) if outcome.notes else (outcome.error[:80] or '')} |"
         )
-    (smoke.run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (live.run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _fmt(value: float | None) -> str:
@@ -431,26 +426,26 @@ def _log_count(proxy: Proxy, needle: str) -> int:
     return container_logs(proxy.container).count(needle)
 
 
-def _prepare(smoke: Smoke, commands: tuple[Command, ...] | list[Command]) -> None:
+def _prepare(live: Live, commands: tuple[Command, ...] | list[Command]) -> None:
     for command in commands:
         if command.prepare and command.entity_id:
             domain, service = command.prepare
-            smoke.rest.call_service(domain, service, {"entity_id": command.entity_id})
+            live.rest.call_service(domain, service, {"entity_id": command.entity_id})
     for command in commands:
         if command.prepare and command.entity_id:
             # The demo covers move for a few seconds; wait until each has arrived where it was sent
             target = {"turn_on": "on", "turn_off": "off", "open_cover": "open", "close_cover": "closed"}[
                 command.prepare[1]
             ]
-            _wait_for_state(smoke, command.entity_id, (target,), timeout=30)
-    smoke.rest.call_service("tts", "clear_cache", {})
+            _wait_for_state(live, command.entity_id, (target,), timeout=30)
+    live.rest.call_service("tts", "clear_cache", {})
 
 
-def _wait_for_state(smoke: Smoke, entity_id: str, states: tuple[str, ...], timeout: float) -> dict[str, Any]:
+def _wait_for_state(live: Live, entity_id: str, states: tuple[str, ...], timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     state: dict[str, Any] | None = None
     while time.monotonic() < deadline:
-        state = smoke.rest.get_state(entity_id)
+        state = live.rest.get_state(entity_id)
         if state is not None and state.get("state") in states:
             return state
         time.sleep(0.25)
@@ -464,7 +459,7 @@ def _intent_response(result: AssistRunResult) -> tuple[str, str]:
     return str(response.get("response_type") or ""), speech
 
 
-async def _check_tts(smoke: Smoke, result: AssistRunResult, text: str, outcome: TurnOutcome, *, long: bool) -> None:
+async def _check_tts(live: Live, result: AssistRunResult, text: str, outcome: TurnOutcome, *, long: bool) -> None:
     progress = result.tts_progress
     assert progress is not None, "TTS audio was never fetched"
     assert progress.status_code == 200, f"TTS URL returned HTTP {progress.status_code}"
@@ -473,10 +468,10 @@ async def _check_tts(smoke: Smoke, result: AssistRunResult, text: str, outcome: 
     audio = decode_audio_bytes(bytes(progress.data))
     outcome.audio_seconds = audio.duration_seconds
     # Kept with the summary, to be listened to
-    name = f"{smoke.outcomes.index(outcome):03d}-{outcome.test}-{outcome.proxy}.wav"
-    (smoke.run_dir / name).write_bytes(audio.to_wav_bytes())
+    name = f"{live.outcomes.index(outcome):03d}-{outcome.test}-{outcome.proxy}.wav"
+    (live.run_dir / name).write_bytes(audio.to_wav_bytes())
     outcome.notes["audio"] = name
-    outcome.tts_transcript = await transcribe_with_speaches(smoke.settings, audio.to_wav_bytes())
+    outcome.tts_transcript = await transcribe_with_speaches(live.settings, audio.to_wav_bytes())
     # Checked whether or not the reply as a whole matches, which it still does with a sentence missing
     problems: list[str] = []
     if gaps := _silences(audio):
@@ -555,7 +550,7 @@ def _silences(audio: WavData) -> list[str]:
 
 
 async def _device_turn(
-    smoke: Smoke,
+    live: Live,
     test: str,
     proxy: Proxy,
     command: Command,
@@ -566,14 +561,14 @@ async def _device_turn(
     """Speak one command to a proxy's devices pipeline and check what Home Assistant did and said."""
 
     outcome = TurnOutcome(test=test, proxy=proxy.name, phrase=command.phrase)
-    smoke.outcomes.append(outcome)
-    audio = await asyncio.to_thread(smoke.audio, command.phrase, voice)
+    live.outcomes.append(outcome)
+    audio = await asyncio.to_thread(live.audio, command.phrase, voice)
     started = time.monotonic()
     try:
         result = await run_assist(
-            smoke.settings,
-            smoke.stack,
-            smoke.devices[proxy.name],
+            live.settings,
+            live.stack,
+            live.devices[proxy.name],
             audio,
             conversation_id=conversation_id,
             event_timeout=120,
@@ -595,13 +590,13 @@ async def _device_turn(
         assert outcome.speech.strip(), "Assist gave no spoken reply"
         if command.entity_id and command.expected:
             state = await asyncio.to_thread(
-                _wait_for_state, smoke, command.entity_id, command.expected, STATE_TIMEOUT_SECONDS
+                _wait_for_state, live, command.entity_id, command.expected, STATE_TIMEOUT_SECONDS
             )
             if command.brightness is not None:
                 brightness = int((state.get("attributes") or {}).get("brightness") or 0)
                 low, high = command.brightness
                 assert low <= brightness <= high, f"brightness {brightness}, expected {low}..{high}"
-        await _check_tts(smoke, result, outcome.speech, outcome, long=False)
+        await _check_tts(live, result, outcome.speech, outcome, long=False)
         outcome.passed = True
     except BaseException as exc:
         outcome.error = repr(exc)
@@ -612,28 +607,28 @@ async def _device_turn(
     return outcome
 
 
-async def _devices_at_once(smoke: Smoke, test: str, proxy: Proxy, commands: tuple[Command, ...]) -> list[Any]:
+async def _devices_at_once(live: Live, test: str, proxy: Proxy, commands: tuple[Command, ...]) -> list[Any]:
     """Run the commands as turns at once, each in its own voice, once their devices are where they start."""
 
-    await asyncio.to_thread(_prepare, smoke, commands)
+    await asyncio.to_thread(_prepare, live, commands)
     for index, command in enumerate(commands):
-        await asyncio.to_thread(smoke.audio, command.phrase, VOICES[index % len(VOICES)])
+        await asyncio.to_thread(live.audio, command.phrase, VOICES[index % len(VOICES)])
     turns = [
-        _device_turn(smoke, test, proxy, command, VOICES[index % len(VOICES)])
+        _device_turn(live, test, proxy, command, VOICES[index % len(VOICES)])
         for index, command in enumerate(commands)
     ]
     return await asyncio.wait_for(asyncio.gather(*turns, return_exceptions=True), timeout=300)
 
 
 @contextlib.contextmanager
-def _summary(smoke: Smoke, test: str, proxy: Proxy, notes: dict[str, Any]) -> Iterator[TurnOutcome]:
+def _summary(live: Live, test: str, proxy: Proxy, notes: dict[str, Any]) -> Iterator[TurnOutcome]:
     """
     A summary row for a case, recorded as failed until the checks in the block have all passed, so a case that fails
     is not reported as a success in the run's summary.
     """
 
     outcome = TurnOutcome(test=test, proxy=proxy.name, phrase="(summary)", notes=notes)
-    smoke.outcomes.append(outcome)
+    live.outcomes.append(outcome)
     try:
         yield outcome
     except BaseException as exc:
@@ -662,36 +657,36 @@ def _timing_notes(outcomes: list[TurnOutcome]) -> dict[str, Any]:
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("proxy", _proxies(DEFAULT, OPENAI, PROVIDER))
-async def test_device_conversation(smoke: Smoke, proxy: Proxy) -> None:
+async def test_device_conversation(live: Live, proxy: Proxy) -> None:
     """A few turns of one conversation: lights on, off and dimmed, a garage door opened, asked about and closed."""
 
-    await asyncio.to_thread(_prepare, smoke, CONVERSATION)
-    conversation_id = f"smoke-{secrets.token_hex(6)}"
+    await asyncio.to_thread(_prepare, live, CONVERSATION)
+    conversation_id = f"live-{secrets.token_hex(6)}"
     for command in CONVERSATION:
-        await _device_turn(smoke, "conversation", proxy, command, VOICES[0], conversation_id=conversation_id)
+        await _device_turn(live, "conversation", proxy, command, VOICES[0], conversation_id=conversation_id)
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("proxy", _proxies(DEFAULT, OPENAI, PROVIDER))
-async def test_streamed_llm_style_reply(smoke: Smoke, proxy: Proxy) -> None:
+async def test_streamed_llm_style_reply(live: Live, proxy: Proxy) -> None:
     """A long reply streamed in deltas, as from an LLM agent, spoken sentence by sentence."""
 
     outcome = TurnOutcome(test="llm-reply", proxy=proxy.name, phrase="What's the weather like tomorrow in Berlin?")
-    smoke.outcomes.append(outcome)
-    smoke.rest.call_service("ha_e2e_scripted", "set_reply", {"reply": LONG_REPLY, "delta_delay_ms": 150})
-    smoke.rest.call_service("tts", "clear_cache", {})
-    audio = await asyncio.to_thread(smoke.audio, outcome.phrase, VOICES[1])
+    live.outcomes.append(outcome)
+    live.rest.call_service("ha_e2e_scripted", "set_reply", {"reply": LONG_REPLY, "delta_delay_ms": 150})
+    live.rest.call_service("tts", "clear_cache", {})
+    audio = await asyncio.to_thread(live.audio, outcome.phrase, VOICES[1])
     started = time.monotonic()
     try:
         result = await run_assist(
-            smoke.settings, smoke.stack, smoke.scripted[proxy.name], audio, tts_timeout=300, stop_fetch_on_error=True
+            live.settings, live.stack, live.scripted[proxy.name], audio, tts_timeout=300, stop_fetch_on_error=True
         )
         outcome.total_seconds = time.monotonic() - started
         outcome.stt_seconds = _stage_seconds(result, "stt-start", "stt-end")
         outcome.first_audio_seconds = _first_audio_seconds(result)
         assert not result.error_events, f"pipeline reported errors: {result.error_events}"
-        await _check_tts(smoke, result, LONG_REPLY, outcome, long=True)
+        await _check_tts(live, result, LONG_REPLY, outcome, long=True)
         outcome.passed = True
     except BaseException as exc:
         outcome.error = repr(exc)
@@ -701,14 +696,14 @@ async def test_streamed_llm_style_reply(smoke: Smoke, proxy: Proxy) -> None:
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("proxy", _proxies(DEFAULT, LIMITED, UNLIMITED, OPENAI, OPENAI_LIMITED, PROVIDER))
-async def test_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
+async def test_satellites_at_once(live: Live, proxy: Proxy) -> None:
     """Three satellites speak at the same time, each controlling its own device; every turn goes through."""
 
     waits_before = _log_count(proxy, STT_WAIT_LOG)
-    results = await _devices_at_once(smoke, "satellites", proxy, SATELLITES)
+    results = await _devices_at_once(live, "satellites", proxy, SATELLITES)
     turns = [result for result in results if isinstance(result, TurnOutcome)]
     note = {**_timing_notes(turns), "stt_waits_logged": _log_count(proxy, STT_WAIT_LOG) - waits_before}
-    with _summary(smoke, "satellites", proxy, note):
+    with _summary(live, "satellites", proxy, note):
         _raise_first(results)
         if proxy.stt_limit == 0:
             assert note["stt_waits_logged"] == 0, "a request waited for a slot on a proxy without a limit"
@@ -720,23 +715,23 @@ async def test_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("proxy", _proxies(DEFAULT, LIMITED, UNLIMITED, OPENAI, OPENAI_LIMITED, PROVIDER))
-async def test_long_replies_at_once(smoke: Smoke, proxy: Proxy) -> None:
+async def test_long_replies_at_once(live: Live, proxy: Proxy) -> None:
     """Three satellites read out long replies at the same time; each one's audio is complete and in order."""
 
-    smoke.rest.call_service("tts", "clear_cache", {})
+    live.rest.call_service("tts", "clear_cache", {})
 
     async def one(text: str) -> TurnOutcome:
         outcome = TurnOutcome(test="long-replies", proxy=proxy.name, phrase=text[:60])
-        smoke.outcomes.append(outcome)
+        live.outcomes.append(outcome)
         started = time.monotonic()
         try:
             result = await run_assist_text(
-                smoke.settings, smoke.session.access_token, smoke.devices[proxy.name], text, tts_timeout=300
+                live.settings, live.session.access_token, live.devices[proxy.name], text, tts_timeout=300
             )
             outcome.total_seconds = time.monotonic() - started
             outcome.first_audio_seconds = _first_audio_seconds(result)
             assert not result.error_events, f"pipeline reported errors: {result.error_events}"
-            await _check_tts(smoke, result, text, outcome, long=True)
+            await _check_tts(live, result, text, outcome, long=True)
             outcome.passed = True
         except BaseException as exc:
             outcome.error = repr(exc)
@@ -839,7 +834,7 @@ async def _restart(proxy: Proxy) -> float:
 @pytest.mark.asyncio
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("proxy", _proxies(LIMITED_DEBUG, OPENAI_LIMITED))
-async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> None:
+async def test_stuck_client_frees_the_tts_slot(live: Live, proxy: Proxy) -> None:
     """
     A client that stops reading while it holds the only TTS slot fails within the client write limit, and a
     satellite waiting for the slot is answered after it. With that client still connected, the proxy still stops
@@ -852,7 +847,7 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
     text = "The kitchen lights are on, and the garage door is closed."
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)
     admitted_before = _admitted_count(proxy, text)
-    release = f"/tmp/smoke-release-{secrets.token_hex(6)}"
+    release = f"/tmp/live-release-{secrets.token_hex(6)}"
     stuck = await _exec_in(proxy, STUCK_TTS_CLIENT, LONG_REPLY, release, "240")
     freed: asyncio.Task[float] | None = None
     try:
@@ -861,16 +856,16 @@ async def test_stuck_client_frees_the_tts_slot(smoke: Smoke, proxy: Proxy) -> No
         assert stuck.returncode is None, "the stuck client ended before it could hold the slot"
         assert _log_count(proxy, SLOW_CLIENT_LOG) == slow_before, "the stuck client failed before the satellite asked"
         freed = asyncio.create_task(_when_logged(proxy, SLOW_CLIENT_LOG, slow_before, 40))
-        smoke.rest.call_service("tts", "clear_cache", {})
+        live.rest.call_service("tts", "clear_cache", {})
         outcome = TurnOutcome(test="stuck-client", proxy=proxy.name, phrase=text)
-        smoke.outcomes.append(outcome)
+        live.outcomes.append(outcome)
         started = time.monotonic()
         try:
-            result = await run_assist_text(smoke.settings, smoke.session.access_token, smoke.devices[proxy.name], text)
+            result = await run_assist_text(live.settings, live.session.access_token, live.devices[proxy.name], text)
             outcome.total_seconds = time.monotonic() - started
             outcome.first_audio_seconds = _first_audio_seconds(result)
             assert not result.error_events, f"pipeline reported errors: {result.error_events}"
-            await _check_tts(smoke, result, text, outcome, long=False)
+            await _check_tts(live, result, text, outcome, long=False)
             # When a poll saw the release is only a note: the order of the lines in one snapshot is what counts
             outcome.notes["release_seen_after_s"] = round(await freed - started, 2)
             logs = container_logs(proxy.container)
@@ -938,7 +933,7 @@ def _nth_line(lines: list[str], matches: Any, nth: int) -> int | None:
 @pytest.mark.asyncio
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("proxy", _proxies(OPENAI_LIMITED))
-async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Proxy) -> None:
+async def test_silent_realtime_client_frees_the_stt_slot(live: Live, proxy: Proxy) -> None:
     """
     A Realtime client that starts a stream and sends no audio holds the only STT slot until the idle limit fails
     it; a satellite that speaks meanwhile is transcribed after that.
@@ -946,8 +941,8 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
 
     idle_before = _log_count(proxy, IDLE_LOG)
     recording_before = _log_count(proxy, REALTIME_RECORDING_LOG)
-    await asyncio.to_thread(_prepare, smoke, CONVERSATION[:1])
-    await asyncio.to_thread(smoke.audio, CONVERSATION[0].phrase, VOICES[2])
+    await asyncio.to_thread(_prepare, live, CONVERSATION[:1])
+    await asyncio.to_thread(live.audio, CONVERSATION[0].phrase, VOICES[2])
     idle = await _exec_in(proxy, IDLE_STT_CLIENT, "30")
     freed: asyncio.Task[float] | None = None
     try:
@@ -956,8 +951,8 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
         assert _log_count(proxy, IDLE_LOG) == idle_before, "the silent client was failed before the satellite spoke"
         waits_before = _log_count(proxy, STT_WAIT_LOG)
         freed = asyncio.create_task(_when_logged(proxy, IDLE_LOG, idle_before, 30))
-        with _summary(smoke, "silent-client", proxy, {}) as summary:
-            await _device_turn(smoke, "silent-client", proxy, CONVERSATION[0], VOICES[2])
+        with _summary(live, "silent-client", proxy, {}) as summary:
+            await _device_turn(live, "silent-client", proxy, CONVERSATION[0], VOICES[2])
             await freed  # The idle failure has been logged
             # In one snapshot of the log, the satellite's session waited for the slot before the idle limit freed it
             lines = container_logs(proxy.container).splitlines()
@@ -973,7 +968,7 @@ async def test_silent_realtime_client_frees_the_stt_slot(smoke: Smoke, proxy: Pr
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(600)
-async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
+async def test_proxy_restart_under_traffic(live: Live) -> None:
     """
     The proxy stops while it answers three satellites at its limits of 1: Home Assistant gets its shutdown error for
     at least one turn after the stop began, every turn ends and none hangs, the proxy exits cleanly and promptly, and
@@ -981,11 +976,11 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
     """
 
     proxy = LIMITED
-    await asyncio.to_thread(_prepare, smoke, SATELLITES)
+    await asyncio.to_thread(_prepare, live, SATELLITES)
     # Synthesized before anything starts, so the turns reach the proxy together
-    audio = [await asyncio.to_thread(smoke.audio, command.phrase, VOICES[i]) for i, command in enumerate(SATELLITES)]
+    audio = [await asyncio.to_thread(live.audio, command.phrase, VOICES[i]) for i, command in enumerate(SATELLITES)]
     cancels_before = _log_count(proxy, STT_CANCEL_LOG)
-    ha_errors_before = container_logs(smoke.settings.ha_container).count(HA_SHUTDOWN_LOG)
+    ha_errors_before = container_logs(live.settings.ha_container).count(HA_SHUTDOWN_LOG)
     waits_before = _log_count(proxy, STT_WAIT_LOG)
     posts_before = _log_count(proxy, TRANSCRIPTION_POST_LOG)
 
@@ -1001,9 +996,9 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
     turns = [
         asyncio.create_task(
             run_assist(
-                smoke.settings,
-                smoke.stack,
-                smoke.devices[proxy.name],
+                live.settings,
+                live.stack,
+                live.devices[proxy.name],
                 clip,
                 event_timeout=60,
                 tts_timeout=15,
@@ -1042,7 +1037,7 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
         for result in interrupted
         if stop_started is not None and (result.received("error") or 0.0) >= stop_started
     ]
-    ha_errors = container_logs(smoke.settings.ha_container).count(HA_SHUTDOWN_LOG) - ha_errors_before
+    ha_errors = container_logs(live.settings.ha_container).count(HA_SHUTDOWN_LOG) - ha_errors_before
     note = {
         "turns_ok": len(ended) - len(interrupted),
         "turns_interrupted": len(interrupted),
@@ -1056,7 +1051,7 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
         "stop_seconds": None if stop_seconds is None else round(stop_seconds, 2),
         "stt_requests_cancelled_by_stop": _log_count(proxy, STT_CANCEL_LOG) - cancels_before,
     }
-    with _summary(smoke, "restart", proxy, note):
+    with _summary(live, "restart", proxy, note):
         assert exit_code == 0, f"the proxy exited with {exit_code}"
         assert stop_seconds is not None and stop_seconds < 8, f"stopping the proxy took {stop_seconds}s"
         not_ended = [result for result in results if not isinstance(result, AssistRunResult)]
@@ -1068,26 +1063,26 @@ async def test_proxy_restart_under_traffic(smoke: Smoke) -> None:
         assert by_stop, "no turn failed after the stop began: it did not hit their traffic"
         assert ha_errors >= 1, f"Home Assistant logged no {HA_SHUTDOWN_LOG!r}: the stop did not answer a turn"
 
-    await asyncio.to_thread(_prepare, smoke, SATELLITES[:1])
-    await _device_turn(smoke, "after-restart", proxy, SATELLITES[0], VOICES[3])
+    await asyncio.to_thread(_prepare, live, SATELLITES[:1])
+    await _device_turn(live, "after-restart", proxy, SATELLITES[0], VOICES[3])
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize("proxy", _proxies(DEFAULT, UNLIMITED, LIMITED))
-async def test_eight_satellites_at_once(smoke: Smoke, proxy: Proxy) -> None:
+async def test_eight_satellites_at_once(live: Live, proxy: Proxy) -> None:
     """Eight turns at once on the GPU: all go through, and no Home Assistant connection meets the write limit."""
 
     waits_before = _log_count(proxy, STT_WAIT_LOG)
     slow_before = _log_count(proxy, SLOW_CLIENT_LOG)
-    results = await _devices_at_once(smoke, "eight", proxy, LOAD)
+    results = await _devices_at_once(live, "eight", proxy, LOAD)
     turns = [result for result in results if isinstance(result, TurnOutcome)]
     note = {
         **_timing_notes(turns),
         "stt_waits_logged": _log_count(proxy, STT_WAIT_LOG) - waits_before,
         "slow_client_failures": _log_count(proxy, SLOW_CLIENT_LOG) - slow_before,
     }
-    with _summary(smoke, "eight", proxy, note):
+    with _summary(live, "eight", proxy, note):
         _raise_first(results)
         assert note["slow_client_failures"] == 0, "a Home Assistant connection met the client write limit"
         if proxy.stt_limit == 0:

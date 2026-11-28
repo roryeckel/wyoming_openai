@@ -766,7 +766,7 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 
 #### Home Assistant Smoke Tests
 
-`tests/ha_e2e/test_ha_smoke.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. Each turn speaks a command synthesized with Kokoro, then checks the transcript, what Assist did, the device's new state, and the spoken reply, transcribed back. The reply check is fuzzy: each sentence of four words or more must be in the transcript, the reply may not gain or lose a negation such as "not", and it may not have a silence of 3 seconds or more. A different word elsewhere can still pass. The scenarios run against proxies at the default limits (3), at 1, and with no limit (0):
+`tests/ha_e2e/test_ha_live.py` checks the shared STT and TTS limits the way satellites use them, with Home Assistant's own conversation agent controlling the demo integration's devices on a GPU. Each turn speaks a command synthesized with Kokoro, then checks the transcript, what Assist did, the device's new state, and the spoken reply, transcribed back. The reply check is fuzzy: each sentence of four words or more must be in the transcript, the reply may not gain or lose a negation such as "not", and it may not have a silence of 3 seconds or more. A different word elsewhere can still pass. The scenarios run against proxies at the default limits (3), at 1, and with no limit (0):
 
 | Scenario | Local proxies | OpenAI proxies | Provider lane |
 |---|---|---|---|
@@ -779,39 +779,39 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 | The proxy stopping while it answers three satellites, then the next turn | 1 | | |
 | Eight satellites at once | default, 1, none | | |
 
-In the silent client scenario, the proxy's own log must show the satellite's session waiting for the slot before the idle limit frees it. In the local stuck-client scenario, it must show the satellite's request admitted only after the write limit frees the slot. That case runs on a fourth proxy at limit 1 that logs at debug level, for that line. The OpenAI stuck-client case has no such line, since that proxy must not log its key at debug level, so it checks the write limit and the stop with Realtime TTS. The limit's queueing doesn't depend on the TTS backend. In the restart case, Home Assistant must log the proxy's shutdown error, and a turn must fail after the stop began. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/smoke-<timestamp>/`.
+In the silent client scenario, the proxy's own log must show the satellite's session waiting for the slot before the idle limit frees it. In the local stuck-client scenario, it must show the satellite's request admitted only after the write limit frees the slot. That case runs on a fourth proxy at limit 1 that logs at debug level, for that line. The OpenAI stuck-client case has no such line, since that proxy must not log its key at debug level, so it checks the write limit and the stop with Realtime TTS. The limit's queueing doesn't depend on the TTS backend. In the restart case, Home Assistant must log the proxy's shutdown error, and a turn must fail after the stop began. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/live-<timestamp>/`.
 
-Only `-m ha_smoke` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_e2e` picks it up. The stack needs an NVIDIA GPU (`SMOKE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
+Only `-m ha_live` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_e2e` picks it up. The stack needs an NVIDIA GPU (`HA_LIVE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
 
 ```bash
-docker build -t wyoming_openai:smoke .
-docker compose -f tests/ha_e2e/smoke/docker-compose.yml up -d
-pytest -m ha_smoke -v
+docker build -t wyoming_openai:live .
+docker compose -f tests/ha_e2e/live/docker-compose.yml up -d
+pytest -m ha_live -v
 ```
 
-The OpenAI cases run on `gpt-live-transcribe` and `gpt-realtime-2.1-mini`, and every request is billed to the key. Start their proxies with `OPENAI_API_KEY` set; they refuse to start without it. `HA_SMOKE_OPENAI=1` adds the OpenAI cases to the run (`$env:HA_SMOKE_OPENAI = "1"` in PowerShell), and `-k openai` runs only them:
+The OpenAI cases run on `gpt-live-transcribe` and `gpt-realtime-2.1-mini`, and every request is billed to the key. Start their proxies with `OPENAI_API_KEY` set; they refuse to start without it. `HA_LIVE_OPENAI=1` adds the OpenAI cases to the run (`$env:HA_LIVE_OPENAI = "1"` in PowerShell), and `-k openai` runs only them:
 
 ```bash
-docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d
-HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
+docker compose -f tests/ha_e2e/live/docker-compose.openai.yml up -d
+HA_LIVE_OPENAI=1 pytest -m ha_live -v
 ```
 
 The OpenAI cases also test the Realtime models themselves, so a misheard command, a sentence returned as silence, or a reply the model makes up in place of the text fails a turn.
 
-The provider lane runs the first four scenarios against one other provider, defined in a file under [`tests/ha_e2e/smoke/providers/`](tests/ha_e2e/smoke/providers): official OpenAI over HTTP, streamed (`openai`) or not (`openai-unstreamed`), GroqCloud, Mistral, Kokoro-FastAPI, LocalAI, Chatterbox, openai-edge-tts (known broken upstream, #139), or the stack's own Speaches, on the plain `OPENAI` backend (`speaches-openai-backend`) or in the modes the local lane doesn't run (`speaches-other-modes`). A preset that serves only one side gets the other from [`providers/defaults/speaches.env`](tests/ha_e2e/smoke/providers/defaults/speaches.env), the stack's own Speaches. Its header says which service and request mode it serves, whether it needs a key, and, for a provider that runs locally, how to start its engine from [`docker-compose.engines.yml`](tests/ha_e2e/smoke/docker-compose.engines.yml). The engines run in a project of their own, without host ports, so they don't clash with an engine you already run. Set `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` for the side or sides a paid provider serves:
+The provider lane runs the first four scenarios against one other provider, defined in a file under [`tests/ha_e2e/live/providers/`](tests/ha_e2e/live/providers): official OpenAI over HTTP, streamed (`openai`) or not (`openai-unstreamed`), GroqCloud, Mistral, Kokoro-FastAPI, LocalAI, Chatterbox, openai-edge-tts (known broken upstream, #139), or the stack's own Speaches, on the plain `OPENAI` backend (`speaches-openai-backend`) or in the modes the local lane doesn't run (`speaches-other-modes`). A preset that serves only one side gets the other from [`providers/defaults/speaches.env`](tests/ha_e2e/live/providers/defaults/speaches.env), the stack's own Speaches. Its header says which service and request mode it serves, whether it needs a key, and, for a provider that runs locally, how to start its engine from [`docker-compose.engines.yml`](tests/ha_e2e/live/docker-compose.engines.yml). The engines run in a project of their own, without host ports, so they don't clash with an engine you already run. Set `HA_LIVE_STT_KEY` and `HA_LIVE_TTS_KEY` for the side or sides a paid provider serves:
 
 ```bash
-docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
-SMOKE_PROVIDER=kokoro-fastapi docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
-HA_SMOKE_PROVIDER=kokoro-fastapi pytest -m ha_smoke -v -k provider
-docker compose -p ha_smoke_provider down
+docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
+HA_LIVE_PROVIDER=kokoro-fastapi docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d --wait
+HA_LIVE_PROVIDER=kokoro-fastapi pytest -m ha_live -v -k provider
+docker compose -p ha_live_provider down
 ```
 
-The tests check that the provider proxy is running, and is the one `HA_SMOKE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) says which changes need a smoke run, and the [`ha-smoke` skill](.agents/skills/ha-smoke/SKILL.md) which providers they run on. Tear everything down with the following. None of the commands needs a key. The engines' model and backend volumes stay, so the next run skips those downloads; add `-v` to the engines command to remove them:
+The tests check that the provider proxy is running, and is the one `HA_LIVE_PROVIDER` names. [AGENTS.md](AGENTS.md#smoke-testing) says which changes need a smoke run, and the [`ha-live` skill](.agents/skills/ha-live/SKILL.md) which providers they run on. Tear everything down with the following. None of the commands needs a key. The engines' model and backend volumes stay, so the next run skips those downloads; add `-v` to the engines command to remove them:
 
 ```bash
-docker compose -p ha_smoke_openai down
-docker compose -p ha_smoke_provider down
-docker compose -p ha_smoke_engines down
-docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v
+docker compose -p ha_live_openai down
+docker compose -p ha_live_provider down
+docker compose -p ha_live_engines down
+docker compose -f tests/ha_e2e/live/docker-compose.yml down -v
 ```

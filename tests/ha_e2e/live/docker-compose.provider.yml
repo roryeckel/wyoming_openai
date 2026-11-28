@@ -1,38 +1,38 @@
 # The provider lane: one proxy, at the default limits, for one provider defined in providers/<name>.env. Start the
-# smoke stack first; this joins its network. A provider that runs locally has its engine in docker-compose.engines.yml,
-# to start first: its file says how. For a provider that needs a key, set SMOKE_STT_KEY and SMOKE_TTS_KEY, for the
+# live stack first; this joins its network. A provider that runs locally has its engine in docker-compose.engines.yml,
+# to start first: its file says how. For a provider that needs a key, set HA_LIVE_STT_KEY and HA_LIVE_TTS_KEY, for the
 # side or sides it serves:
 #
-#   SMOKE_PROVIDER=<name> docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
-#   HA_SMOKE_PROVIDER=<name> pytest -m ha_smoke -v -k provider
+#   HA_LIVE_PROVIDER=<name> docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d --wait
+#   HA_LIVE_PROVIDER=<name> pytest -m ha_live -v -k provider
 #
 # Whatever a provider file leaves unset comes from providers/defaults/speaches.env, the fallback for the side a
 # preset doesn't serve: the stack's own Speaches. Every request to a paid provider is billed to its key, so the port
 # is published on 127.0.0.1 only. Remove the proxy, and any key with it, by project name, which needs no variables:
 #
-#   docker compose -p ha_smoke_provider down
-name: ha_smoke_provider
+#   docker compose -p ha_live_provider down
+name: ha_live_provider
 
 services:
   proxy_provider:
-    image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:smoke}
-    container_name: ha_smoke_proxy_provider
+    image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:live}
+    container_name: ha_live_proxy_provider
     restart: "no"
     labels:
-      # Checked by the tests, so a run cannot test another provider than HA_SMOKE_PROVIDER names
-      smoke.provider: ${SMOKE_PROVIDER:?Set SMOKE_PROVIDER to the name of a file in tests/ha_e2e/smoke/providers}
+      # Checked by the tests, so a run cannot test another provider than HA_LIVE_PROVIDER names
+      ha_live.provider: ${HA_LIVE_PROVIDER:?Set HA_LIVE_PROVIDER to the name of a file in tests/ha_e2e/live/providers}
     ports:
       - "127.0.0.1:10406:10300"
     env_file:
       # The fallback for the side the preset doesn't serve, then the preset
       - providers/defaults/speaches.env
-      - providers/${SMOKE_PROVIDER:?Set SMOKE_PROVIDER to the name of a file in tests/ha_e2e/smoke/providers}.env
+      - providers/${HA_LIVE_PROVIDER:?Set HA_LIVE_PROVIDER to the name of a file in tests/ha_e2e/live/providers}.env
     environment:
       WYOMING_URI: tcp://0.0.0.0:10300
       WYOMING_LOG_LEVEL: INFO
       WYOMING_LANGUAGES: en
-      STT_OPENAI_KEY: ${SMOKE_STT_KEY:-}
-      TTS_OPENAI_KEY: ${SMOKE_TTS_KEY:-}
+      STT_OPENAI_KEY: ${HA_LIVE_STT_KEY:-}
+      TTS_OPENAI_KEY: ${HA_LIVE_TTS_KEY:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()"]
       interval: 5s
@@ -42,5 +42,5 @@ services:
 
 networks:
   default:
-    name: ha_smoke_net
+    name: ha_live_net
     external: true

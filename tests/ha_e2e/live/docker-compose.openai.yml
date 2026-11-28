@@ -1,18 +1,18 @@
-# OpenAI Realtime proxies for the smoke stack: Realtime STT and Realtime TTS, at the default limits and at 1.
-# Start the smoke stack first; these join its network. The key is read from OPENAI_API_KEY, and starting them without
+# OpenAI Realtime proxies for the live stack: Realtime STT and Realtime TTS, at the default limits and at 1.
+# Start the live stack first; these join its network. The key is read from OPENAI_API_KEY, and starting them without
 # it fails. Their ports are published on 127.0.0.1 only, since every request to them is billed to that key:
 #
-#   docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d
-#   HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v
+#   docker compose -f tests/ha_e2e/live/docker-compose.openai.yml up -d
+#   HA_LIVE_OPENAI=1 pytest -m ha_live -v
 #
-# Kept in a project of its own, so no command on the smoke stack recreates these without the key. Remove them, and
+# Kept in a project of its own, so no command on the live stack recreates these without the key. Remove them, and
 # the key with them, by project name, which needs no key:
 #
-#   docker compose -p ha_smoke_openai down
-name: ha_smoke_openai
+#   docker compose -p ha_live_openai down
+name: ha_live_openai
 
 x-openai-proxy: &openai-proxy
-  image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:smoke}
+  image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:live}
   restart: "no"
   healthcheck:
     test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 2).close()"]
@@ -39,7 +39,7 @@ x-openai-env: &openai-env
 services:
   proxy_openai:
     <<: *openai-proxy
-    container_name: ha_smoke_proxy_openai
+    container_name: ha_live_proxy_openai
     ports:
       - "127.0.0.1:10403:10300"
     environment:
@@ -47,7 +47,7 @@ services:
 
   proxy_openai_limited:
     <<: *openai-proxy
-    container_name: ha_smoke_proxy_openai_limited
+    container_name: ha_live_proxy_openai_limited
     ports:
       - "127.0.0.1:10404:10300"
     environment:
@@ -57,5 +57,5 @@ services:
 
 networks:
   default:
-    name: ha_smoke_net
+    name: ha_live_net
     external: true

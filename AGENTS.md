@@ -82,9 +82,9 @@ or request fields sent only to a backend. When unsure, label it: the run
 costs a few minutes. It can also be started by hand with
 `gh workflow run ha-e2e.yml --ref <branch>`.
 
-## Smoke Testing
+## Live Testing
 
-The Home Assistant smoke suite (`pytest -m ha_smoke`) runs Home Assistant's
+The live Home Assistant suite (`pytest -m ha_live`) runs Home Assistant's
 voice pipeline through the proxy against real STT and TTS providers. It needs
 an NVIDIA GPU, and CI does not run it. Before opening a PR, run it when a change
 alters:
@@ -106,11 +106,11 @@ Docs, tests, logging, CLI parsing without a behavior change, and refactors the
 unit tests cover need no run. When unsure, take the stricter class. This is
 separate from the `ha-e2e` label above: a change can need both.
 
-The `ha-smoke` skill (`.agents/skills/ha-smoke/SKILL.md`) has the rest: the
+The `ha-live` skill (`.agents/skills/ha-live/SKILL.md`) has the rest: the
 request-shape check, which providers count, the plan, the commands and the
 report. Two of its rules hold before it is loaded:
 
-- Show the developer the smoke plan, and wait for them to accept it, before
+- Show the developer the live-test plan, and wait for them to accept it, before
   running anything.
 - Only an uncommented key in this repository's `.env` counts as permission to
   use it. Never print a key.
@@ -186,4 +186,4 @@ Tests are organized by module:
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios
 - `ha_e2e/test_ha_e2e.py`: Home Assistant E2E suite, the CI gate (see Pull Requests)
-- `ha_e2e/test_ha_smoke.py`: Home Assistant smoke suite, on a GPU (see Smoke Testing)
+- `ha_e2e/test_ha_live.py`: live Home Assistant suite, on real providers, never in CI (see Live Testing)

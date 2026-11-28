@@ -116,9 +116,9 @@ agent instructions as well:
 
 - It loads [AGENTS.md](AGENTS.md) before it changes anything. `CLAUDE.md` is a symlink to it, for agents that look
   for that name.
-- It follows the testing rules there, including when a change needs the Home Assistant smoke suite. The
-  [`ha-smoke` skill](.agents/skills/ha-smoke/SKILL.md) that AGENTS.md points to says on which providers. The agent shows you
-  its smoke-testing plan and waits for you to accept it before running it.
+- It follows the testing rules there, including when a change needs the live Home Assistant suite. The
+  [`ha-live` skill](.agents/skills/ha-live/SKILL.md) that AGENTS.md points to says on which providers. The agent shows you
+  its live-test plan and waits for you to accept it before running it.
 - Its PR says what was tested, on which providers, and what could not be, in the Testing section.
 
 ## Development Setup

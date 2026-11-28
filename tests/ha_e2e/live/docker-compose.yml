@@ -1,8 +1,8 @@
-# Smoke stack for the shared STT/TTS limits against a real Home Assistant, on a GPU.
+# Stack for the live Home Assistant tests (pytest -m ha_live), on a GPU.
 #
-#   docker build -t wyoming_openai:smoke .
-#   docker compose -f tests/ha_e2e/smoke/docker-compose.yml up -d
-#   pytest -m ha_smoke -v
+#   docker build -t wyoming_openai:live .
+#   docker compose -f tests/ha_e2e/live/docker-compose.yml up -d
+#   pytest -m ha_live -v
 #
 # Four proxies share one Speaches, each with other limits, so a turn can be sent to the one a scenario needs:
 # the defaults (3), 1, none (0), and 1 again logging at debug level. Home Assistant runs the demo integration, so Assist has devices to control.
@@ -10,11 +10,11 @@
 # ports on 127.0.0.1 only. It reuses the HA E2E stack's model cache volume (create it with `docker volume create
 # wyoming_openai_huggingface-hub` if that stack never ran). Tear it down with:
 #
-#   docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v
-name: ha_smoke
+#   docker compose -f tests/ha_e2e/live/docker-compose.yml down -v
+name: ha_live
 
 x-proxy: &proxy
-  image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:smoke}
+  image: ${WYOMING_OPENAI_IMAGE:-wyoming_openai:live}
   restart: "no"
   depends_on:
     speaches:
@@ -41,7 +41,7 @@ x-local-env: &local-env
 
 services:
   speaches:
-    container_name: ha_smoke_speaches
+    container_name: ha_live_speaches
     image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
     restart: "no"
     ports:
@@ -66,12 +66,12 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["${SMOKE_GPU:-0}"]
+              device_ids: ["${HA_LIVE_GPU:-0}"]
               capabilities: [gpu]
 
   proxy:
     <<: *proxy
-    container_name: ha_smoke_proxy
+    container_name: ha_live_proxy
     ports:
       - "127.0.0.1:10400:10300"
     environment:
@@ -79,7 +79,7 @@ services:
 
   proxy_limited:
     <<: *proxy
-    container_name: ha_smoke_proxy_limited
+    container_name: ha_live_proxy_limited
     ports:
       - "127.0.0.1:10401:10300"
     environment:
@@ -89,7 +89,7 @@ services:
 
   proxy_unlimited:
     <<: *proxy
-    container_name: ha_smoke_proxy_unlimited
+    container_name: ha_live_proxy_unlimited
     ports:
       - "127.0.0.1:10402:10300"
     environment:
@@ -100,7 +100,7 @@ services:
   # At limit 1 and logging at debug level, which shows when a request is admitted, for the stuck-client case only
   proxy_limited_debug:
     <<: *proxy
-    container_name: ha_smoke_proxy_limited_debug
+    container_name: ha_live_proxy_limited_debug
     ports:
       - "127.0.0.1:10405:10300"
     environment:
@@ -110,7 +110,7 @@ services:
       TTS_CONCURRENT_REQUESTS: "1"
 
   homeassistant:
-    container_name: ha_smoke_homeassistant
+    container_name: ha_live_homeassistant
     image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-2026.11.3}
     restart: "no"
     ports:
@@ -138,7 +138,7 @@ services:
 
 networks:
   default:
-    name: ha_smoke_net
+    name: ha_live_net
 
 volumes:
   huggingface-hub:

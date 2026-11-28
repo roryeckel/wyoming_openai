@@ -1,13 +1,13 @@
 ---
-name: ha-smoke
-description: Plan and run the Home Assistant smoke suite before opening a pull request. Use for any change that alters what a backend receives (request fields, models, voices, routes or transports, Realtime session settings, the audio sent, backend shims) or what Home Assistant sees (concurrency, timeouts, event order, errors, shutdown, streaming). Classifies the change, checks the request shape against each provider in the code, proposes a smoke plan for the developer to accept, runs it, and reports the results for the PR.
+name: ha-live
+description: Plan and run the live Home Assistant suite (pytest -m ha_live) before opening a pull request. Use for any change that alters what a backend receives (request fields, models, voices, routes or transports, Realtime session settings, the audio sent, backend shims) or what Home Assistant sees (concurrency, timeouts, event order, errors, shutdown, streaming). Classifies the change, checks the request shape against each provider in the code, proposes a plan for the developer to accept, runs it, and reports the results for the PR.
 ---
 
-# Home Assistant Smoke Testing
+# Home Assistant Live Testing
 
-AGENTS.md, "Smoke Testing", says when a change needs a smoke run. This skill
-is how to plan it, run it and report it. The README's "Home Assistant Smoke
-Tests" describes the suite itself.
+AGENTS.md, "Live Testing", says when a change needs a live run. This skill
+is how to plan it, run it and report it. `tests/README.md`, "Home Assistant
+Live Tests", describes the suite itself and the commands for each lane.
 
 ## 1. Classify the change
 
@@ -17,7 +17,7 @@ Read the diff, not only its description, and put it in one class:
 |---|---|---|
 | Request shape | What a backend receives changes: request fields or their values (`prompt`, `language`, `response_format`, voice, speed, instructions, the extra-body merge), model or voice resolution, which route or transport is used, Realtime session settings, the audio sent (format, rate, chunking), auth or headers, backend detection or a backend shim | The request-shape check (step 2), then the suite on several providers (step 3) |
 | Proxy behavior | What Home Assistant sees changes, but not the request: concurrency, queueing, timeouts, event order or content, error reporting, connection lifecycle and shutdown, handling of response audio, streaming versus buffering, startup | The suite on one provider, free or not, that serves the service and request mode the change touches (step 3) |
-| Neither | Docs, tests, logging, CLI parsing without a behavior change, refactors the unit tests cover | No smoke run |
+| Neither | Docs, tests, logging, CLI parsing without a behavior change, refactors the unit tests cover | No live run |
 
 A change that does both is a request-shape change, and when unsure, take the
 stricter class. Adding names to the STT prompt (#133) is a request-shape
@@ -60,7 +60,7 @@ anything runs, rather than ship the break.
 
 ## 3. Choose the providers
 
-Each file in `tests/ha_e2e/smoke/providers/` is a preset, and its `Serves:`
+Each file in `tests/ha_e2e/live/providers/` is a preset, and its `Serves:`
 line says which service and request mode it runs. A provider counts only for
 those: a TTS-only provider does not count for an STT change, and a streamed
 preset does not count for a change on the unstreamed path.
@@ -99,7 +99,7 @@ same work.
 - **Keys:** paid providers are not a hard requirement. Run one when its key is
   available; otherwise say in the plan and in the PR which providers did not
   run, and rely on the request-shape check for them. A key counts as
-  available, and as permission to use it for smoke testing, only when it is
+  available, and as permission to use it for live testing, only when it is
   clearly set for this project: an uncommented entry in this repository's
   `.env`. Read the entries' names, never their values. `STT_OPENAI_KEY` and
   `TTS_OPENAI_KEY` there are OpenAI keys unless the file says otherwise. A
@@ -110,8 +110,8 @@ same work.
   pulled, and their size, and the models a local engine downloads on its first
   start.
 - **Ports:** the stack uses 127.0.0.1 ports 8010, 8124 and 10400-10406. Local
-  engines run from `tests/ha_e2e/smoke/docker-compose.engines.yml`, in their own
-  project, with `ha_smoke_*` container names and no host ports, so they don't
+  engines run from `tests/ha_e2e/live/docker-compose.engines.yml`, in their own
+  project, with `ha_live_*` container names and no host ports, so they don't
   clash with an engine the developer runs.
 
 ## 5. Propose the plan, and wait
@@ -142,31 +142,31 @@ For example:
 Build the image from the branch, and bring up the stack:
 
 ```bash
-docker build -t wyoming_openai:smoke .
+docker build -t wyoming_openai:live .
 docker volume create wyoming_openai_huggingface-hub   # only if it does not exist yet
-docker compose -f tests/ha_e2e/smoke/docker-compose.yml up -d --wait
-pytest -m ha_smoke -v                                  # the local lane
+docker compose -f tests/ha_e2e/live/docker-compose.yml up -d --wait
+pytest -m ha_live -v                                  # the local lane
 ```
 
 For each provider in the plan, start its engine if it runs locally (its file's
-`Engine:` line, from `tests/ha_e2e/smoke/docker-compose.engines.yml`), then its
+`Engine:` line, from `tests/ha_e2e/live/docker-compose.engines.yml`), then its
 proxy, run the lane, and take the proxy down before the next one:
 
 ```bash
-SMOKE_PROVIDER=<name> docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait
-HA_SMOKE_PROVIDER=<name> pytest -m ha_smoke -v -k provider
-docker compose -p ha_smoke_provider down
+HA_LIVE_PROVIDER=<name> docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d --wait
+HA_LIVE_PROVIDER=<name> pytest -m ha_live -v -k provider
+docker compose -p ha_live_provider down
 ```
 
 For Realtime, the OpenAI lane:
 
 ```bash
-docker compose -f tests/ha_e2e/smoke/docker-compose.openai.yml up -d --wait
-HA_SMOKE_OPENAI=1 pytest -m ha_smoke -v -k openai
-docker compose -p ha_smoke_openai down
+docker compose -f tests/ha_e2e/live/docker-compose.openai.yml up -d --wait
+HA_LIVE_OPENAI=1 pytest -m ha_live -v -k openai
+docker compose -p ha_live_openai down
 ```
 
-A key goes into `SMOKE_STT_KEY` and `SMOKE_TTS_KEY` (provider lane) or
+A key goes into `HA_LIVE_STT_KEY` and `HA_LIVE_TTS_KEY` (provider lane) or
 `OPENAI_API_KEY` (OpenAI lane) through the environment of the one command that
 starts the proxy:
 
@@ -182,13 +182,13 @@ In bash, for example:
 
 ```bash
 ( set +x
-  unset SMOKE_STT_KEY SMOKE_TTS_KEY
+  unset HA_LIVE_STT_KEY HA_LIVE_TTS_KEY
   ENV_FILE=/path/to/the/main/checkout/.env
   # The last uncommented entry, without quotes or a trailing comment
   key() { sed -n "s/^$1 *= *//p" "$ENV_FILE" | tail -n 1 | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//' | tr -d "\"'"; }
-  export SMOKE_STT_KEY="$(key STT_OPENAI_KEY)" SMOKE_TTS_KEY="$(key TTS_OPENAI_KEY)"
-  [ -n "$SMOKE_STT_KEY" ] && [ -n "$SMOKE_TTS_KEY" ] || { echo "a key is missing from .env" >&2; exit 1; }
-  SMOKE_PROVIDER=openai docker compose -f tests/ha_e2e/smoke/docker-compose.provider.yml up -d --wait )
+  export HA_LIVE_STT_KEY="$(key STT_OPENAI_KEY)" HA_LIVE_TTS_KEY="$(key TTS_OPENAI_KEY)"
+  [ -n "$HA_LIVE_STT_KEY" ] && [ -n "$HA_LIVE_TTS_KEY" ] || { echo "a key is missing from .env" >&2; exit 1; }
+  HA_LIVE_PROVIDER=openai docker compose -f tests/ha_e2e/live/docker-compose.provider.yml up -d --wait )
 ```
 
 This reads uncommented entries only. A commented-out key is used only with
@@ -200,7 +200,7 @@ environment.
 
 ## 7. Read the results
 
-Each run writes `tests/ha_e2e/artifacts/smoke-<timestamp>/`: `summary.md`,
+Each run writes `tests/ha_e2e/artifacts/live-<timestamp>/`: `summary.md`,
 `summary.json`, and every reply's audio. A failure is either the proxy's or the
 model's:
 
@@ -208,8 +208,8 @@ model's:
   it made up instead of reading the text, a provider's rate limit. The reply
   check names silences and missing sentences.
 - **The proxy's:** anything else, and any doubt. Build `main` as
-  `wyoming_openai:smoke-main` (in a worktree), and run the same case with
-  `WYOMING_OPENAI_IMAGE=wyoming_openai:smoke-main` after recreating the
+  `wyoming_openai:live-main` (in a worktree), and run the same case with
+  `WYOMING_OPENAI_IMAGE=wyoming_openai:live-main` after recreating the
   proxies. A failure on the branch but not on `main` is the change's.
 
 A failure caused by the change is fixed before the PR opens, and the run
@@ -217,15 +217,15 @@ repeated. One that is the model's or the provider's is reported, not hidden.
 
 ## 8. Tear down
 
-Take down what the run started: `docker compose -p ha_smoke_provider down` and
-`docker compose -p ha_smoke_openai down` (both need no key, and remove the
-containers that hold one), `docker compose -p ha_smoke_engines down` for the
+Take down what the run started: `docker compose -p ha_live_provider down` and
+`docker compose -p ha_live_openai down` (both need no key, and remove the
+containers that hold one), `docker compose -p ha_live_engines down` for the
 local engines, and the stack with
-`docker compose -f tests/ha_e2e/smoke/docker-compose.yml down -v` unless the
-developer wants it kept. Each of these touches only what the smoke run
+`docker compose -f tests/ha_e2e/live/docker-compose.yml down -v` unless the
+developer wants it kept. Each of these touches only what the live run
 started. Pulled images stay unless the developer asks to remove them, and so do
 the engines' model and backend volumes, so the next run skips those downloads;
-`docker compose -p ha_smoke_engines down -v` removes them.
+`docker compose -p ha_live_engines down -v` removes them.
 
 ## 9. Report
 

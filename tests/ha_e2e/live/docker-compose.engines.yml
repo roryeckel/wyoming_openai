@@ -1,14 +1,14 @@
 # Local engines for the provider lane, one profile each, with the same images and settings as the repository's own
-# compose files for them. They run in a project of their own (ha_smoke_engines), with ha_smoke_* container names, on
-# the smoke stack's network and without host ports, so nothing they do touches a proxy or an engine the developer
-# runs. Start the smoke stack first, then the engine a provider file names:
+# compose files for them. They run in a project of their own (ha_live_engines), with ha_live_* container names, on
+# the live stack's network and without host ports, so nothing they do touches a proxy or an engine the developer
+# runs. Start the live stack first, then the engine a provider file names:
 #
-#   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
+#   docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile kokoro-fastapi up -d --wait kokoro
 #
-# Remove every engine the smoke run started, by project name:
+# Remove every engine the live run started, by project name:
 #
-#   docker compose -p ha_smoke_engines down
-name: ha_smoke_engines
+#   docker compose -p ha_live_engines down
+name: ha_live_engines
 
 x-gpu: &gpu
   deploy:
@@ -16,7 +16,7 @@ x-gpu: &gpu
       reservations:
         devices:
           - driver: nvidia
-            device_ids: ["${SMOKE_GPU:-0}"]
+            device_ids: ["${HA_LIVE_GPU:-0}"]
             capabilities: [gpu]
 
 services:
@@ -24,7 +24,7 @@ services:
     <<: *gpu
     profiles: [kokoro-fastapi]
     image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
-    container_name: ha_smoke_kokoro
+    container_name: ha_live_kokoro
     restart: "no"
     environment:
       USE_GPU: "true"
@@ -39,7 +39,7 @@ services:
     <<: *gpu
     profiles: [localai]
     image: localai/localai:latest-gpu-nvidia-cuda12
-    container_name: ha_smoke_localai
+    container_name: ha_live_localai
     restart: "no"
     environment:
       MODELS_PATH: /models
@@ -63,12 +63,12 @@ services:
   # - the voices' configs pointed at cpu-piper: on the NVIDIA image, LocalAI maps the piper backend the gallery
   #   names to an empty path ("received empty target"), and LocalAI reads the edited configs only after a restart.
   # Run it, then restart LocalAI:
-  #   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile localai run --rm init-localai
-  #   docker compose -f tests/ha_e2e/smoke/docker-compose.engines.yml --profile localai restart localai
+  #   docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile localai run --rm init-localai
+  #   docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile localai restart localai
   init-localai:
     profiles: [localai]
     image: alpine:latest
-    container_name: ha_smoke_localai_init
+    container_name: ha_live_localai_init
     restart: "no"
     environment:
       LOCALAI_URL: http://localai:8080
@@ -116,7 +116,7 @@ services:
   openai-edge-tts:
     profiles: [openai-edge-tts]
     image: travisvn/openai-edge-tts:latest
-    container_name: ha_smoke_openai_edge_tts
+    container_name: ha_live_openai_edge_tts
     restart: "no"
     environment:
       PORT: "5050"
@@ -137,7 +137,7 @@ services:
     <<: *gpu
     profiles: [chatterbox]
     image: travisvn/chatterbox-tts-api:latest
-    container_name: ha_smoke_chatterbox
+    container_name: ha_live_chatterbox
     restart: "no"
     environment:
       PORT: "4123"
@@ -160,7 +160,7 @@ services:
 
 networks:
   default:
-    name: ha_smoke_net
+    name: ha_live_net
     external: true
 
 volumes:

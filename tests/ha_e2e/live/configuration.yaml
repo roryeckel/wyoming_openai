@@ -1,4 +1,4 @@
-# Test-only configuration for the Home Assistant of the smoke stack. The demo integration gives Assist lights,
+# Test-only configuration for the Home Assistant of the live stack. The demo integration gives Assist lights,
 # covers and sensors to control; runtime state lives in the ha-config volume.
 
 default_config:
