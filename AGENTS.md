@@ -60,6 +60,11 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 
 ## Pull Requests
 
+Fill in the PR template (`.github/PULL_REQUEST_TEMPLATE.md`): every section but
+Details, which is optional unless the PR fixes an issue and needs `Closes #N`.
+CONTRIBUTING.md, "Fill in the PR template", says what each one takes; the
+Summary sentence becomes the release-notes line.
+
 Every PR runs lint, tests, integration, Docker and CodeQL checks. The **scripted
 Home Assistant** suite (`.github/workflows/ha-scripted.yml`) only runs on a PR with
 the `ha-scripted` label; without it the check shows as skipped, which is not a pass.
@@ -114,6 +119,20 @@ report. Two of its rules hold before it is loaded:
   running anything.
 - Only an uncommented key in this repository's `.env` counts as permission to
   use it. Never print a key.
+
+## Code Review
+
+Before opening a PR, have the full diff from `main` reviewed independently,
+and record the latest review in the PR's Code review section.
+CONTRIBUTING.md, "Have the change reviewed independently", is the policy. Two
+of its rules hold here:
+
+- The review runs outside your own context: in a separate session or a
+  subagent with a fresh context, on another model, or by a person. Give it the
+  diff and the PR's accepted trade-offs, not your conclusions about the code.
+- Aim for the latest review to be clean, with nothing changed after it. When it
+  isn't, because a finding is still open or the change moved on afterwards,
+  the PR says so and why.
 
 ## Releases
 

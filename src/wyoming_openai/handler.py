@@ -72,7 +72,7 @@ from .utilities import (
     validate_stt_extra_body,
     validate_tts_extra_body,
 )
-from .wav import TtsAudioFormat, WavFramer
+from .wav import TtsAudioFormat, WavFormatError, WavFramer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -183,6 +183,9 @@ class _SynthesisState:
     audio_started: bool = False  # AudioStart was sent and AudioStop was not
     timestamp: float = 0  # End of the audio sent so far, in milliseconds
     skipped_speakable_sentence: bool = False  # A sentence with something to say came back without audio
+    # A response came in another format than response_format asked for, which a backend does for every sentence,
+    # so it is reported once
+    reported_response_format: bool = False
     failed: bool = False  # Its failure was reported to the client, or the client is gone; not reported twice
 
 
@@ -1536,7 +1539,8 @@ class OpenAIEventHandler(AsyncEventHandler):
         """Describe the audio bytes `_iter_tts_audio` yields for a voice."""
         if self._is_tts_voice_realtime(voice):
             return TtsAudioFormat(headerless=True, rate=REALTIME_AUDIO_RATE)
-        return TtsAudioFormat(headerless=self._get_tts_response_format() != "wav", rate=TTS_AUDIO_RATE)
+        # Whatever was requested, a backend that ignores response_format may answer with a WAV file
+        return TtsAudioFormat(headerless=self._get_tts_response_format() != "wav", rate=TTS_AUDIO_RATE, may_be_wav=True)
 
     def _is_tts_voice_streaming(self, voice_name: str) -> bool:
         """Check if a TTS voice supports streaming synthesis.
@@ -1727,7 +1731,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._stream_audio_to_wyoming(result.audio or b"", self._get_tts_audio_format(voice), sentences[i]),
                 name=f"{task_id}_playback",
             ):
-                _LOGGER.error("Failed to stream sentence %d (%s) to Wyoming", i + 1, sentence_preview)
+                _LOGGER.error("Failed to play sentence %d (%s)", i + 1, sentence_preview)
                 return False
 
             _LOGGER.debug(
@@ -2365,7 +2369,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                     buffered_then_live(),
                     audio_format=self._get_tts_audio_format(voice),
                     text=text,
-                    streamed=True,
                     sentence=True,
                 ):
                     raise TtsStreamError("streaming its audio failed, as logged above", chunk_preview, voice.name)
@@ -2553,10 +2556,15 @@ class OpenAIEventHandler(AsyncEventHandler):
         """
 
         async def buffered_response() -> AsyncGenerator[bytes, None]:
-            yield audio_data
+            # In the pieces a live response is read in, so a buffered sentence is framed exactly like a streamed
+            # one, and converting a long sentence gives other connections a turn between pieces
+            for start in range(0, len(audio_data), TTS_CHUNK_SIZE):
+                if start:
+                    await asyncio.sleep(0)
+                yield audio_data[start : start + TTS_CHUNK_SIZE]
 
         return await self._play_tts_audio(
-            buffered_response(), audio_format=audio_format, text=text, streamed=False, sentence=True
+            buffered_response(), audio_format=audio_format, text=text, sentence=True
         )
 
     async def _synthesize_non_streaming(self, text: str, voice: TtsVoiceModel) -> bool:
@@ -2660,7 +2668,6 @@ class OpenAIEventHandler(AsyncEventHandler):
                 self._iter_tts_audio(text, voice),
                 audio_format=self._get_tts_audio_format(voice),
                 text=text,
-                streamed=True,
                 sentence=False,
             )
 
@@ -2670,7 +2677,6 @@ class OpenAIEventHandler(AsyncEventHandler):
         *,
         audio_format: TtsAudioFormat,
         text: str,
-        streamed: bool,
         sentence: bool,
     ) -> bool:
         """
@@ -2682,7 +2688,6 @@ class OpenAIEventHandler(AsyncEventHandler):
             chunks (AsyncGenerator[bytes, None]): The response bytes; closed when playback ends.
             audio_format (TtsAudioFormat): How the bytes are framed, from `_get_tts_audio_format`.
             text (str): The text that was synthesized.
-            streamed (bool): Whether the bytes arrive from the backend right now, not from a buffered response.
             sentence (bool): Whether this is one sentence of a synthesis rather than a whole request. A sentence
                 without audio is skipped and leaves the stream unopened for the next one, which may have
                 another audio format; a whole request still opens the stream when there is nothing to say
@@ -2692,12 +2697,9 @@ class OpenAIEventHandler(AsyncEventHandler):
             bool: True if the audio was played or skipped, False on error. A stream left open by a failure
                 or a cancellation is closed by `_stop_sentence_playback`, not here.
         """
+        framer = WavFramer(audio_format)
         try:
-            framer = WavFramer(audio_format)
             wrote_audio = False
-            # A backend that answers without a WAV header does so for every sentence; the one that streams
-            # reports it, the buffered ones behind it do not repeat the warning
-            log_missing_header = _LOGGER.warning if streamed else _LOGGER.debug
 
             async def write_audio(audio_data: bytes) -> None:
                 """Send the audio start once the format is known, then the PCM."""
@@ -2711,26 +2713,20 @@ class OpenAIEventHandler(AsyncEventHandler):
 
             async with contextlib.aclosing(chunks) as audio_stream:
                 async for chunk in audio_stream:
-                    awaiting_header = framer.awaiting_header
                     audio_data = framer.feed(chunk)
-                    if awaiting_header and framer.header_missing:
-                        log_missing_header(
-                            "Could not parse WAV header after buffering %d bytes, falling back to raw PCM",
-                            len(audio_data),
-                        )
+                    # As soon as the first bytes show it, while a response played as raw PCM may still be going on
+                    self._report_tts_response_format(framer)
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
                     if audio_data or (not sentence and not framer.awaiting_header):
                         await write_audio(audio_data)
 
-            if held_audio := framer.finish():
-                log_missing_header(
-                    "TTS response ended before a complete WAV header was available, falling back to raw PCM"
-                )
+            held_audio = framer.finish()
+            if held_audio:
                 await write_audio(held_audio)
 
             if framer.missing_bytes:
-                _LOGGER.warning("TTS WAV response ended with %d declared PCM bytes missing", framer.missing_bytes)
+                _LOGGER.warning("TTS WAV response ended with %d declared audio bytes missing", framer.missing_bytes)
 
             if wrote_audio:
                 return True
@@ -2749,9 +2745,33 @@ class OpenAIEventHandler(AsyncEventHandler):
                 await write_audio(b"")
             return True
 
+        except WavFormatError as e:
+            _LOGGER.error("TTS backend returned audio that cannot be played: %s", e)
+            return False
         except Exception as e:
             _LOGGER.exception("Error streaming TTS audio: %s", e)
             return False
+        finally:
+            # A response too short to show what it is until finish(), or that failed before the check above ran
+            self._report_tts_response_format(framer)
+
+    def _report_tts_response_format(self, framer: WavFramer) -> None:
+        """
+        Warn, once per synthesis, about a response in another format than response_format asked for: raw PCM for a
+        WAV request, or a WAV file for a pcm request.
+        """
+        if self._synthesis.reported_response_format:
+            return
+        if framer.header_missing:
+            _LOGGER.warning("TTS response is not a WAV file; playing it as raw PCM")
+        elif framer.unrequested_wav:
+            _LOGGER.warning(
+                "TTS response is a WAV file although response_format is %r; playing it by its header",
+                self._get_tts_response_format(),
+            )
+        else:
+            return
+        self._synthesis.reported_response_format = True
 
     def _advance_audio_timestamp(
         self,
