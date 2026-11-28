@@ -9939,7 +9939,7 @@ async def test_buffered_float_wav_sentence_is_played_as_pcm16(enhanced_handler):
 
 
 @pytest.mark.asyncio
-async def test_container_warning_is_logged_when_the_response_then_fails(
+async def test_response_format_warning_is_logged_when_the_response_then_fails(
     enhanced_handler, mock_info, mock_clients, caplog
 ):
     """Test a response played as raw PCM still says so when it fails midway, since that may explain the static."""
@@ -9960,7 +9960,7 @@ async def test_container_warning_is_logged_when_the_response_then_fails(
 
 
 @pytest.mark.asyncio
-async def test_container_warning_is_logged_as_soon_as_the_response_shows_it(
+async def test_response_format_warning_is_logged_as_soon_as_the_response_shows_it(
     enhanced_handler, mock_info, mock_clients, caplog
 ):
     """Test the warning that explains static comes while the response is still playing, not after it."""

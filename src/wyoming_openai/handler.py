@@ -179,9 +179,9 @@ class _SynthesisState:
     audio_started: bool = False  # AudioStart was sent and AudioStop was not
     timestamp: float = 0  # End of the audio sent so far, in milliseconds
     skipped_speakable_sentence: bool = False  # A sentence with something to say came back without audio
-    # A response came in another container than requested, which a backend does for every sentence, so it is
-    # reported once
-    reported_container: bool = False
+    # A response came in another format than response_format asked for, which a backend does for every sentence,
+    # so it is reported once
+    reported_response_format: bool = False
     failed: bool = False  # Its failure was reported to the client, or the client is gone; not reported twice
 
 
@@ -2668,7 +2668,7 @@ class OpenAIEventHandler(AsyncEventHandler):
                 async for chunk in audio_stream:
                     audio_data = framer.feed(chunk)
                     # As soon as the first bytes show it, while a response played as raw PCM may still be going on
-                    self._report_tts_container(framer)
+                    self._report_tts_response_format(framer)
                     # A parsed header alone only opens the stream for a caller that wants it opened when
                     # empty; a sentence that turns out to have no samples leaves it to the next one
                     if audio_data or (not sentence and not framer.awaiting_header):
@@ -2706,11 +2706,14 @@ class OpenAIEventHandler(AsyncEventHandler):
             return False
         finally:
             # A response too short to show what it is until finish(), or that failed before the check above ran
-            self._report_tts_container(framer)
+            self._report_tts_response_format(framer)
 
-    def _report_tts_container(self, framer: WavFramer) -> None:
-        """Warn, once per synthesis, about a response that is not in the container that was requested."""
-        if self._synthesis.reported_container:
+    def _report_tts_response_format(self, framer: WavFramer) -> None:
+        """
+        Warn, once per synthesis, about a response in another format than response_format asked for: raw PCM for a
+        WAV request, or a WAV file for a pcm request.
+        """
+        if self._synthesis.reported_response_format:
             return
         if framer.header_missing:
             _LOGGER.warning("TTS response is not a WAV file; playing it as raw PCM")
@@ -2721,7 +2724,7 @@ class OpenAIEventHandler(AsyncEventHandler):
             )
         else:
             return
-        self._synthesis.reported_container = True
+        self._synthesis.reported_response_format = True
 
     def _advance_audio_timestamp(
         self,
