@@ -60,7 +60,8 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 
 ## Pull Requests
 
-Fill in every section of the PR template (`.github/PULL_REQUEST_TEMPLATE.md`).
+Fill in the PR template (`.github/PULL_REQUEST_TEMPLATE.md`): every section but
+Details, which is optional.
 CONTRIBUTING.md, "Fill in the PR template", says what each one takes; the
 Summary sentence becomes the release-notes line.
 

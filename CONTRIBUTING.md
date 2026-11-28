@@ -116,7 +116,8 @@ The [PR template](.github/PULL_REQUEST_TEMPLATE.md) has a section for each part 
 - **Summary:** one sentence on the user-visible change. The release notes use the first paragraph that isn't a header,
   so nothing else goes above it.
 - **Checklist**
-- **Details:** how the change works, design choices, and linked issues and PRs.
+- **Details** (the only optional section): how the change works, design choices, and linked issues and PRs, with
+  `Closes #N` for an issue it fixes.
 - **Accepted trade-offs:** behavior the change deliberately leaves as it is, or limits it accepts, each with its reason,
   so reviewers and later changes don't take them for bugs.
 - **Code review:** the latest independent review of the change, as described below.
@@ -132,17 +133,24 @@ PR.
   So does an adversarial review, one set on finding ways the change fails. A review the authoring agent runs in its
   own context doesn't count.
 - **The scope** is the full diff from `main`, tests and docs included, not only the latest commit.
-- **Each finding** is fixed, or recorded in the PR's Accepted trade-offs section with the reason it stays. Tell later
-  reviews about the accepted ones, so they raise them again only with something new.
-- **After a fix, review again.** Aim for the latest review to be clean, with nothing changed after it. That's strongly
-  preferred, not required: when the latest review found something that is still open, or the change moved on after it,
-  for example with a docs fix, the PR says so and why.
+- **Each finding** ends up as one of these:
+  - fixed
+  - accepted: recorded in the PR's Accepted trade-offs section, with the reason it stays
+  - dismissed as not a real problem: noted in the Code review section, with why
+  - left open: noted in the Code review section
+
+  Tell later reviews about the accepted ones, so they raise them again only with something new.
+- **After a fix, review again.** A review after small fixes may cover only what changed since the last full review.
+  Aim for the latest review to be clean, with nothing changed after it. That's strongly preferred, not required: when
+  a finding of the latest review is still open, or the change moved on after it, for example with a docs fix, the PR
+  says so and why.
 
 The PR's Code review section records the latest review:
 
 - what ran it, and at what effort
 - the commit it reviewed
-- its result: clean, or which findings were fixed, accepted or left open
+- whether it covered the full diff, or only what changed since the last full review
+- its result: clean, or which findings were fixed, accepted, dismissed or left open
 - what changed after it, if anything
 
 ## AI Coding Agents
