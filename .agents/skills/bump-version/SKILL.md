@@ -16,12 +16,12 @@ Do not edit `pyproject.toml`/`README.md` locally, and do not create the tag.
    ```bash
    gh workflow run bump-version.yml -f bump_type=<patch|minor|major>
    ```
-2. The Action runs the Home Assistant E2E gate, updates `pyproject.toml` and
+2. The Action runs the scripted Home Assistant gate, updates `pyproject.toml` and
    `README.md`, and opens a PR from `release/v<new>` labeled `release-bump`.
 3. Optionally set the GitHub release title on the PR body's `Release title:`
    line (the version is appended automatically; blank defaults to
    `Release <new>`), then merge the PR. The **Draft Release** workflow re-runs
-   the E2E gate against the merge commit and creates the draft release with
+   the scripted Home Assistant gate against the merge commit and creates the draft release with
    generated notes.
 4. Publishing that draft release creates the `v<new>` tag and fires the PyPI
    and Docker `latest` workflows.
