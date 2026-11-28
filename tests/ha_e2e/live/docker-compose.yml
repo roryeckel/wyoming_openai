@@ -98,7 +98,7 @@ services:
 
   homeassistant:
     container_name: ha_live_homeassistant
-    image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-2026.11.3}
+    image: ghcr.io/home-assistant/home-assistant:${HA_LIVE_VERSION:-2026.11.3}
     restart: "no"
     ports:
       - "127.0.0.1:8124:8123"

@@ -100,7 +100,7 @@ docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f d
 pytest -m ha_scripted -v --timeout=600
 ```
 
-`HA_VERSION` pins the Home Assistant image (default `2026.10.1`). Switching versions, or resetting onboarding, needs
+`HA_VERSION` pins the scripted stack's Home Assistant image (default `2026.10.1`). Switching versions, or resetting onboarding, needs
 `docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-scripted.yml down -v`
 first.
 
@@ -137,8 +137,9 @@ and it may not have a silence of 3 seconds or more. A different word elsewhere c
 the model's rather than the proxy's, so the results need reading. [AGENTS.md](../AGENTS.md#live-testing) says which
 changes need a live run, and the [`ha-live` skill](../.agents/skills/ha-live/SKILL.md) which providers they run on.
 
-The scenarios run against proxies at the default limits (3), at 1, and with no limit (0). Each test's docstring in
-`tests/ha_e2e/test_ha_live.py` says what it checks.
+The scenarios run against proxies at the default limits (3), at 1, and with no limit (0). A proxy without a limit
+must never make a request wait, and at limit 1, eight transcriptions at once, or three Realtime sessions, must wait at
+least once. Each test's docstring in `tests/ha_e2e/test_ha_live.py` says what else it checks.
 
 | Scenario | Local lane | OpenAI lane | Provider lane |
 |---|---|---|---|
@@ -153,12 +154,13 @@ The scenarios run against proxies at the default limits (3), at 1, and with no l
 
 Only `-m ha_live` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration`
 or `-m ha_scripted` picks it up. Its stack publishes its ports on `127.0.0.1` only, and reuses the scripted suite's
-model cache volume.
+model cache volume. `HA_LIVE_VERSION` pins its Home Assistant image (default `2026.11.3`).
 
 **On the CPU or a GPU.** The stack and the local engines run on the CPU. With an NVIDIA GPU, layer
 `tests/ha_e2e/live/docker-compose.gpu.yml` on the stack, and `tests/ha_e2e/live/docker-compose.engines.gpu.yml` on the
-engines, in every command that brings them up; otherwise a later `up` moves them back to the CPU. `HA_LIVE_GPU`
-picks the GPU (default `0`). Run Chatterbox with the GPU overlay: on the CPU its long replies time out.
+engines, in every command that creates or starts them: `up`, and `run` without `--no-deps`. A command without it
+moves them back to the CPU. `HA_LIVE_GPU` picks the GPU (default `0`). Run Chatterbox with the GPU overlay: on the
+CPU its long replies time out.
 
 **The local lane** runs every scenario on the stack's own Speaches:
 
@@ -179,7 +181,7 @@ as silence, or a reply the model makes up in place of the text fails a turn.
 
 ```bash
 docker compose -f tests/ha_e2e/live/docker-compose.openai.yml up -d --wait
-HA_LIVE_OPENAI=1 pytest -m ha_live -v -k openai
+HA_LIVE_OPENAI=1 pytest -m ha_live -v -k openai   # $env:HA_LIVE_OPENAI = "1" first in PowerShell
 ```
 
 **The provider lane** runs the first four scenarios against one other provider, defined in a file under

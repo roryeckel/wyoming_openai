@@ -46,9 +46,7 @@ services:
   # - the models, from LocalAI's gallery;
   # - the voices' configs pointed at cpu-piper: on the NVIDIA image, LocalAI maps the piper backend the gallery
   #   names to an empty path ("received empty target"), and LocalAI reads the edited configs only after a restart.
-  # Run it, then restart LocalAI:
-  #   docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile localai run --rm init-localai
-  #   docker compose -f tests/ha_e2e/live/docker-compose.engines.yml --profile localai restart localai
+  # providers/localai.env has the commands: run it once LocalAI is up, then restart LocalAI.
   init-localai:
     profiles: [localai]
     image: alpine:latest
