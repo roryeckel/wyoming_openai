@@ -116,8 +116,8 @@ The [PR template](.github/PULL_REQUEST_TEMPLATE.md) has a section for each part 
 - **Summary:** one sentence on the user-visible change. The release notes use the first paragraph that isn't a header,
   so nothing else goes above it.
 - **Checklist**
-- **Details** (optional): how the change works, design choices, and linked issues and PRs, with `Closes #N` for an
-  issue it fixes.
+- **Details:** how the change works, design choices, and linked issues and PRs. Optional, except that a PR that fixes
+  an issue puts `Closes #N` here.
 - **Accepted trade-offs:** behavior the change deliberately leaves as it is, or limits it accepts, each with its reason,
   so reviewers and later changes don't take them for bugs.
 - **Code review:** the latest independent review of the change, as described below. Required for a PR made with an

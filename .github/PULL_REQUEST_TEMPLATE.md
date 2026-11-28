@@ -23,7 +23,7 @@ reads cleanly out of context.
 
 ## Details
 
-<!-- Optional: implementation notes, design choices, links to related issues/PRs. Closes #N goes here. -->
+<!-- Optional, except that a PR that fixes an issue puts Closes #N here: implementation notes, design choices, links to related issues/PRs. -->
 
 
 
