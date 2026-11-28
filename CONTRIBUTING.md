@@ -109,6 +109,55 @@ If the CLI, compatibility story, or visible behavior changes, update the relevan
 
 PRs that mainly add support for one provider's custom route, schema, or transport are likely to be declined even if the code works.
 
+### Fill in the PR template
+
+The [PR template](.github/PULL_REQUEST_TEMPLATE.md) has a section for each part of a PR description:
+
+- **Summary:** one sentence on the user-visible change. The release notes use the first paragraph that isn't a header,
+  so nothing else goes above it.
+- **Checklist**
+- **Details:** how the change works, design choices, and linked issues and PRs. Optional, except that a PR that fixes
+  an issue puts `Closes #N` here.
+- **Accepted trade-offs:** behavior the change deliberately leaves as it is, or limits it accepts, each with its reason,
+  so reviewers and later changes don't take them for bugs.
+- **Code review:** the latest independent review of the change, as described below. Required for a PR made with an
+  AI coding agent, optional on others.
+- **Testing:** what was run and on what, what passed and failed, and what wasn't tested.
+
+### Have the change reviewed independently
+
+A PR made with an AI coding agent gets an independent code review before it is opened. One is welcome on any other
+PR.
+
+- **Independent** means the reviewer didn't write the change and starts from the code, not from the author's
+  conclusions. A separate agent session or subagent with a fresh context counts, as does another model or a person.
+  So does an adversarial review, one set on finding ways the change fails. A review the authoring agent runs in its
+  own context doesn't count.
+- **A full review** covers the full diff from `main`, tests and docs included, not only the latest commit. Every
+  reviewed PR gets at least one, so every PR made with an AI coding agent does.
+- **Each finding** ends up as one of these, and later reviews are told about the accepted ones, so they raise them
+  again only with something new:
+  - fixed
+  - accepted: recorded in the PR's Accepted trade-offs section, with the reason it stays
+  - dismissed as not a real problem: noted in the Code review section, with why
+  - left open: noted in the Code review section
+- **After a fix, review again.** When the fixes only address findings and don't change the design, the review may
+  cover just what changed since the last full review. After anything larger, review the full diff again.
+- **Aim for the latest review to be clean, with nothing changed after it.** That's strongly preferred, not required:
+  when a finding is still open, or the change moved on after the latest review, for example with a docs fix, the PR
+  says so and why.
+
+The PR's Code review section records the latest review:
+
+- what ran it, and at what effort
+- the commit it reviewed
+- whether it covered the full diff, or only what changed since the last full review
+- its result: clean, or which findings were fixed, accepted, dismissed or left open
+- what changed after it, if anything
+
+It also keeps every finding dismissed or still open from any review of the PR, each with why. When the latest review
+covered only recent changes, it also gives the last full review's commit and result.
+
 ## AI Coding Agents
 
 A change made with an AI coding agent follows the same rules as any other, and the agent follows the project's
@@ -119,6 +168,9 @@ agent instructions as well:
 - It follows the testing rules there, including when a change needs the live Home Assistant suite. The
   [`ha-live` skill](.agents/skills/ha-live/SKILL.md) that AGENTS.md points to says on which providers. The agent shows you
   its live-test plan and waits for you to accept it before running it.
+- It has the change reviewed independently before opening the PR, as
+  [Have the change reviewed independently](#have-the-change-reviewed-independently) describes, and records the
+  latest review in the PR's Code review section.
 - Its PR says what was tested, on which providers, and what could not be, in the Testing section.
 
 ## Development Setup
