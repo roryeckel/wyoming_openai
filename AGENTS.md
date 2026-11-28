@@ -60,11 +60,11 @@ docker compose -f docker-compose.speaches.yml -f docker-compose.dev.yml up -d --
 
 ## Pull Requests
 
-Every PR runs lint, tests, integration, Docker and CodeQL checks. The **Home
-Assistant E2E** suite (`.github/workflows/ha-e2e.yml`) only runs on a PR with
-the `ha-e2e` label; without it the check shows as skipped, which is not a pass.
+Every PR runs lint, tests, integration, Docker and CodeQL checks. The **scripted
+Home Assistant** suite (`.github/workflows/ha-scripted.yml`) only runs on a PR with
+the `ha-scripted` label; without it the check shows as skipped, which is not a pass.
 
-Add the label (`gh pr edit <PR#> --add-label ha-e2e`) and wait for a passing
+Add the label (`gh pr edit <PR#> --add-label ha-scripted`) and wait for a passing
 run before merging when a change could alter what Home Assistant sees over the
 Wyoming connection, or when it sees it:
 
@@ -80,7 +80,7 @@ The label is usually not needed for docs, tests, logging, CLI parsing or
 validation that doesn't change behavior, refactors the unit tests cover,
 or request fields sent only to a backend. When unsure, label it: the run
 costs a few minutes. It can also be started by hand with
-`gh workflow run ha-e2e.yml --ref <branch>`.
+`gh workflow run ha-scripted.yml --ref <branch>`.
 
 ## Live Testing
 
@@ -104,7 +104,7 @@ alters:
 
 Docs, tests, logging, CLI parsing without a behavior change, and refactors the
 unit tests cover need no run. When unsure, take the stricter class. This is
-separate from the `ha-e2e` label above: a change can need both.
+separate from the `ha-scripted` label above: a change can need both.
 
 The `ha-live` skill (`.agents/skills/ha-live/SKILL.md`) has the rest: the
 request-shape check, which providers count, the plan, the commands and the
@@ -120,7 +120,7 @@ report. Two of its rules hold before it is loaded:
 Releases off `main` go through the **Bump Version** GitHub Action
 (`.github/workflows/bump-version.yml`); don't hand-edit the version strings or
 create the tag. Dispatch it with `gh workflow run bump-version.yml -f
-bump_type=<patch|minor|major>`: it runs the Home Assistant E2E gate, opens a
+bump_type=<patch|minor|major>`: it runs the scripted Home Assistant gate, opens a
 `release-bump` PR, and, once merged, the gated **Draft Release** workflow
 creates the draft release. Publishing that draft fires PyPI and Docker
 `latest`. See `.agents/skills/bump-version/SKILL.md` for the full flow.
@@ -185,5 +185,5 @@ Tests are organized by module:
 - `test_concurrency.py`: Request concurrency limits
 - `test_main.py`: CLI argument parsing and startup validation
 - `test_integration.py`: End-to-end scenarios
-- `ha_e2e/test_ha_e2e.py`: Home Assistant E2E suite, the CI gate (see Pull Requests)
+- `ha_e2e/test_ha_scripted.py`: scripted Home Assistant suite, the CI gate (see Pull Requests)
 - `ha_e2e/test_ha_live.py`: live Home Assistant suite, on real providers, never in CI (see Live Testing)

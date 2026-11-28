@@ -50,9 +50,9 @@ dev = [
 
 [tool.pytest.ini_options]
 markers = [
-    "integration: end-to-end tests that require Docker (opt in with: pytest -m integration; use -m \"integration and not ha_e2e\" for the Speaches-only suite)",
+    "integration: end-to-end tests that require Docker (opt in with: pytest -m integration; use -m \"integration and not ha_scripted\" for the Speaches-only suite)",
     "smoke: minimal e2e subset used by the containerized CI smoke job (pytest -m 'integration and smoke')",
-    "ha_e2e: end-to-end tests that drive a real Home Assistant container against the proxy (opt in with: pytest -m ha_e2e)",
+    "ha_scripted: end-to-end tests with a scripted conversation agent that drive a real Home Assistant container against the proxy (opt in with: pytest -m ha_scripted)",
     "ha_live: a real Home Assistant controlling devices through the proxy on real STT and TTS providers, with fuzzy checks whose failures need reading; needs the stack in tests/ha_e2e/live and never runs in CI (opt in with: pytest -m ha_live)",
 ]
 addopts = "-m 'not integration and not ha_live'"

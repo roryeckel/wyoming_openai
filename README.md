@@ -679,7 +679,7 @@ The `tests/test_e2e.py` suite drives a real `wyoming_openai` server over TCP and
 These tests are gated behind the `integration` marker and skipped by default. To run locally, just:
 
 ```bash
-pytest -m "integration and not ha_e2e" -v
+pytest -m "integration and not ha_scripted" -v
 ```
 
 The Home Assistant suite has its own `ha_e2e` marker and is described below.
@@ -722,34 +722,34 @@ Run it locally:
 
 ```bash
 docker build -t wyoming_openai:e2e .
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
-pytest -m ha_e2e -v --timeout=600
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-scripted.yml up -d
+pytest -m ha_scripted -v --timeout=600
 ```
 
 Or in PowerShell:
 
 ```powershell
 docker build -t wyoming_openai:e2e .
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
-pytest -m ha_e2e -v --timeout=600
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-scripted.yml up -d
+pytest -m ha_scripted -v --timeout=600
 ```
 
 The harness generates a test-only Home Assistant user and password on a fresh instance and stores them, along with the config-entry IDs it creates, in `tests/ha_e2e/.state/` (gitignored). Re-runs reuse the stored refresh token and reload those entries instead of adding duplicates. If Home Assistant is already onboarded but that state is missing, reset the stack:
 
 ```bash
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml down -v
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-scripted.yml down -v
 ```
 
 Use `HA_VERSION` to pin the Home Assistant image (default `2026.10.1`); `down -v` is required when switching versions or resetting onboarding:
 
 ```powershell
 $env:HA_VERSION = "2026.9.0"
-docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-e2e.yml up -d
+docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml -f docker-compose.ha-scripted.yml up -d
 ```
 
 The pipeline's TTS URL returns mp3 by default, so the harness needs `ffmpeg` on the host to decode it before transcription. It is present on GitHub's Ubuntu runners; install it locally if `ffmpeg -version` fails.
 
-Each run writes input WAVs, TTS output WAVs, event JSON, and `report.md` under `tests/ha_e2e/artifacts/run-<timestamp>/`. Override the location with `HA_E2E_ARTIFACT_DIR`. Other useful variables are `HA_E2E_BASE_URL`, `HA_E2E_SPEACHES_URL`, `HA_E2E_STT_MODEL`, `HA_E2E_PROXY_CONTAINER`, and `HA_E2E_HA_CONTAINER`.
+Each run writes input WAVs, TTS output WAVs, event JSON, and `report.md` under `tests/ha_e2e/artifacts/scripted-<timestamp>/`. Override the location with `HA_E2E_ARTIFACT_DIR`. Other useful variables are `HA_E2E_BASE_URL`, `HA_E2E_SPEACHES_URL`, `HA_E2E_STT_MODEL`, `HA_E2E_PROXY_CONTAINER`, and `HA_E2E_HA_CONTAINER`.
 
 The fixture WAVs are committed under `tests/ha_e2e/fixtures/audio/`. They are generated once with Speaches Kokoro, not by the proxy under test, and are 16 kHz mono with trailing silence for Home Assistant's VAD. Regenerate them with Speaches running:
 
@@ -760,7 +760,7 @@ python tests/ha_e2e/generate_fixtures.py
 
 The failure lanes require the Docker CLI: the invalid-STT proxy runs next to the good one, and the streaming-reply lane stops the proxy container to exercise the SIGTERM path, then restarts it for later runs.
 
-The [Home Assistant E2E](.github/workflows/ha-e2e.yml) workflow runs on `workflow_dispatch` and on pull requests labeled `ha-e2e` (not on every push). It is also called by the release workflows: the version bump cannot open a release PR until it passes, and `draft-release.yml` will not create a draft release until it passes against the exact release commit. Publishing the draft therefore cannot ship a release that skipped the Home Assistant check. Set the repository variable `HA_E2E_VERSION` to override the Home Assistant image tag used by release runs.
+The [Home Assistant E2E](.github/workflows/ha-scripted.yml) workflow runs on `workflow_dispatch` and on pull requests labeled `ha-scripted` (not on every push). It is also called by the release workflows: the version bump cannot open a release PR until it passes, and `draft-release.yml` will not create a draft release until it passes against the exact release commit. Publishing the draft therefore cannot ship a release that skipped the Home Assistant check. Set the repository variable `HA_SCRIPTED_VERSION` to override the Home Assistant image tag used by release runs.
 
 Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covered by the Speaches lane. The compose overlay and workflow contain a clearly marked, unwired hook for a later OpenAI HTTP/Realtime lane that runs only by `workflow_dispatch` with an API key secret.
 
@@ -781,7 +781,7 @@ Realtime models (`STT_REALTIME_MODELS` and `TTS_REALTIME_MODELS`) are not covere
 
 In the silent client scenario, the proxy's own log must show the satellite's session waiting for the slot before the idle limit frees it. In the local stuck-client scenario, it must show the satellite's request admitted only after the write limit frees the slot. That case runs on a fourth proxy at limit 1 that logs at debug level, for that line. The OpenAI stuck-client case has no such line, since that proxy must not log its key at debug level, so it checks the write limit and the stop with Realtime TTS. The limit's queueing doesn't depend on the TTS backend. In the restart case, Home Assistant must log the proxy's shutdown error, and a turn must fail after the stop began. A proxy without a limit must never make a request wait. At limit 1, eight transcriptions at once, or three Realtime sessions, must wait at least once. Every turn's timings, its reply's audio and a summary go to `tests/ha_e2e/artifacts/live-<timestamp>/`.
 
-Only `-m ha_live` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_e2e` picks it up. The stack needs an NVIDIA GPU (`HA_LIVE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
+Only `-m ha_live` selects the suite. It has no `integration` marker, so neither the default run nor `-m integration` or `-m ha_scripted` picks it up. The stack needs an NVIDIA GPU (`HA_LIVE_GPU` picks it, default `0`), publishes its ports on `127.0.0.1` only, and reuses the HA E2E stack's model cache volume. Create that volume with `docker volume create wyoming_openai_huggingface-hub` if the HA E2E stack never ran.
 
 ```bash
 docker build -t wyoming_openai:live .

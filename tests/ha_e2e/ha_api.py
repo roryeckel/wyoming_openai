@@ -237,7 +237,7 @@ class HaRestClient:
             time.sleep(1.0)
         raise HaUnavailableError(
             f"Home Assistant did not answer {self.settings.base_url}/manifest.json within {timeout}s "
-            f"({last_error}). Start the stack with docker-compose.ha-e2e.yml first."
+            f"({last_error}). Start the stack with docker-compose.ha-scripted.yml first."
         )
 
     def wait_running(self, timeout: float = READY_TIMEOUT_SECONDS) -> None:

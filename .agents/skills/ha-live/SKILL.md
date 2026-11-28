@@ -23,7 +23,7 @@ A change that does both is a request-shape change, and when unsure, take the
 stricter class. Adding names to the STT prompt (#133) is a request-shape
 change; limiting concurrent requests (#135) is a proxy-behavior change. For
 "neither", say so with the reason, and stop. These classes are separate from
-the `ha-e2e` label: a change can need both.
+the `ha-scripted` label: a change can need both.
 
 Then name the service the change touches (STT, TTS or both) and the request
 mode its changed code is on: for STT, HTTP streamed, HTTP not streamed or

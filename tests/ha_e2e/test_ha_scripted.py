@@ -4,8 +4,8 @@ Run with the HA overlay stack up:
 
     docker build -t wyoming_openai:e2e .
     docker compose -f docker-compose.speaches-cpu.yml -f docker-compose.e2e.yml \
-      -f docker-compose.ha-e2e.yml up -d
-    pytest -m ha_e2e -v --timeout=600
+      -f docker-compose.ha-scripted.yml up -d
+    pytest -m ha_scripted -v --timeout=600
 
 The suite is skipped by default through the `integration` marker.  It is
 test-only: the Home Assistant user and password are generated on a fresh
@@ -57,7 +57,7 @@ from ha_e2e.scenarios import AudioFixture, Scenario, failure_scenario, load_mani
 
 LOGGER = logging.getLogger(__name__)
 
-pytestmark = [pytest.mark.integration, pytest.mark.ha_e2e]
+pytestmark = [pytest.mark.integration, pytest.mark.ha_scripted]
 
 PROXY_STOP_AFTER_TTS_BYTES = 64 * 1024
 PROXY_STOP_ERROR = "Server is shutting down"

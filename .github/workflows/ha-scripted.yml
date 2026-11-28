@@ -1,7 +1,7 @@
-name: Home Assistant E2E
+name: Home Assistant Scripted
 
 # Reusable release gate as well as a manual/PR-label suite.  It is deliberately
-# not run on every push: use workflow_dispatch or add the `ha-e2e` label to a
+# not run on every push: use workflow_dispatch or add the `ha-scripted` label to a
 # pull request.  The release workflows call it with force=true.
 #
 # OpenAI lane hook (not wired): a future workflow_dispatch-only job can pass
@@ -40,23 +40,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: ha-e2e-${{ github.workflow }}-${{ github.ref }}
+  group: ha-scripted-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  ha-e2e:
+  ha-scripted:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       inputs.force ||
       (github.event_name == 'pull_request' &&
-       (contains(github.event.pull_request.labels.*.name, 'ha-e2e') ||
+       (contains(github.event.pull_request.labels.*.name, 'ha-scripted') ||
         contains(github.event.pull_request.labels.*.name, 'release-bump')))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       COMPOSE_PROJECT_NAME: wyoming_openai
       HA_VERSION: ${{ inputs.ha_version || '2026.10.1' }}
-      HA_E2E_ARTIFACT_DIR: ${{ github.workspace }}/ha-e2e-artifacts
+      HA_E2E_ARTIFACT_DIR: ${{ github.workspace }}/ha-scripted-artifacts
     steps:
       - uses: actions/checkout@v6
         with:
@@ -85,7 +85,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: hf-cache
-          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-e2e.yml') }}
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-scripted.yml') }}
           restore-keys: hf-
 
       - name: Seed docker volume from cache
@@ -115,7 +115,7 @@ jobs:
           docker compose \
             -f docker-compose.speaches-cpu.yml \
             -f docker-compose.e2e.yml \
-            -f docker-compose.ha-e2e.yml up -d
+            -f docker-compose.ha-scripted.yml up -d
 
       - name: Wait for Home Assistant and both proxies
         run: |
@@ -123,20 +123,20 @@ jobs:
             if curl -fsS http://127.0.0.1:8123/api/onboarding > /dev/null \
               && nc -z 127.0.0.1 10300 \
               && nc -z 127.0.0.1 10301; then
-              echo "HA E2E stack ready after ${i} polls"
+              echo "Home Assistant stack ready after ${i} polls"
               exit 0
             fi
             sleep 5
           done
-          echo "HA E2E stack did not become ready in time"
+          echo "Home Assistant stack did not become ready in time"
           docker compose \
             -f docker-compose.speaches-cpu.yml \
             -f docker-compose.e2e.yml \
-            -f docker-compose.ha-e2e.yml logs
+            -f docker-compose.ha-scripted.yml logs
           exit 1
 
-      - name: Run Home Assistant E2E tests
-        run: pytest -m ha_e2e -v --timeout=600
+      - name: Run the scripted Home Assistant tests
+        run: pytest -m ha_scripted -v --timeout=600
 
       - name: Capture logs on failure
         if: failure()
@@ -145,15 +145,15 @@ jobs:
           docker compose \
             -f docker-compose.speaches-cpu.yml \
             -f docker-compose.e2e.yml \
-            -f docker-compose.ha-e2e.yml logs \
+            -f docker-compose.ha-scripted.yml logs \
             > "$HA_E2E_ARTIFACT_DIR/compose.log" 2>&1 || true
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ha-e2e-artifacts
-          path: ha-e2e-artifacts/
+          name: ha-scripted-artifacts
+          path: ha-scripted-artifacts/
           if-no-files-found: ignore
 
       # always(): keep the models even when tests fail, so a rerun of a failed
@@ -173,7 +173,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: hf-cache
-          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-e2e.yml') }}
+          key: hf-${{ hashFiles('docker-compose.speaches-cpu.yml', 'docker-compose.e2e.yml', 'docker-compose.ha-scripted.yml') }}
 
       - name: Tear down
         if: always()
@@ -181,4 +181,4 @@ jobs:
           docker compose \
             -f docker-compose.speaches-cpu.yml \
             -f docker-compose.e2e.yml \
-            -f docker-compose.ha-e2e.yml down -v
+            -f docker-compose.ha-scripted.yml down -v

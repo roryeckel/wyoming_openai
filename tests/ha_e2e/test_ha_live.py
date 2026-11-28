@@ -4,7 +4,7 @@ The models are real, so the checks are fuzzy and a failure needs reading: tests/
 Tests", says how to run each lane and how to read the results.
 
 Only an explicit `-m ha_live` selects the suite: it carries no `integration` marker, so neither the default run nor
-`-m integration` or `-m ha_e2e`, which CI runs without this stack, picks it up.
+`-m integration` or `-m ha_scripted`, which CI runs without this stack, picks it up.
 
 Home Assistant's built-in conversation agent controls the demo integration's devices from speech that Kokoro
 synthesizes. Each pipeline run opens its own Wyoming connections to the proxy, so turns run together are what
